@@ -1,0 +1,130 @@
+set timeout 20
+log_user 1
+set root_dir $env(ROOT_DIR)
+set mode $env(SURFSMOKE_MODE)
+set context $env(SURFSMOKE_CONTEXT)
+set kubeconfig $env(KUBECONFIG_PATH)
+
+spawn env TERM=xterm-256color COLUMNS=140 LINES=32 go run . -kubeconfig $kubeconfig -context $context
+stty rows 32 columns 140
+
+expect {
+    -re "surfsk8s . select contexts" {}
+    timeout { exit 2 }
+}
+
+if {$mode == "live"} {
+    send -- "\r"
+    expect {
+        -re "surfsk8s . resource catalog" {}
+        timeout { exit 3 }
+    }
+
+    send -- "\r"
+    expect {
+        -re "surfsk8s . Favourites" {}
+        timeout { exit 4 }
+    }
+
+    send -- "\r"
+    expect {
+        -re "surfsk8s . pods" {}
+        timeout { exit 5 }
+    }
+    expect {
+        -re "sort:default" {}
+        timeout { exit 20 }
+    }
+    send -- "o"
+    expect {
+        -re "sort:name" {}
+        timeout { exit 21 }
+    }
+    send -- "O"
+    expect {
+        -re "sort:name↓|sort:name" {}
+        timeout { exit 22 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . Favourites" {}
+        timeout { exit 6 }
+    }
+
+    send -- "j\r"
+    expect {
+        -re "surfsk8s . deployments" {}
+        timeout { exit 7 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . Favourites" {}
+        timeout { exit 8 }
+    }
+
+    send -- "j\r"
+    expect {
+        -re "surfsk8s . services" {}
+        timeout { exit 9 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . Favourites" {}
+        timeout { exit 10 }
+    }
+
+    send -- "j\r"
+    expect {
+        -re "surfsk8s . nodes" {}
+        timeout { exit 11 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . Favourites" {}
+        timeout { exit 12 }
+    }
+
+    send -- "\033"
+    expect {
+        -re "surfsk8s . resource catalog" {}
+        timeout { exit 13 }
+    }
+    expect {
+        -re ":ok|discovery-partial|decode-errors" {}
+        timeout { exit 14 }
+    }
+    after 6000
+
+    send -- "G\r"
+    expect {
+        -re "surfsk8s . CRDs" {}
+        timeout { exit 15 }
+    }
+
+    after 500
+    send -- "/"
+    after 300
+    send -- "*service*serving.knative.dev*"
+    after 300
+    send -- "\r"
+    expect {
+        -re "filter:\*service\*serving.knative.dev\*|surfsk8s . CRDs" {}
+        timeout { exit 16 }
+    }
+    send -- "g\r"
+    expect {
+        -re "surfsk8s . resource details" {}
+        timeout { exit 17 }
+    }
+    expect {
+        -re "Plural:      services" {}
+        timeout { exit 18 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . CRDs" {}
+        timeout { exit 19 }
+    }
+}
+send -- "q"
+expect eof
