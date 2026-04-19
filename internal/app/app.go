@@ -42,6 +42,8 @@ const (
 	screenPodDetails
 	screenResourceDetails
 	screenCommands
+	screenActionPicker
+	screenConfirmAction
 )
 
 type pickerMode int
@@ -86,6 +88,15 @@ type App struct {
 	activity      string
 	connecting    bool
 	inputMode     inputMode
+
+	actionReturnScreen  screen
+	pendingAction       pendingAction
+	pendingRemotePort   int
+	actionPickerTitle   string
+	actionPickerFooter  string
+	actionPickerOptions []actionOption
+	confirmDescription  string
+	confirmRun          func() tea.Cmd
 
 	contexts        []cluster.ContextInfo
 	visibleContexts []cluster.ContextInfo
@@ -250,15 +261,17 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (a *App) View() string {
 	title, body, footer := a.currentView()
+	inputLabel, inputValue, inputActive := a.statusInputState()
 	status := a.statusBar.View(components.StatusBarState{
-		Clusters:     a.manager.Statuses(),
-		Namespace:    a.currentNamespaceLabel(),
-		Filter:       a.statusFilterValue(),
-		VisibleRows:  a.visibleRows,
-		TotalRows:    a.totalRows,
-		Footer:       footer,
-		FilterActive: a.filter.Active() && a.inputMode.usesFilterLabel(),
-		Activity:     a.activity,
+		Clusters:    a.manager.Statuses(),
+		Namespace:   a.currentNamespaceLabel(),
+		InputLabel:  inputLabel,
+		InputValue:  inputValue,
+		InputActive: inputActive,
+		VisibleRows: a.visibleRows,
+		TotalRows:   a.totalRows,
+		Footer:      footer,
+		Activity:    a.activity,
 	})
 
 	sections := []string{theme.HeaderStyle.Render(title)}
@@ -274,8 +287,12 @@ func (a *App) View() string {
 
 func (a *App) updateFilter(msg tea.Msg) tea.Cmd {
 	switch a.inputMode {
+	case inputModeCommand:
+		return a.updateCommandPrompt(msg)
 	case inputModeScale:
 		return a.updateScalePrompt(msg)
+	case inputModeLocalPort:
+		return a.updateLocalPortPrompt(msg)
 	default:
 		return a.updateSearchPrompt(msg)
 	}
@@ -288,12 +305,14 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 	case "ctrl+c", "q":
 		return tea.Quit
 	case ":":
-		if a.screen != screenContexts {
+		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction {
 			a.openCommands()
 		}
 		return nil
 	case "/":
-		a.openFilter()
+		if a.screen != screenActionPicker && a.screen != screenConfirmAction {
+			a.openFilter()
+		}
 		return nil
 	}
 
@@ -314,6 +333,10 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		return a.updateResourceDetailKeys(msg)
 	case screenCommands:
 		return a.updateCommandKeys(msg)
+	case screenActionPicker:
+		return a.updateActionPickerKeys(msg)
+	case screenConfirmAction:
+		return a.updateConfirmActionKeys(msg)
 	}
 
 	return nil
@@ -615,7 +638,11 @@ func (a *App) currentView() (string, string, string) {
 	case screenResourceDetails:
 		return "surfsk8s · resource details", a.renderResourceDetails(), a.resourceDetailFooter()
 	case screenCommands:
-		return "surfsk8s · commands", a.navTable.View(), "type to filter  enter run  esc clear/close"
+		return "surfsk8s · commands", a.navTable.View(), "type to filter  j/k move  g/G edge  enter run  esc clear/close"
+	case screenActionPicker:
+		return "surfsk8s · " + a.actionPickerTitle, a.navTable.View(), a.actionPickerFooter
+	case screenConfirmAction:
+		return "surfsk8s · confirm action", a.renderConfirmAction(), "enter confirm  esc cancel"
 	default:
 		return "surfsk8s", "", ""
 	}
@@ -629,9 +656,11 @@ func (a *App) openFilter() {
 		prompt = ":"
 		placeholder = "command"
 		query = a.commandQuery
+		a.inputMode = inputModeCommand
+	} else {
+		a.inputMode = inputModeSearch
 	}
 
-	a.inputMode = inputModeSearch
 	a.filter.SetPrompt(prompt)
 	a.filter.SetPlaceholder(placeholder)
 	a.filter.SetValue(query)
@@ -695,6 +724,10 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 		a.refreshActiveResourceDetails(now)
 	case screenCommands:
 		a.refreshCommands()
+	case screenActionPicker:
+		a.refreshActionPicker()
+	case screenConfirmAction:
+		return
 	}
 }
 

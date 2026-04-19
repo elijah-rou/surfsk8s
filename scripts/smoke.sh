@@ -123,6 +123,7 @@ cd "$root_dir"
 set +e
 SURFSMOKE_MODE="$mode" \
 SURFSMOKE_CONTEXT="$context_name" \
+SURFSMOKE_FIXTURE="$apply_fixture" \
 KUBECONFIG_PATH="$kubeconfig_path" \
 ROOT_DIR="$root_dir" \
 expect "$root_dir/scripts/smoke.expect" >"$raw_output" 2>&1
@@ -154,6 +155,13 @@ if [[ "$mode" == "live" ]]; then
   grep -q "sort:name" "$sanitized_output"
   grep -q "\*service\*serving.knative.dev\*" "$sanitized_output"
   grep -q "serving.knative.dev\|Plural:      services" "$sanitized_output"
+  grep -q "surfsk8s · commands" "$sanitized_output"
+  if [[ "$apply_fixture" == "true" ]]; then
+    grep -q "surfsk8s · select container" "$sanitized_output"
+    grep -q "surfsk8s · select service port" "$sanitized_output"
+    grep -q "surfsk8s · confirm action" "$sanitized_output"
+    grep -q "local-port>" "$sanitized_output"
+  fi
   echo "smoke: live context '$context_name' ($live_context_source, fixture=$apply_fixture) OK"
 else
   grep -q "surfsk8s · select contexts" "$sanitized_output"

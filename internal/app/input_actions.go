@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ const (
 	inputModeSearch inputMode = iota
 	inputModeCommand
 	inputModeScale
+	inputModeLocalPort
 )
 
 type actionResultMsg struct {
@@ -25,20 +25,23 @@ type actionResultMsg struct {
 	err         error
 }
 
-func (m inputMode) usesFilterLabel() bool {
-	switch m {
-	case inputModeSearch, inputModeCommand:
-		return true
-	default:
-		return false
+func (a *App) statusInputState() (string, string, bool) {
+	if a.filter.Active() {
+		switch a.inputMode {
+		case inputModeCommand:
+			return "cmd", a.filter.Value(), true
+		case inputModeScale:
+			return "replicas", a.filter.Value(), true
+		case inputModeLocalPort:
+			return "local-port", a.filter.Value(), true
+		default:
+			return "filter", a.filter.Value(), true
+		}
 	}
-}
-
-func (a *App) statusFilterValue() string {
-	if !a.inputMode.usesFilterLabel() {
-		return a.currentQuery()
+	if a.screen == screenCommands {
+		return "cmd", a.commandQuery, false
 	}
-	return a.currentQuery()
+	return "filter", a.currentQuery(), false
 }
 
 func (a *App) updateSearchPrompt(msg tea.Msg) tea.Cmd {
@@ -65,14 +68,60 @@ func (a *App) updateSearchPrompt(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
+func (a *App) updateCommandPrompt(msg tea.Msg) tea.Cmd {
+	switch typed := msg.(type) {
+	case tea.KeyMsg:
+		switch typed.String() {
+		case "esc":
+			if strings.TrimSpace(a.commandQuery) != "" {
+				a.commandQuery = ""
+				a.filter.Clear()
+				a.refreshCommands()
+				return nil
+			}
+			a.inputMode = inputModeSearch
+			a.filter.Deactivate()
+			a.screen = a.prevScreen
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		case "j", "down":
+			a.navTable.MoveDown(1)
+			return nil
+		case "k", "up":
+			a.navTable.MoveUp(1)
+			return nil
+		case "g", "home":
+			a.navTable.MoveTop()
+			return nil
+		case "G", "end":
+			a.navTable.MoveBottom()
+			return nil
+		case "enter":
+			index := a.navTable.SelectedIndex()
+			if index < 0 || index >= len(a.visibleCommands) {
+				a.statusMessage = "no command selected"
+				return nil
+			}
+			command := a.visibleCommands[index]
+			a.inputMode = inputModeSearch
+			a.filter.Deactivate()
+			command.Run(a)
+			return nil
+		}
+	}
+
+	cmd := a.filter.Update(msg)
+	a.commandQuery = a.filter.Value()
+	a.refreshCommands()
+	return cmd
+}
+
 func (a *App) updateScalePrompt(msg tea.Msg) tea.Cmd {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
 		case "esc":
-			a.inputMode = inputModeSearch
-			a.filter.Clear()
-			a.filter.Deactivate()
+			a.cancelActionFlow()
 			return nil
 		case "enter":
 			value := strings.TrimSpace(a.filter.Value())
@@ -83,7 +132,7 @@ func (a *App) updateScalePrompt(msg tea.Msg) tea.Cmd {
 			}
 			a.inputMode = inputModeSearch
 			a.filter.Deactivate()
-			return a.runScaleDeployment(replicas)
+			return a.confirmScaleDeployment(replicas)
 		}
 	}
 	return a.filter.Update(msg)
@@ -98,6 +147,7 @@ func (a *App) openScalePrompt() tea.Cmd {
 		a.statusMessage = "deployment disappeared"
 		return nil
 	}
+	a.actionReturnScreen = a.screen
 	currentReplicas := actions.DesiredReplicas(a.activeDeployment.Deployment)
 	a.inputMode = inputModeScale
 	a.filter.SetPrompt("replicas> ")
@@ -117,55 +167,117 @@ func runProcessCommand(cmd *exec.Cmd, description string) tea.Cmd {
 }
 
 func (a *App) runExecPod() tea.Cmd {
-	cmd, description, err := a.executor.ExecPodShell(a.activePod)
+	containers, err := actions.PodContainerNames(a.activePod.Pod)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return nil
 	}
-	return runProcessCommand(cmd, description)
+	if len(containers) == 1 {
+		return a.runExecPodWithContainer(containers[0])
+	}
+	return a.openPodContainerPicker(containers)
 }
 
 func (a *App) runEditPod() tea.Cmd {
-	cmd, description, err := a.executor.EditPod(a.activePod)
+	_, description, err := a.executor.EditPod(a.activePod)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return nil
 	}
-	return runProcessCommand(cmd, description)
+	return a.openConfirmAction(description, func() tea.Cmd {
+		details, ok := a.store.PodDetailsByKey(a.activePod.Row.Key, time.Now())
+		if !ok {
+			a.statusMessage = "pod vanished during refresh"
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activePod = details
+		cmd, description, err := a.executor.EditPod(details)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		return runProcessCommand(cmd, description)
+	})
 }
 
 func (a *App) runPortForwardPod() tea.Cmd {
-	cmd, description, err := a.executor.PortForwardPod(a.activePod)
+	choices, err := actions.PodPortChoices(a.activePod.Pod)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return nil
 	}
-	return runProcessCommand(cmd, description)
+	if len(choices) == 1 {
+		return a.openLocalPortPrompt(pendingActionPortForwardPod, choices[0].Port)
+	}
+	return a.openPodPortPicker(choices)
 }
 
 func (a *App) runEditResource() tea.Cmd {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		cmd, description, err := a.executor.EditDeployment(a.activeDeployment)
+		_, description, err := a.executor.EditDeployment(a.activeDeployment)
 		if err != nil {
 			a.statusMessage = err.Error()
 			return nil
 		}
-		return runProcessCommand(cmd, description)
+		return a.openConfirmAction(description, func() tea.Cmd {
+			details, ok := a.store.DeploymentDetailsByKey(a.activeDeployment.Row.Key, time.Now())
+			if !ok {
+				a.statusMessage = "resource vanished during refresh"
+				a.refreshCurrentScreen(time.Now())
+				return nil
+			}
+			a.activeDeployment = details
+			cmd, description, err := a.executor.EditDeployment(details)
+			if err != nil {
+				a.statusMessage = err.Error()
+				return nil
+			}
+			return runProcessCommand(cmd, description)
+		})
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		cmd, description, err := a.executor.EditService(a.activeService)
+		_, description, err := a.executor.EditService(a.activeService)
 		if err != nil {
 			a.statusMessage = err.Error()
 			return nil
 		}
-		return runProcessCommand(cmd, description)
+		return a.openConfirmAction(description, func() tea.Cmd {
+			details, ok := a.store.ServiceDetailsByKey(a.activeService.Row.Key, time.Now())
+			if !ok {
+				a.statusMessage = "resource vanished during refresh"
+				a.refreshCurrentScreen(time.Now())
+				return nil
+			}
+			a.activeService = details
+			cmd, description, err := a.executor.EditService(details)
+			if err != nil {
+				a.statusMessage = err.Error()
+				return nil
+			}
+			return runProcessCommand(cmd, description)
+		})
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		cmd, description, err := a.executor.EditNode(a.activeNode)
+		_, description, err := a.executor.EditNode(a.activeNode)
 		if err != nil {
 			a.statusMessage = err.Error()
 			return nil
 		}
-		return runProcessCommand(cmd, description)
+		return a.openConfirmAction(description, func() tea.Cmd {
+			details, ok := a.store.NodeDetailsByKey(a.activeNode.Row.Key, time.Now())
+			if !ok {
+				a.statusMessage = "resource vanished during refresh"
+				a.refreshCurrentScreen(time.Now())
+				return nil
+			}
+			a.activeNode = details
+			cmd, description, err := a.executor.EditNode(details)
+			if err != nil {
+				a.statusMessage = err.Error()
+				return nil
+			}
+			return runProcessCommand(cmd, description)
+		})
 	default:
 		a.statusMessage = "edit unsupported for this resource"
 		return nil
@@ -177,21 +289,38 @@ func (a *App) runPortForwardResource() tea.Cmd {
 		a.statusMessage = "port-forward unsupported for this resource"
 		return nil
 	}
-	cmd, description, err := a.executor.PortForwardService(a.activeService)
+	choices, err := actions.ServicePortChoices(a.activeService.Service)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return nil
 	}
-	return runProcessCommand(cmd, description)
+	if len(choices) == 1 {
+		return a.openLocalPortPrompt(pendingActionPortForwardService, choices[0].Port)
+	}
+	return a.openServicePortPicker(choices)
 }
 
-func (a *App) runScaleDeployment(replicas int) tea.Cmd {
-	cmd, description, err := a.executor.ScaleDeployment(a.activeDeployment, replicas)
+func (a *App) confirmScaleDeployment(replicas int) tea.Cmd {
+	_, description, err := a.executor.ScaleDeployment(a.activeDeployment, replicas)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return nil
 	}
-	return runProcessCommand(cmd, description)
+	return a.openConfirmAction(description, func() tea.Cmd {
+		details, ok := a.store.DeploymentDetailsByKey(a.activeDeployment.Row.Key, time.Now())
+		if !ok {
+			a.statusMessage = "resource vanished during refresh"
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activeDeployment = details
+		cmd, description, err := a.executor.ScaleDeployment(details, replicas)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		return runProcessCommand(cmd, description)
+	})
 }
 
 func (a *App) runRestartResource() tea.Cmd {
@@ -199,19 +328,24 @@ func (a *App) runRestartResource() tea.Cmd {
 		a.statusMessage = "restart unsupported for this resource"
 		return nil
 	}
-	cmd, description, err := a.executor.RestartDeployment(a.activeDeployment)
+	_, description, err := a.executor.RestartDeployment(a.activeDeployment)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return nil
 	}
-	return runProcessCommand(cmd, description)
-}
-
-func (a *App) describeAction() string {
-	switch a.inputMode {
-	case inputModeScale:
-		return fmt.Sprintf("scale %s", a.activeDeployment.Row.Name)
-	default:
-		return ""
-	}
+	return a.openConfirmAction(description, func() tea.Cmd {
+		details, ok := a.store.DeploymentDetailsByKey(a.activeDeployment.Row.Key, time.Now())
+		if !ok {
+			a.statusMessage = "resource vanished during refresh"
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activeDeployment = details
+		cmd, description, err := a.executor.RestartDeployment(details)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		return runProcessCommand(cmd, description)
+	})
 }

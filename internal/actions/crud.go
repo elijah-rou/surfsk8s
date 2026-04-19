@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strconv"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +21,11 @@ type Executor struct {
 	kubeconfigPath string
 }
 
+type PortChoice struct {
+	Port  int
+	Label string
+}
+
 func NewExecutor(kubeconfigPath string) *Executor {
 	return &Executor{kubeconfigPath: kubeconfigPath}
 }
@@ -32,8 +38,20 @@ func (e *Executor) ExecPodShell(details state.PodDetails) (*exec.Cmd, string, er
 	if err != nil {
 		return nil, "", err
 	}
+	return e.ExecPodShellInContainer(details, container)
+}
 
-	args := e.baseArgs(details.Row.Cluster)
+func (e *Executor) ExecPodShellInContainer(details state.PodDetails, container string) (*exec.Cmd, string, error) {
+	if details.Pod == nil {
+		return nil, "", fmt.Errorf("pod disappeared")
+	}
+	if !podHasContainer(details.Pod, container) {
+		return nil, "", fmt.Errorf("pod container %q not found", container)
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
 	args = append(args,
 		"exec", "-it",
 		"-n", details.Row.Namespace,
@@ -48,7 +66,10 @@ func (e *Executor) EditPod(details state.PodDetails) (*exec.Cmd, string, error) 
 	if details.Pod == nil {
 		return nil, "", fmt.Errorf("pod disappeared")
 	}
-	args := e.baseArgs(details.Row.Cluster)
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
 	args = append(args, "edit", "-n", details.Row.Namespace, "pod/"+details.Row.Name)
 	return exec.Command("kubectl", args...), fmt.Sprintf("edit pod/%s", details.Row.Name), nil
 }
@@ -61,8 +82,24 @@ func (e *Executor) PortForwardPod(details state.PodDetails) (*exec.Cmd, string, 
 	if err != nil {
 		return nil, "", err
 	}
-	mapping := strconv.Itoa(port) + ":" + strconv.Itoa(port)
-	args := e.baseArgs(details.Row.Cluster)
+	return e.PortForwardPodWithPorts(details, port, port)
+}
+
+func (e *Executor) PortForwardPodWithPorts(details state.PodDetails, localPort int, remotePort int) (*exec.Cmd, string, error) {
+	if details.Pod == nil {
+		return nil, "", fmt.Errorf("pod disappeared")
+	}
+	if err := validatePort(localPort, "local port"); err != nil {
+		return nil, "", err
+	}
+	if err := validatePort(remotePort, "remote port"); err != nil {
+		return nil, "", err
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	mapping := portMapping(localPort, remotePort)
 	args = append(args, "port-forward", "-n", details.Row.Namespace, "pod/"+details.Row.Name, mapping)
 	return exec.Command("kubectl", args...), fmt.Sprintf("port-forward pod/%s %s", details.Row.Name, mapping), nil
 }
@@ -74,7 +111,10 @@ func (e *Executor) ScaleDeployment(details state.DeploymentDetails, replicas int
 	if replicas < 0 {
 		return nil, "", fmt.Errorf("replicas must be >= 0")
 	}
-	args := e.baseArgs(details.Row.Cluster)
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
 	args = append(args,
 		"scale",
 		"-n", details.Row.Namespace,
@@ -88,7 +128,10 @@ func (e *Executor) RestartDeployment(details state.DeploymentDetails) (*exec.Cmd
 	if details.Deployment == nil {
 		return nil, "", fmt.Errorf("deployment disappeared")
 	}
-	args := e.baseArgs(details.Row.Cluster)
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
 	args = append(args, "rollout", "restart", "-n", details.Row.Namespace, "deployment/"+details.Row.Name)
 	return exec.Command("kubectl", args...), fmt.Sprintf("restart deployment/%s", details.Row.Name), nil
 }
@@ -97,7 +140,10 @@ func (e *Executor) EditDeployment(details state.DeploymentDetails) (*exec.Cmd, s
 	if details.Deployment == nil {
 		return nil, "", fmt.Errorf("deployment disappeared")
 	}
-	args := e.baseArgs(details.Row.Cluster)
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
 	args = append(args, "edit", "-n", details.Row.Namespace, "deployment/"+details.Row.Name)
 	return exec.Command("kubectl", args...), fmt.Sprintf("edit deployment/%s", details.Row.Name), nil
 }
@@ -110,8 +156,24 @@ func (e *Executor) PortForwardService(details state.ServiceDetails) (*exec.Cmd, 
 	if err != nil {
 		return nil, "", err
 	}
-	mapping := strconv.Itoa(port) + ":" + strconv.Itoa(port)
-	args := e.baseArgs(details.Row.Cluster)
+	return e.PortForwardServiceWithPorts(details, port, port)
+}
+
+func (e *Executor) PortForwardServiceWithPorts(details state.ServiceDetails, localPort int, remotePort int) (*exec.Cmd, string, error) {
+	if details.Service == nil {
+		return nil, "", fmt.Errorf("service disappeared")
+	}
+	if err := validatePort(localPort, "local port"); err != nil {
+		return nil, "", err
+	}
+	if err := validatePort(remotePort, "remote port"); err != nil {
+		return nil, "", err
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	mapping := portMapping(localPort, remotePort)
 	args = append(args, "port-forward", "-n", details.Row.Namespace, "service/"+details.Row.Name, mapping)
 	return exec.Command("kubectl", args...), fmt.Sprintf("port-forward service/%s %s", details.Row.Name, mapping), nil
 }
@@ -120,7 +182,10 @@ func (e *Executor) EditService(details state.ServiceDetails) (*exec.Cmd, string,
 	if details.Service == nil {
 		return nil, "", fmt.Errorf("service disappeared")
 	}
-	args := e.baseArgs(details.Row.Cluster)
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
 	args = append(args, "edit", "-n", details.Row.Namespace, "service/"+details.Row.Name)
 	return exec.Command("kubectl", args...), fmt.Sprintf("edit service/%s", details.Row.Name), nil
 }
@@ -129,64 +194,113 @@ func (e *Executor) EditNode(details state.NodeDetails) (*exec.Cmd, string, error
 	if details.Node == nil {
 		return nil, "", fmt.Errorf("node disappeared")
 	}
-	args := e.baseArgs(details.Row.Cluster)
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
 	args = append(args, "edit", "node/"+details.Row.Name)
 	return exec.Command("kubectl", args...), fmt.Sprintf("edit node/%s", details.Row.Name), nil
 }
 
-func (e *Executor) baseArgs(contextName string) []string {
+func (e *Executor) baseArgs(contextName string) ([]string, error) {
+	contextName = strings.TrimSpace(contextName)
 	if contextName == "" {
-		panic("actions.Executor.baseArgs: empty contextName")
+		return nil, fmt.Errorf("missing cluster context")
 	}
 	args := make([]string, 0, 4)
 	if e.kubeconfigPath != "" {
 		args = append(args, "--kubeconfig", e.kubeconfigPath)
 	}
 	args = append(args, "--context", contextName)
-	return args
+	return args, nil
+}
+
+func PodContainerNames(pod *corev1.Pod) ([]string, error) {
+	if pod == nil {
+		return nil, fmt.Errorf("pod disappeared")
+	}
+	if len(pod.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("pod has no containers")
+	}
+	names := make([]string, 0, len(pod.Spec.Containers))
+	for _, container := range pod.Spec.Containers {
+		names = append(names, container.Name)
+	}
+	return names, nil
+}
+
+func PodPortChoices(pod *corev1.Pod) ([]PortChoice, error) {
+	if pod == nil {
+		return nil, fmt.Errorf("pod disappeared")
+	}
+	choices := make([]PortChoice, 0, 8)
+	for _, container := range pod.Spec.Containers {
+		for _, port := range container.Ports {
+			if port.ContainerPort <= 0 {
+				continue
+			}
+			choices = append(choices, PortChoice{
+				Port:  int(port.ContainerPort),
+				Label: fmt.Sprintf("%d/%s  (%s)", port.ContainerPort, defaultProtocol(port.Protocol), container.Name),
+			})
+		}
+	}
+	if len(choices) == 0 {
+		return nil, fmt.Errorf("pod has no declared container ports")
+	}
+	return choices, nil
+}
+
+func ServicePortChoices(service *corev1.Service) ([]PortChoice, error) {
+	if service == nil {
+		return nil, fmt.Errorf("service disappeared")
+	}
+	choices := make([]PortChoice, 0, len(service.Spec.Ports))
+	for _, port := range service.Spec.Ports {
+		if port.Port <= 0 {
+			continue
+		}
+		label := fmt.Sprintf("%d/%s", port.Port, defaultProtocol(port.Protocol))
+		if port.Name != "" {
+			label = label + "  (" + port.Name + ")"
+		}
+		choices = append(choices, PortChoice{Port: int(port.Port), Label: label})
+	}
+	if len(choices) == 0 {
+		return nil, fmt.Errorf("service has no declared ports")
+	}
+	return choices, nil
 }
 
 func defaultContainerName(pod *corev1.Pod) (string, error) {
-	if pod == nil {
-		panic("actions.defaultContainerName: nil pod")
-	}
-	if len(pod.Spec.Containers) == 0 {
-		return "", fmt.Errorf("pod has no containers")
+	names, err := PodContainerNames(pod)
+	if err != nil {
+		return "", err
 	}
 	if preferred := pod.Annotations[defaultContainerAnnotation]; preferred != "" {
-		for _, container := range pod.Spec.Containers {
-			if container.Name == preferred {
+		for _, name := range names {
+			if name == preferred {
 				return preferred, nil
 			}
 		}
 	}
-	return pod.Spec.Containers[0].Name, nil
+	return names[0], nil
 }
 
 func firstPodPort(pod *corev1.Pod) (int, error) {
-	if pod == nil {
-		panic("actions.firstPodPort: nil pod")
+	choices, err := PodPortChoices(pod)
+	if err != nil {
+		return 0, err
 	}
-	for _, container := range pod.Spec.Containers {
-		for _, port := range container.Ports {
-			if port.ContainerPort > 0 {
-				return int(port.ContainerPort), nil
-			}
-		}
-	}
-	return 0, fmt.Errorf("pod has no declared container ports")
+	return choices[0].Port, nil
 }
 
 func firstServicePort(service *corev1.Service) (int, error) {
-	if service == nil {
-		panic("actions.firstServicePort: nil service")
+	choices, err := ServicePortChoices(service)
+	if err != nil {
+		return 0, err
 	}
-	for _, port := range service.Spec.Ports {
-		if port.Port > 0 {
-			return int(port.Port), nil
-		}
-	}
-	return 0, fmt.Errorf("service has no declared ports")
+	return choices[0].Port, nil
 }
 
 func DesiredReplicas(deployment *appsv1.Deployment) int {
@@ -197,4 +311,34 @@ func DesiredReplicas(deployment *appsv1.Deployment) int {
 		return 1
 	}
 	return int(*deployment.Spec.Replicas)
+}
+
+func podHasContainer(pod *corev1.Pod, containerName string) bool {
+	if pod == nil {
+		return false
+	}
+	for _, container := range pod.Spec.Containers {
+		if container.Name == containerName {
+			return true
+		}
+	}
+	return false
+}
+
+func validatePort(port int, field string) error {
+	if port <= 0 || port > 65535 {
+		return fmt.Errorf("%s must be between 1 and 65535", field)
+	}
+	return nil
+}
+
+func portMapping(localPort int, remotePort int) string {
+	return strconv.Itoa(localPort) + ":" + strconv.Itoa(remotePort)
+}
+
+func defaultProtocol(protocol corev1.Protocol) string {
+	if protocol == "" {
+		return string(corev1.ProtocolTCP)
+	}
+	return string(protocol)
 }

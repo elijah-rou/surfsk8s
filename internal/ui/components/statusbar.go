@@ -18,17 +18,18 @@ type ClusterStatus struct {
 }
 
 type StatusBarState struct {
-	Clusters     []ClusterStatus
-	Namespace    string
-	Filter       string
-	VisibleRows  int
-	TotalRows    int
-	Footer       string
-	FilterActive bool
-	Activity     string
+	Clusters    []ClusterStatus
+	Namespace   string
+	InputLabel  string
+	InputValue  string
+	InputActive bool
+	VisibleRows int
+	TotalRows   int
+	Footer      string
+	Activity    string
 }
 
-// StatusBar shows cluster connection health, active context, namespace, and filter state.
+// StatusBar shows cluster connection health, active context, namespace, and input state.
 type StatusBar struct{}
 
 func NewStatusBar() StatusBar {
@@ -49,14 +50,18 @@ func (s StatusBar) View(state StatusBarState) string {
 	}
 	parts = append(parts, theme.ClusterLabel.Render(namespace))
 
-	filter := "filter:off"
-	if strings.TrimSpace(state.Filter) != "" {
-		filter = "filter:" + state.Filter
+	inputLabel := state.InputLabel
+	if inputLabel == "" {
+		inputLabel = "filter"
 	}
-	if state.FilterActive {
-		filter = lipgloss.NewStyle().Underline(true).Render(filter)
+	input := inputLabel + ":off"
+	if strings.TrimSpace(state.InputValue) != "" {
+		input = inputLabel + ":" + state.InputValue
 	}
-	parts = append(parts, filter)
+	if state.InputActive {
+		input = lipgloss.NewStyle().Underline(true).Render(input)
+	}
+	parts = append(parts, input)
 
 	parts = append(parts, fmt.Sprintf("rows:%d/%d", state.VisibleRows, state.TotalRows))
 	if state.Footer != "" {

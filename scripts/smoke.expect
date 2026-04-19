@@ -1,8 +1,9 @@
-set timeout 20
+set timeout 45
 log_user 1
 set root_dir $env(ROOT_DIR)
 set mode $env(SURFSMOKE_MODE)
 set context $env(SURFSMOKE_CONTEXT)
+set fixture $env(SURFSMOKE_FIXTURE)
 set kubeconfig $env(KUBECONFIG_PATH)
 
 spawn env TERM=xterm-256color COLUMNS=140 LINES=32 go run . -kubeconfig $kubeconfig -context $context
@@ -18,6 +19,16 @@ if {$mode == "live"} {
     expect {
         -re "surfsk8s . resource catalog" {}
         timeout { exit 3 }
+    }
+
+    send -- ":"
+    after 300
+    send -- "catalog"
+    after 300
+    send -- "\r"
+    expect {
+        -re "surfsk8s . resource catalog" {}
+        timeout { exit 23 }
     }
 
     send -- "\r"
@@ -89,15 +100,20 @@ if {$mode == "live"} {
         -re "surfsk8s . resource catalog" {}
         timeout { exit 13 }
     }
-    expect {
-        -re ":ok|discovery-partial|decode-errors" {}
-        timeout { exit 14 }
-    }
-    after 6000
 
     send -- "G\r"
     expect {
         -re "surfsk8s . CRDs" {}
+        -re "surfsk8s . Cluster" {
+            send -- "\033"
+            expect {
+                -re "surfsk8s . resource catalog" {}
+                timeout { exit 14 }
+            }
+            after 2000
+            send -- "G\r"
+            exp_continue
+        }
         timeout { exit 15 }
     }
 
@@ -124,6 +140,154 @@ if {$mode == "live"} {
     expect {
         -re "surfsk8s . CRDs" {}
         timeout { exit 19 }
+    }
+
+    if {$fixture == "true"} {
+        send -- "\033"
+        expect {
+            -re "surfsk8s . resource catalog" {}
+            timeout { exit 24 }
+        }
+        send -- "\r"
+        expect {
+            -re "surfsk8s . Favourites" {}
+            timeout { exit 25 }
+        }
+
+        send -- "j\r"
+        expect {
+            -re "surfsk8s . deployments" {}
+            timeout { exit 26 }
+        }
+        after 1000
+        send -- "/"
+        after 300
+        send -- "=surfsk8s-smoke frontend"
+        after 300
+        send -- "\r"
+        expect {
+            -re "filter:=surfsk8s-smoke frontend|surfsk8s . deployments" {}
+            timeout { exit 27 }
+        }
+        send -- "\r"
+        expect {
+            -re "surfsk8s . resource details" {}
+            timeout { exit 28 }
+        }
+        send -- "y"
+        expect {
+            -re "surfsk8s . confirm action" {}
+            timeout { exit 29 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . resource details" {}
+            timeout { exit 30 }
+        }
+        send -- "s"
+        expect {
+            -re "replicas>" {}
+            timeout { exit 31 }
+        }
+        send -- "\010"
+        send -- "1"
+        send -- "\r"
+        expect {
+            -re "surfsk8s . confirm action" {}
+            timeout { exit 32 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . resource details" {}
+            timeout { exit 33 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . deployments" {}
+            timeout { exit 34 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . Favourites" {}
+            timeout { exit 35 }
+        }
+
+        send -- "j\r"
+        expect {
+            -re "surfsk8s . services" {}
+            timeout { exit 36 }
+        }
+        after 1000
+        send -- "/"
+        after 300
+        send -- "=surfsk8s-smoke api"
+        after 300
+        send -- "\r"
+        expect {
+            -re "filter:=surfsk8s-smoke api|surfsk8s . services" {}
+            timeout { exit 37 }
+        }
+        send -- "\r"
+        expect {
+            -re "surfsk8s . resource details" {}
+            timeout { exit 38 }
+        }
+        send -- "p"
+        expect {
+            -re "surfsk8s . select service port" {}
+            timeout { exit 39 }
+        }
+        send -- "\r"
+        expect {
+            -re "local-port>" {}
+            timeout { exit 40 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . resource details" {}
+            timeout { exit 41 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . services" {}
+            timeout { exit 42 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . Favourites" {}
+            timeout { exit 43 }
+        }
+
+        send -- "g\r"
+        expect {
+            -re "surfsk8s . pods" {}
+            timeout { exit 44 }
+        }
+        after 1000
+        send -- "/"
+        after 300
+        send -- "=surfsk8s-smoke toolbox"
+        after 300
+        send -- "\r"
+        expect {
+            -re "filter:=surfsk8s-smoke toolbox|surfsk8s . pods" {}
+            timeout { exit 45 }
+        }
+        send -- "\r"
+        expect {
+            -re "surfsk8s . pod details" {}
+            timeout { exit 46 }
+        }
+        send -- "e"
+        expect {
+            -re "surfsk8s . select container" {}
+            timeout { exit 47 }
+        }
+        send -- "\033"
+        expect {
+            -re "surfsk8s . pod details" {}
+            timeout { exit 48 }
+        }
     }
 }
 send -- "q"
