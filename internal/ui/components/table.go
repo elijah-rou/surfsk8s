@@ -64,8 +64,15 @@ type Table struct {
 	selectionColFrom int
 
 	columnWidthStyles []lipgloss.Style
+	columnSpacePads   []string
+	columnStyleKinds  []tableDataStyleKind
 	dividerPlain      string
 	dividerSelected   string
+	headerCache       string
+	headerCacheStart  int
+	headerCacheEnd    int
+	headerCacheHeight int
+	headerCacheVariant TableVariant
 }
 
 func NewTable(columns []Column) Table {
@@ -77,6 +84,7 @@ func NewTable(columns []Column) Table {
 
 func (t *Table) SetVariant(variant TableVariant) {
 	t.variant = variant
+	t.headerCache = ""
 }
 
 func (t *Table) SetSelectionMode(mode TableSelectionMode) {
@@ -116,8 +124,11 @@ func (t *Table) SetColumns(columns []Column) {
 	}
 	t.columns = columns
 	t.columnWidthStyles = nil
+	t.columnSpacePads = nil
+	t.columnStyleKinds = nil
 	t.dividerPlain = ""
 	t.dividerSelected = ""
+	t.headerCache = ""
 	t.clampColumnCursor()
 	t.clampHorizontalViewport()
 }
@@ -158,6 +169,7 @@ func (t *Table) SetSize(width int, height int) {
 	}
 	t.width = width
 	t.height = height
+	t.headerCache = ""
 	t.clampViewport()
 	t.clampHorizontalViewport()
 }
@@ -267,31 +279,49 @@ func (t *Table) View() string {
 		return ""
 	}
 
-	header := t.renderHeader()
-	lines := make([]string, 0, len(header)+t.visibleHeight())
-	lines = append(lines, header...)
+	header := t.renderHeaderString()
+	var b strings.Builder
+	b.Grow(len(header) + t.visibleHeight()*max(1, t.rowWidth()+1))
+	b.WriteString(header)
 
 	if t.rowCount == 0 {
-		lines = append(lines, theme.Muted.Render(t.emptyMessage))
-		return strings.Join(lines, "\n")
+		if header != "" {
+			b.WriteByte('\n')
+		}
+		b.WriteString(theme.Muted.Render(t.emptyMessage))
+		return b.String()
 	}
 
 	start, end := t.visibleRange()
 	windowRows := t.windowRows(start, end)
 	for idx := range windowRows {
+		if header != "" || idx > 0 {
+			b.WriteByte('\n')
+		}
 		absoluteIndex := start + idx
-		lines = append(lines, t.renderDataRow(windowRows[idx], absoluteIndex == t.cursor))
+		b.WriteString(t.renderDataRow(windowRows[idx], absoluteIndex == t.cursor))
 	}
 
-	return strings.Join(lines, "\n")
+	return b.String()
 }
 
 func (t *Table) renderHeader() []string {
+	header := t.renderHeaderString()
+	if header == "" {
+		return nil
+	}
+	return strings.Split(header, "\n")
+}
+
+func (t *Table) renderHeaderString() string {
 	if t.variant == TableVariantSimple {
-		return []string{headerStyle().Render(t.renderSimpleRow(t.headerCells(), false))}
+		return headerStyle().Render(t.renderSimpleRow(t.headerCells(), false))
 	}
 	start, end := t.visibleColumnRange()
 	height := t.headerHeight()
+	if t.headerCache != "" && t.headerCacheStart == start && t.headerCacheEnd == end && t.headerCacheHeight == height && t.headerCacheVariant == t.variant {
+		return t.headerCache
+	}
 	lines := make([]string, 0, height+1)
 	for line := 0; line < height; line++ {
 		cells := make([]string, 0, end-start)
@@ -306,7 +336,12 @@ func (t *Table) renderHeader() []string {
 		lines = append(lines, t.renderHeaderLine(cells, start))
 	}
 	lines = append(lines, t.renderDivider(start, end))
-	return lines
+	t.headerCache = strings.Join(lines, "\n")
+	t.headerCacheStart = start
+	t.headerCacheEnd = end
+	t.headerCacheHeight = height
+	t.headerCacheVariant = t.variant
+	return t.headerCache
 }
 
 func (t *Table) renderHeaderLine(cells []string, start int) string {
@@ -351,12 +386,16 @@ func (t *Table) renderColumnDivider(start int, end int, join string) string {
 }
 
 func (t *Table) ensureCellWidthStyles() {
-	if len(t.columnWidthStyles) == len(t.columns) && len(t.columns) > 0 {
+	if len(t.columnWidthStyles) == len(t.columns) && len(t.columnSpacePads) == len(t.columns) && len(t.columnStyleKinds) == len(t.columns) && len(t.columns) > 0 {
 		return
 	}
 	t.columnWidthStyles = make([]lipgloss.Style, len(t.columns))
+	t.columnSpacePads = make([]string, len(t.columns))
+	t.columnStyleKinds = make([]tableDataStyleKind, len(t.columns))
 	for i, col := range t.columns {
 		t.columnWidthStyles[i] = lipgloss.NewStyle().Width(col.Width).MaxWidth(col.Width).Align(lipgloss.Left)
+		t.columnSpacePads[i] = strings.Repeat(" ", max(1, col.Width))
+		t.columnStyleKinds[i] = classifyColumnStyleKind(col.Title)
 	}
 }
 
@@ -375,29 +414,31 @@ func (t *Table) renderDataRow(cells []string, selected bool) string {
 	t.ensureCellWidthStyles()
 	t.ensureRichDividers()
 	start, end := t.visibleColumnRange()
-	parts := make([]string, 0, (end-start)*2-1)
+	var b strings.Builder
+	b.Grow(t.rowWidth() + 16)
 	for idx, column := range t.columns[start:end] {
 		absoluteColumn := start + idx
 		cell := ""
 		if absoluteColumn < len(cells) {
 			cell = truncateCell(cells[absoluteColumn], column.Width)
 		}
-
-		style := t.columnWidthStyles[absoluteColumn]
-		if selected {
-			style = style.Inherit(tableRowSelectedStyle)
+		kind := t.columnStyleKinds[absoluteColumn]
+		if !selected && kind == tableDataStyleNone {
+			b.WriteString(cell)
+			t.writePaddingSpaces(&b, absoluteColumn, column.Width-ansi.StringWidth(cell))
+		} else {
+			padded := t.padCellRight(cell, absoluteColumn)
+			b.WriteString(t.renderPaddedCell(padded, absoluteColumn, selected))
 		}
-		styled := dataStyleForColumn(column.Title, cell).Inherit(style)
-		parts = append(parts, styled.Render(cell))
 		if idx < end-start-1 {
 			if selected {
-				parts = append(parts, t.dividerSelected)
+				b.WriteString(t.dividerSelected)
 			} else {
-				parts = append(parts, t.dividerPlain)
+				b.WriteString(t.dividerPlain)
 			}
 		}
 	}
-	return strings.Join(parts, "")
+	return b.String()
 }
 
 func (t *Table) headerCells() []string {
@@ -411,20 +452,26 @@ func (t *Table) headerCells() []string {
 func (t *Table) renderSimpleRow(cells []string, selected bool) string {
 	t.ensureCellWidthStyles()
 	start, end := t.visibleColumnRange()
-	parts := make([]string, 0, end-start)
+	var b strings.Builder
+	b.Grow(t.rowWidth() + 16)
 	for idx, column := range t.columns[start:end] {
 		absoluteColumn := start + idx
 		cell := ""
 		if absoluteColumn < len(cells) {
 			cell = truncateCell(cells[absoluteColumn], column.Width)
 		}
-		style := t.columnWidthStyles[absoluteColumn]
 		if selected {
-			style = style.Inherit(tableRowSelectedStyle)
+			padded := t.padCellRight(cell, absoluteColumn)
+			b.WriteString(tableRowSelectedStyle.Render(padded))
+		} else {
+			b.WriteString(cell)
+			t.writePaddingSpaces(&b, absoluteColumn, column.Width-ansi.StringWidth(cell))
 		}
-		parts = append(parts, style.Render(cell))
+		if idx < end-start-1 {
+			b.WriteByte(' ')
+		}
 	}
-	return strings.Join(parts, " ")
+	return b.String()
 }
 
 func truncateCell(value string, width int) string {
@@ -499,18 +546,42 @@ func headerStyle() lipgloss.Style {
 	return theme.HeaderStyle.Copy().Bold(true).Foreground(lipgloss.Color("15"))
 }
 
-func dataStyleForColumn(title string, value string) lipgloss.Style {
+type tableDataStyleKind uint8
+
+const (
+	tableDataStyleNone tableDataStyleKind = iota
+	tableDataStyleStatus
+	tableDataStyleRestart
+	tableDataStyleAge
+)
+
+func classifyColumnStyleKind(title string) tableDataStyleKind {
 	normalizedTitle := normalizeColumnTitle(title)
 	switch {
 	case strings.Contains(normalizedTitle, "READY"):
-		return semanticStatusStyle(value)
+		return tableDataStyleStatus
 	case strings.Contains(normalizedTitle, "STATUS"):
-		return semanticStatusStyle(value)
+		return tableDataStyleStatus
 	case strings.Contains(normalizedTitle, "RESTART"):
-		return restartStyle(value)
+		return tableDataStyleRestart
 	case normalizedTitle == "AGE":
-		// Must be exact: titles like "STORAGE" contain the substring "AGE" and must not use age styling
-		// (usage-bar cells would be mis-styled or look blank).
+		return tableDataStyleAge
+	default:
+		return tableDataStyleNone
+	}
+}
+
+func dataStyleForColumn(title string, value string) lipgloss.Style {
+	return dataStyleForKind(classifyColumnStyleKind(title), value)
+}
+
+func dataStyleForKind(kind tableDataStyleKind, value string) lipgloss.Style {
+	switch kind {
+	case tableDataStyleStatus:
+		return semanticStatusStyle(value)
+	case tableDataStyleRestart:
+		return restartStyle(value)
+	case tableDataStyleAge:
 		return ageStyle(value)
 	default:
 		return lipgloss.NewStyle()
@@ -622,6 +693,53 @@ func normalizeColumnTitle(title string) string {
 	normalized = strings.ReplaceAll(normalized, "_", "")
 	normalized = strings.ReplaceAll(normalized, " ", "")
 	return strings.ToUpper(normalized)
+}
+
+func (t *Table) padCellRight(value string, columnIndex int) string {
+	if columnIndex < 0 || columnIndex >= len(t.columns) {
+		return value
+	}
+	width := max(1, t.columns[columnIndex].Width)
+	currentWidth := ansi.StringWidth(value)
+	if currentWidth >= width {
+		return value
+	}
+	pad := width - currentWidth
+	if pad > len(t.columnSpacePads[columnIndex]) {
+		pad = len(t.columnSpacePads[columnIndex])
+	}
+	return value + t.columnSpacePads[columnIndex][:pad]
+}
+
+func (t *Table) writePaddingSpaces(b *strings.Builder, columnIndex int, pad int) {
+	if pad <= 0 || columnIndex < 0 || columnIndex >= len(t.columnSpacePads) {
+		return
+	}
+	if pad > len(t.columnSpacePads[columnIndex]) {
+		pad = len(t.columnSpacePads[columnIndex])
+	}
+	b.WriteString(t.columnSpacePads[columnIndex][:pad])
+}
+
+func (t *Table) renderPaddedCell(padded string, columnIndex int, selected bool) string {
+	if columnIndex < 0 || columnIndex >= len(t.columnStyleKinds) {
+		if selected {
+			return tableRowSelectedStyle.Render(padded)
+		}
+		return padded
+	}
+	kind := t.columnStyleKinds[columnIndex]
+	if kind == tableDataStyleNone {
+		if selected {
+			return tableRowSelectedStyle.Render(padded)
+		}
+		return padded
+	}
+	style := dataStyleForKind(kind, padded)
+	if selected {
+		return style.Copy().Background(lipgloss.Color("236")).Render(padded)
+	}
+	return style.Render(padded)
 }
 
 func (t *Table) rowWidth() int {

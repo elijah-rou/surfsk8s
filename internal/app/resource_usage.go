@@ -17,6 +17,11 @@ import (
 
 const resourceUsageRefreshInterval = 15 * time.Second
 
+var (
+	usageLoadingCellText     = theme.Muted.Render("loading…")
+	usageUnavailableCellText = theme.Muted.Render("n/a")
+)
+
 func usageSpinner(now time.Time) string {
 	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 	if len(frames) == 0 {
@@ -203,11 +208,11 @@ func (a *App) nodeUsageSnapshotReady() bool {
 }
 
 func usageLoadingCell() string {
-	return theme.Muted.Render("loading…")
+	return usageLoadingCellText
 }
 
 func usageUnavailableCell() string {
-	return theme.Muted.Render("n/a")
+	return usageUnavailableCellText
 }
 
 func (a *App) podCPUCell(row state.PodRow) string {
