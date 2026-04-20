@@ -15,14 +15,14 @@ type PodsView struct {
 func NewPodsView() PodsView {
 	return PodsView{
 		columns: []components.Column{
+			{Title: "CONTEXT", Width: 16},
 			{Title: "NAMESPACE", Width: 14},
-			{Title: "NAME", Width: 36},
+			{Title: "NAME", Width: 34},
 			{Title: "READY", Width: 7},
 			{Title: "STATUS", Width: 14},
 			{Title: "RESTARTS", Width: 8, AlignRight: true},
 			{Title: "AGE", Width: 6, AlignRight: true},
 			{Title: "NODE", Width: 18},
-			{Title: "CLUSTER", Width: 16},
 		},
 	}
 }
@@ -35,6 +35,7 @@ func (v PodsView) Rows(rowsIn []state.PodRow) [][]string {
 	rows := make([][]string, 0, len(rowsIn))
 	for _, pod := range rowsIn {
 		rows = append(rows, []string{
+			pod.Cluster,
 			pod.Namespace,
 			pod.Name,
 			pod.Ready,
@@ -42,7 +43,6 @@ func (v PodsView) Rows(rowsIn []state.PodRow) [][]string {
 			strconv.Itoa(pod.Restarts),
 			pod.Age,
 			pod.Node,
-			pod.Cluster,
 		})
 	}
 	return rows

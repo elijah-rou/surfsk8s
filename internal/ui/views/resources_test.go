@@ -23,11 +23,11 @@ func TestPodsViewRows(t *testing.T) {
 	if got, want := len(rows), 1; got != want {
 		t.Fatalf("rows = %d, want %d", got, want)
 	}
-	if got, want := rows[0][1], "frontend"; got != want {
-		t.Fatalf("name = %q, want %q", got, want)
+	if got, want := rows[0][0], "dev"; got != want {
+		t.Fatalf("context = %q, want %q", got, want)
 	}
-	if got, want := rows[0][7], "dev"; got != want {
-		t.Fatalf("cluster = %q, want %q", got, want)
+	if got, want := rows[0][2], "frontend"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
 	}
 }
 
@@ -43,11 +43,11 @@ func TestDeploymentsViewRows(t *testing.T) {
 		Cluster:   "dev",
 	}})
 
-	if got, want := rows[0][1], "frontend"; got != want {
-		t.Fatalf("name = %q, want %q", got, want)
+	if got, want := rows[0][0], "dev"; got != want {
+		t.Fatalf("context = %q, want %q", got, want)
 	}
-	if got, want := rows[0][6], "dev"; got != want {
-		t.Fatalf("cluster = %q, want %q", got, want)
+	if got, want := rows[0][2], "frontend"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
 	}
 }
 
@@ -63,7 +63,10 @@ func TestServicesViewRows(t *testing.T) {
 		Cluster:   "dev",
 	}})
 
-	if got, want := rows[0][2], "ClusterIP"; got != want {
+	if got, want := rows[0][0], "dev"; got != want {
+		t.Fatalf("context = %q, want %q", got, want)
+	}
+	if got, want := rows[0][3], "ClusterIP"; got != want {
 		t.Fatalf("type = %q, want %q", got, want)
 	}
 }
@@ -79,11 +82,11 @@ func TestNodesViewRows(t *testing.T) {
 		Cluster: "dev",
 	}})
 
-	if got, want := rows[0][0], "node-a"; got != want {
-		t.Fatalf("name = %q, want %q", got, want)
+	if got, want := rows[0][0], "dev"; got != want {
+		t.Fatalf("context = %q, want %q", got, want)
 	}
-	if got, want := rows[0][5], "dev"; got != want {
-		t.Fatalf("cluster = %q, want %q", got, want)
+	if got, want := rows[0][1], "node-a"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
 	}
 }
 
@@ -97,10 +100,13 @@ func TestGenericResourcesViewRows(t *testing.T) {
 		Age:           "5m",
 		Cluster:       "dev",
 	}}, resource)
-	if got, want := rows[0][1], "revision-0001"; got != want {
-		t.Fatalf("name = %q, want %q", got, want)
+	if got, want := rows[0][0], "dev"; got != want {
+		t.Fatalf("context = %q, want %q", got, want)
 	}
 	if got, want := rows[0][2], "revision-0001"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
+	}
+	if got, want := rows[0][3], "revision-0001"; got != want {
 		t.Fatalf("printer value = %q, want %q", got, want)
 	}
 	if got, want := len(view.Columns(resource)), 5; got != want {

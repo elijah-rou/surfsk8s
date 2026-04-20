@@ -13,12 +13,12 @@ type NodesView struct {
 func NewNodesView() NodesView {
 	return NodesView{
 		columns: []components.Column{
+			{Title: "CONTEXT", Width: 16},
 			{Title: "NAME", Width: 28},
 			{Title: "STATUS", Width: 10},
 			{Title: "ROLES", Width: 20},
 			{Title: "VERSION", Width: 14},
 			{Title: "AGE", Width: 6, AlignRight: true},
-			{Title: "CLUSTER", Width: 16},
 		},
 	}
 }
@@ -31,12 +31,12 @@ func (v NodesView) Rows(rowsIn []state.NodeRow) [][]string {
 	rows := make([][]string, 0, len(rowsIn))
 	for _, node := range rowsIn {
 		rows = append(rows, []string{
+			node.Cluster,
 			node.Name,
 			node.Status,
 			node.Roles,
 			node.Version,
 			node.Age,
-			node.Cluster,
 		})
 	}
 	return rows

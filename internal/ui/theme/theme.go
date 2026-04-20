@@ -10,4 +10,5 @@ var (
 	StatusWarn   = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	ClusterLabel = lipgloss.NewStyle().Foreground(lipgloss.Color("14")).Bold(true)
 	Muted        = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	TableDivider = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 )

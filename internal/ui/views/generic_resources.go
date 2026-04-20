@@ -12,11 +12,12 @@ func NewGenericResourcesView() GenericResourcesView {
 }
 
 func (v GenericResourcesView) Columns(resource cluster.ResourceKind) []components.Column {
-	columns := make([]components.Column, 0, 2+len(resource.PrinterColumns)+2)
+	columns := make([]components.Column, 0, 3+len(resource.PrinterColumns)+1)
+	columns = append(columns, components.Column{Title: "CONTEXT", Width: 16})
 	if resource.Namespaced {
 		columns = append(columns, components.Column{Title: "NAMESPACE", Width: 18})
 	}
-	columns = append(columns, components.Column{Title: "NAME", Width: 32})
+	columns = append(columns, components.Column{Title: "NAME", Width: 30})
 	if len(resource.PrinterColumns) != 0 {
 		for _, column := range resource.PrinterColumns {
 			columns = append(columns, components.Column{Title: column.Name, Width: printerColumnWidth(column)})
@@ -27,17 +28,15 @@ func (v GenericResourcesView) Columns(resource cluster.ResourceKind) []component
 			components.Column{Title: "STATUS", Width: 24},
 		)
 	}
-	columns = append(columns,
-		components.Column{Title: "AGE", Width: 6, AlignRight: true},
-		components.Column{Title: "CLUSTER", Width: 18},
-	)
+	columns = append(columns, components.Column{Title: "AGE", Width: 6, AlignRight: true})
 	return columns
 }
 
 func (v GenericResourcesView) Rows(rows []cluster.GenericResourceRow, resource cluster.ResourceKind) [][]string {
 	result := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		values := make([]string, 0, 2+len(row.PrinterValues)+2)
+		values := make([]string, 0, 3+len(row.PrinterValues)+1)
+		values = append(values, row.Cluster)
 		if resource.Namespaced {
 			values = append(values, row.Namespace)
 		}
@@ -47,7 +46,7 @@ func (v GenericResourcesView) Rows(rows []cluster.GenericResourceRow, resource c
 		} else {
 			values = append(values, row.Ready, row.Status)
 		}
-		values = append(values, row.Age, row.Cluster)
+		values = append(values, row.Age)
 		result = append(result, values)
 	}
 	return result

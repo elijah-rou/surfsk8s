@@ -57,7 +57,7 @@ func (a *App) ensureGenericCompiledColumns() {
 }
 
 func (a *App) genericListCacheState() string {
-	return a.activeResource.ID + "|" + a.contextScope + "|" + a.namespace + "|" + strings.TrimSpace(a.resourceQuery2) + "|" + a.currentResourceSort().Label() + "|" + fmt.Sprintf("%d", a.manager.Version())
+	return a.activeResource.ID + "|" + a.contextScope + "|" + a.namespace + "|" + strings.TrimSpace(a.resourceQuery2) + "|" + a.currentResourceSort().Label() + "|" + a.tableFilterCacheKey() + "|" + fmt.Sprintf("%d", a.manager.Version())
 }
 
 func (a *App) refreshGenericResourceList(now time.Time) {

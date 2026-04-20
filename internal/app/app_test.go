@@ -46,6 +46,20 @@ func TestCommandRunMutatesOriginalApp(t *testing.T) {
 	}
 }
 
+func TestNewLoadsPersistedSelectedContexts(t *testing.T) {
+	previousUserConfigDir := userConfigDir
+	userConfigDir = func() (string, error) { return t.TempDir(), nil }
+	defer func() { userConfigDir = previousUserConfigDir }()
+	if err := savePreferences(preferences{SelectedContexts: []string{"dev"}}); err != nil {
+		t.Fatalf("savePreferences error: %v", err)
+	}
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	if !app.selectedContext["dev"] {
+		t.Fatalf("expected persisted selected context")
+	}
+}
+
 func newTestManager(t *testing.T) *cluster.Manager {
 	t.Helper()
 	dir := t.TempDir()

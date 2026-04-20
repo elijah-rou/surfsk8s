@@ -21,6 +21,7 @@ const (
 	inputModeScale
 	inputModeLocalPort
 	inputModeScopePicker
+	inputModeTableFilterValue
 )
 
 type actionResultMsg struct {
@@ -44,6 +45,8 @@ func (a *App) statusInputState() (string, string, bool) {
 				return "context", a.filter.Value(), true
 			}
 			return "namespace", a.filter.Value(), true
+		case inputModeTableFilterValue:
+			return "column-filter", a.filter.Value(), true
 		default:
 			return "filter", a.filter.Value(), true
 		}

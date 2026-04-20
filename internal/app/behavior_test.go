@@ -112,6 +112,122 @@ func TestScalePromptRequiresConfirmation(t *testing.T) {
 	}
 }
 
+func TestContextPickerEscTogglesAllSelections(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenContexts
+	app.contextQuery = ""
+	app.selectedContext = map[string]bool{"dev": true}
+
+	app.updateContextKeys(tea.KeyMsg{Type: tea.KeyEsc})
+	if got, want := len(app.selectedContext), 0; got != want {
+		t.Fatalf("selected count = %d, want %d", got, want)
+	}
+
+	app.updateContextKeys(tea.KeyMsg{Type: tea.KeyEsc})
+	if got, want := len(app.selectedContext), len(app.contexts); got != want {
+		t.Fatalf("selected count = %d, want %d", got, want)
+	}
+}
+
+func TestOpenFilterResetsPreviousQuery(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenCatalog
+	app.catalogQuery = "pods"
+	app.openFilter()
+	if got, want := app.catalogQuery, ""; got != want {
+		t.Fatalf("catalogQuery = %q, want %q", got, want)
+	}
+	if got, want := app.filter.Value(), ""; got != want {
+		t.Fatalf("filter.Value = %q, want %q", got, want)
+	}
+}
+
+func TestOpenResourceFinderResetsPreviousQuery(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.resourceFinderQuery = "revisions"
+	app.openResourceFinder()
+	if got, want := app.resourceFinderQuery, ""; got != want {
+		t.Fatalf("resourceFinderQuery = %q, want %q", got, want)
+	}
+	if got, want := app.filter.Value(), ""; got != want {
+		t.Fatalf("filter.Value = %q, want %q", got, want)
+	}
+}
+
+func TestPodColumnFilterAddFlowFiltersRows(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "toolbox", Namespace: "default"}})
+	app.screen = screenPods
+	app.height = 10
+	app.refreshPods(time.Now())
+
+	cmd := app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd opening filter picker")
+	}
+	if got, want := app.screen, screenTableFilterColumnPicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	app.updateTableFilterColumnPickerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	app.updateTableFilterColumnPickerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	app.updateTableFilterColumnPickerKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := app.inputMode, inputModeTableFilterValue; got != want {
+		t.Fatalf("inputMode = %d, want %d", got, want)
+	}
+	app.filter.SetValue("api")
+	app.updateTableFilterValuePrompt(tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := app.screen, screenPods; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.visibleRows, 1; got != want {
+		t.Fatalf("visibleRows = %d, want %d", got, want)
+	}
+	if got, want := len(app.podColumnFilters), 1; got != want {
+		t.Fatalf("filter count = %d, want %d", got, want)
+	}
+}
+
+func TestTableFilterManagerTogglesAndRemovesFilters(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "toolbox", Namespace: "default"}})
+	app.screen = screenPods
+	app.height = 10
+	app.podColumnFilters = []tableColumnFilter{{ID: 1, ColumnIndex: 2, ColumnTitle: "NAME", Query: "api", Enabled: true}}
+	app.refreshPods(time.Now())
+	if got, want := app.visibleRows, 1; got != want {
+		t.Fatalf("visibleRows = %d, want %d", got, want)
+	}
+
+	app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'F'}})
+	if got, want := app.screen, screenTableFilterManager; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	app.updateTableFilterManagerKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	app.updateTableFilterManagerKeys(tea.KeyMsg{Type: tea.KeyEsc})
+	if got, want := app.screen, screenPods; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.visibleRows, 2; got != want {
+		t.Fatalf("visibleRows after disable = %d, want %d", got, want)
+	}
+
+	app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'F'}})
+	app.updateTableFilterManagerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	app.updateTableFilterManagerKeys(tea.KeyMsg{Type: tea.KeyEsc})
+	if got, want := len(app.podColumnFilters), 0; got != want {
+		t.Fatalf("filter count = %d, want %d", got, want)
+	}
+}
+
 func TestCommandPromptEnterRunsHighlightedCommand(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})
@@ -212,6 +328,61 @@ func TestRunPortForwardPodOpensPortPickerForMultiPortPod(t *testing.T) {
 	}
 	if got, want := app.screen, screenActionPicker; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
+	}
+}
+
+func TestPodTableSupportsColumnSelectionAndYank(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "toolbox", Namespace: "default"}})
+	app.screen = screenPods
+	app.height = 10
+	app.refreshPods(time.Now())
+
+	app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if got, want := app.podTable.SelectedColumnIndex(), 1; got != want {
+		t.Fatalf("selected column = %d, want %d", got, want)
+	}
+
+	captured := ""
+	previousClipboard := writeClipboard
+	writeClipboard = func(value string) error {
+		captured = value
+		return nil
+	}
+	defer func() { writeClipboard = previousClipboard }()
+
+	app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !strings.Contains(captured, "| dev | default | toolbox |") {
+		t.Fatalf("captured = %q", captured)
+	}
+}
+
+func TestPodTableYanksFullFilteredTableWithCapitalY(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "toolbox", Namespace: "default"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	app.screen = screenPods
+	app.height = 10
+	app.refreshPods(time.Now())
+
+	captured := ""
+	previousClipboard := writeClipboard
+	writeClipboard = func(value string) error {
+		captured = value
+		return nil
+	}
+	defer func() { writeClipboard = previousClipboard }()
+
+	app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
+	if !strings.Contains(captured, "CONTEXT,NAMESPACE,NAME,READY,STATUS,RESTARTS,AGE,NODE") {
+		t.Fatalf("missing header in captured table: %q", captured)
+	}
+	if !strings.Contains(captured, "toolbox") || !strings.Contains(captured, "api") {
+		t.Fatalf("missing rows in captured table: %q", captured)
 	}
 }
 

@@ -47,6 +47,8 @@ const (
 	screenScopePicker
 	screenActionPicker
 	screenConfirmAction
+	screenTableFilterColumnPicker
+	screenTableFilterManager
 )
 
 type pickerMode int
@@ -161,6 +163,14 @@ type App struct {
 	visibleResourceItems []resourceFinderItem
 	resourceFinderQuery  string
 
+	pendingFilterColumnIndex  int
+	pendingFilterColumnTitle  string
+	visibleTableFilterColumns []tableFilterColumnOption
+	visibleTableFilters       []tableColumnFilter
+	podColumnFilters          []tableColumnFilter
+	resourceColumnFilters     map[string][]tableColumnFilter
+	nextTableFilterID         int
+
 	contextScope        string
 	scopeReturnScreen   screen
 	scopePickerKind     scopePickerKind
@@ -194,18 +204,15 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	genericView := views.NewGenericResourcesView()
 	navTable := components.NewTable([]components.Column{{Title: "ITEMS", Width: 80}})
 	podTable := components.NewTable(podsView.Columns())
+	podTable.SetVariant(components.TableVariantRich)
 	podTable.SetEmptyMessage("No pods")
 	resourceTable := components.NewTable(deploymentsView.Columns())
+	resourceTable.SetVariant(components.TableVariantRich)
 	filter := components.NewFilter()
 	statusBar := components.NewStatusBar()
 	textViewport := viewport.New(0, 0)
 	contexts := manager.AvailableContexts()
-	selectedContext := make(map[string]bool, len(contexts))
-	for _, context := range contexts {
-		if context.Current {
-			selectedContext[context.Name] = true
-		}
-	}
+	selectedContext := loadSelectedContexts(contexts)
 
 	app := &App{
 		namespace:       cfg.InitialNamespace,
@@ -253,6 +260,37 @@ func (a *App) Init() tea.Cmd {
 	return tickCmd()
 }
 
+func loadSelectedContexts(contexts []cluster.ContextInfo) map[string]bool {
+	selected := make(map[string]bool, len(contexts))
+	prefs, err := loadPreferences()
+	if err == nil && len(prefs.SelectedContexts) != 0 {
+		available := make(map[string]struct{}, len(contexts))
+		for _, context := range contexts {
+			available[context.Name] = struct{}{}
+		}
+		for _, name := range prefs.SelectedContexts {
+			if _, ok := available[name]; ok {
+				selected[name] = true
+			}
+		}
+		if len(selected) != 0 || len(prefs.SelectedContexts) == 0 {
+			return selected
+		}
+	}
+	for _, context := range contexts {
+		if context.Current {
+			selected[context.Name] = true
+		}
+	}
+	return selected
+}
+
+func (a *App) persistSelectedContexts() {
+	if err := savePreferences(preferences{SelectedContexts: a.selectedContextNames()}); err != nil {
+		a.statusMessage = err.Error()
+	}
+}
+
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.filter.Active() {
 		return a, a.updateFilter(msg)
@@ -286,6 +324,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.statusMessage = typed.err.Error()
 			return a, nil
 		}
+		a.persistSelectedContexts()
 		a.statusMessage = fmt.Sprintf("connected %d context(s)", len(typed.contexts))
 		a.screen = screenCatalog
 		a.refreshCatalog()
@@ -355,6 +394,8 @@ func (a *App) updateFilter(msg tea.Msg) tea.Cmd {
 		return a.updateLocalPortPrompt(msg)
 	case inputModeScopePicker:
 		return a.updateScopePickerPrompt(msg)
+	case inputModeTableFilterValue:
+		return a.updateTableFilterValuePrompt(msg)
 	default:
 		return a.updateSearchPrompt(msg)
 	}
@@ -372,12 +413,12 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case "/":
-		if a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction {
+		if a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager {
 			a.openFilter()
 		}
 		return nil
 	case "R":
-		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction {
+		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager {
 			return a.openResourceFinder()
 		}
 		return nil
@@ -408,6 +449,10 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		return a.updateActionPickerKeys(msg)
 	case screenConfirmAction:
 		return a.updateConfirmActionKeys(msg)
+	case screenTableFilterColumnPicker:
+		return a.updateTableFilterColumnPickerKeys(msg)
+	case screenTableFilterManager:
+		return a.updateTableFilterManagerKeys(msg)
 	}
 
 	return nil
@@ -432,13 +477,18 @@ func (a *App) updateContextKeys(msg tea.KeyMsg) tea.Cmd {
 			} else {
 				a.selectedContext[name] = true
 			}
+			a.persistSelectedContexts()
 			a.refreshContextRows()
 		}
 	case "esc":
 		if a.contextQuery != "" {
 			a.contextQuery = ""
 			a.refreshContextRows()
+			return nil
 		}
+		a.toggleAllSelectedContexts()
+		a.persistSelectedContexts()
+		a.refreshContextRows()
 	case "enter":
 		if a.connecting {
 			return nil
@@ -519,16 +569,28 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "j", "down":
 		a.podTable.MoveDown(1)
+	case "J":
+		a.podTable.MoveBottom()
 	case "k", "up":
 		a.podTable.MoveUp(1)
+	case "K":
+		a.podTable.MoveTop()
 	case "g", "home":
 		a.podTable.MoveTop()
 	case "G", "end":
 		a.podTable.MoveBottom()
-	case "pgdown", "f":
+	case "pgdown":
 		a.podTable.MoveDown(max(1, a.listPageSize()))
 	case "pgup", "b":
 		a.podTable.MoveUp(max(1, a.listPageSize()))
+	case "h":
+		a.podTable.MoveLeft(1)
+	case "H", "shift+h":
+		a.podTable.MoveColumnStart()
+	case "l":
+		a.podTable.MoveRight(1)
+	case "L", "shift+l":
+		a.podTable.MoveColumnEnd()
 	case "tab":
 		a.advanceNamespace(1)
 	case "shift+tab":
@@ -542,6 +604,14 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.openContextScopePicker()
 	case "r":
 		return a.openResourceFinder()
+	case "f":
+		return a.openTableFilterColumnPicker()
+	case "F":
+		return a.openTableFilterManager()
+	case "y":
+		return a.yankSelectedTable()
+	case "Y":
+		return a.yankFullTableRow()
 	case "o":
 		a.cyclePodSort()
 		a.refreshPods(time.Now())
@@ -570,8 +640,7 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 			a.refreshPods(time.Now())
 			return nil
 		}
-		a.screen = screenGroupResources
-		a.refreshGroupResources()
+		a.backToResourceOrigin()
 	}
 	return nil
 }
@@ -580,16 +649,28 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "j", "down":
 		a.resourceTable.MoveDown(1)
+	case "J":
+		a.resourceTable.MoveBottom()
 	case "k", "up":
 		a.resourceTable.MoveUp(1)
+	case "K":
+		a.resourceTable.MoveTop()
 	case "g", "home":
 		a.resourceTable.MoveTop()
 	case "G", "end":
 		a.resourceTable.MoveBottom()
-	case "pgdown", "f":
+	case "pgdown":
 		a.resourceTable.MoveDown(max(1, a.listPageSize()))
 	case "pgup", "b":
 		a.resourceTable.MoveUp(max(1, a.listPageSize()))
+	case "h":
+		a.resourceTable.MoveLeft(1)
+	case "H", "shift+h":
+		a.resourceTable.MoveColumnStart()
+	case "l":
+		a.resourceTable.MoveRight(1)
+	case "L", "shift+l":
+		a.resourceTable.MoveColumnEnd()
 	case "tab":
 		if a.activeResource.Namespaced {
 			a.advanceNamespace(1)
@@ -609,6 +690,14 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.openContextScopePicker()
 	case "r":
 		return a.openResourceFinder()
+	case "f":
+		return a.openTableFilterColumnPicker()
+	case "F":
+		return a.openTableFilterManager()
+	case "y":
+		return a.yankSelectedTable()
+	case "Y":
+		return a.yankFullTableRow()
 	case "o":
 		a.cycleResourceSort()
 		a.refreshResourceList(time.Now())
@@ -625,8 +714,7 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 			a.refreshResourceList(time.Now())
 			return nil
 		}
-		a.screen = screenGroupResources
-		a.refreshGroupResources()
+		a.backToResourceOrigin()
 	}
 	return nil
 }
@@ -641,7 +729,7 @@ func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		a.refreshPods(time.Now())
 	case "x":
 		return a.runExecPod()
-	case "e", "y":
+	case "e":
 		return a.runEditPod()
 	case "p":
 		return a.runPortForwardPod()
@@ -670,7 +758,7 @@ func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		a.refreshGroupResources()
 	case "p":
 		return a.runPortForwardResource()
-	case "e", "y":
+	case "e":
 		return a.runEditResource()
 	case "s":
 		return a.openScalePrompt()
@@ -731,10 +819,10 @@ func (a *App) currentView() (string, string, string) {
 	case screenGroupResources:
 		return "surfsk8s · " + a.activeGroup.Name, a.navTable.View(), "r resource-find  enter open resource  : commands  / filter  esc clear/back"
 	case screenPods:
-		footer := a.podTable.Footer() + "  sort:" + a.podSort.Label() + "  o next-sort  O reverse  r resource-find  / filter  n ns-find  c ctx-find  tab ns  a all  enter details  esc clear/back"
+		footer := a.podTable.Footer() + "  " + a.tableFilterFooter() + "  sort:" + a.podSort.Label() + "  hjkl move  HJKL jump  f add-filter  F manage-filters  y row  Y CSV  o next-sort  O reverse  r resource-find  / fuzzy  n ns-find  c ctx-find  tab ns  a all  enter details  esc clear/back"
 		return "surfsk8s · pods", a.podTable.View(), footer
 	case screenResourceList:
-		footer := a.resourceTable.Footer() + "  sort:" + a.currentResourceSort().Label() + "  o next-sort  O reverse  r resource-find  / filter  c ctx-find  enter details  esc clear/back"
+		footer := a.resourceTable.Footer() + "  " + a.tableFilterFooter() + "  sort:" + a.currentResourceSort().Label() + "  hjkl move  HJKL jump  f add-filter  F manage-filters  y row  Y CSV  o next-sort  O reverse  r resource-find  / fuzzy  c ctx-find  enter details  esc clear/back"
 		if a.activeResource.Namespaced {
 			footer += "  n ns-find  tab ns  a all"
 		}
@@ -761,6 +849,13 @@ func (a *App) currentView() (string, string, string) {
 		return "surfsk8s · " + a.actionPickerTitle, a.navTable.View(), a.actionPickerFooter
 	case screenConfirmAction:
 		return "surfsk8s · confirm action", a.renderConfirmAction(), "j/k scroll  pgup/pgdn page  g/G edge  enter confirm  esc cancel"
+	case screenTableFilterColumnPicker:
+		if a.filter.Active() && a.inputMode == inputModeTableFilterValue {
+			return "surfsk8s · add filter", a.navTable.View(), "type filter  enter add  esc cancel"
+		}
+		return "surfsk8s · add filter", a.navTable.View(), "j/k move  g/G edge  enter select-column  esc cancel"
+	case screenTableFilterManager:
+		return "surfsk8s · filters", a.navTable.View(), "j/k move  g/G edge  enter/space toggle  x remove  esc close"
 	default:
 		return "surfsk8s", "", ""
 	}
@@ -769,19 +864,21 @@ func (a *App) currentView() (string, string, string) {
 func (a *App) openFilter() {
 	prompt := "/"
 	placeholder := "filter (* ? =exact)"
-	query := a.currentQuery()
 	if a.screen == screenCommands {
 		prompt = ":"
 		placeholder = "command"
-		query = a.commandQuery
 		a.inputMode = inputModeCommand
+		a.commandQuery = ""
+		a.refreshCommands()
 	} else {
 		a.inputMode = inputModeSearch
+		a.setCurrentQuery("")
+		a.refreshCurrentScreen(time.Now())
 	}
 
 	a.filter.SetPrompt(prompt)
 	a.filter.SetPlaceholder(placeholder)
-	a.filter.SetValue(query)
+	a.filter.SetValue("")
 	a.filter.Activate()
 }
 
@@ -789,9 +886,10 @@ func (a *App) openCommands() {
 	a.prevScreen = a.screen
 	a.screen = screenCommands
 	a.inputMode = inputModeCommand
+	a.commandQuery = ""
 	a.filter.SetPrompt(":")
 	a.filter.SetPlaceholder("command")
-	a.filter.SetValue(a.commandQuery)
+	a.filter.SetValue("")
 	a.filter.Activate()
 	a.refreshCommands()
 }
@@ -800,10 +898,12 @@ func (a *App) openContextPicker(mode pickerMode) {
 	a.prevScreen = a.screen
 	a.screen = screenContexts
 	a.pickerMode = mode
+	a.contextQuery = ""
 	if mode == pickerModeAdd {
 		for _, name := range a.manager.ConnectedContextNames() {
 			a.selectedContext[name] = true
 		}
+		a.persistSelectedContexts()
 	}
 	a.refreshContextRows()
 }
@@ -854,6 +954,10 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 		a.refreshActionPicker()
 	case screenConfirmAction:
 		return
+	case screenTableFilterColumnPicker:
+		a.refreshTableFilterColumnPicker()
+	case screenTableFilterManager:
+		a.refreshTableFilterManager()
 	}
 }
 
@@ -888,6 +992,16 @@ func (a *App) refreshGroupResources() {
 	a.setNavTable(strings.ToUpper(a.activeGroup.Name), renderResourceRows(resources))
 }
 
+func (a *App) backToResourceOrigin() {
+	if strings.TrimSpace(a.activeGroup.Name) == "" || len(a.activeGroup.Resources) == 0 {
+		a.screen = screenCatalog
+		a.refreshCatalog()
+		return
+	}
+	a.screen = screenGroupResources
+	a.refreshGroupResources()
+}
+
 func (a *App) refreshPods(now time.Time) {
 	total := 0
 	filtered := 0
@@ -898,7 +1012,7 @@ func (a *App) refreshPods(now time.Time) {
 		a.sortedPods = a.sortedPods[:0]
 		a.store.ForEachPod(func(row state.PodRow) bool {
 			total++
-			if !a.matchPodRow(row) {
+			if !a.matchPodRowAt(row, now) {
 				return true
 			}
 			filtered++
@@ -1282,6 +1396,16 @@ func (a *App) selectedContextNames() []string {
 		}
 	}
 	return names
+}
+
+func (a *App) toggleAllSelectedContexts() {
+	if len(a.selectedContext) == 0 {
+		for _, context := range a.contexts {
+			a.selectedContext[context.Name] = true
+		}
+		return
+	}
+	clear(a.selectedContext)
 }
 
 func (a *App) currentQuery() string {
@@ -1717,13 +1841,20 @@ func (a *App) listPageSize() int {
 }
 
 func (a *App) matchPodRow(row state.PodRow) bool {
+	return a.matchPodRowAt(row, time.Now())
+}
+
+func (a *App) matchPodRowAt(row state.PodRow, now time.Time) bool {
 	if !a.contextMatches(row.Cluster) {
 		return false
 	}
 	if a.namespace != "" && row.Namespace != a.namespace {
 		return false
 	}
-	return matchesSearch(row.SearchText(), a.podQuery)
+	if !matchesSearch(row.SearchText(), a.podQuery) {
+		return false
+	}
+	return a.matchesPodColumnFilters(row, now)
 }
 
 func (a *App) podWindow(start int, limit int, now time.Time) []state.PodRow {
@@ -1736,7 +1867,7 @@ func (a *App) podWindow(start int, limit int, now time.Time) []state.PodRow {
 	rows := make([]state.PodRow, 0, limit)
 	matched := 0
 	a.store.ForEachPod(func(row state.PodRow) bool {
-		if !a.matchPodRow(row) {
+		if !a.matchPodRowAt(row, now) {
 			return true
 		}
 		if matched < start {
@@ -1775,6 +1906,9 @@ func (a *App) countDeployments() (int, int) {
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
 			return true
 		}
+		if !a.matchesDeploymentColumnFilters(row, time.Now()) {
+			return true
+		}
 		filtered++
 		return true
 	})
@@ -1798,6 +1932,9 @@ func (a *App) deploymentWindow(start int, limit int, now time.Time) []state.Depl
 			return true
 		}
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
+			return true
+		}
+		if !a.matchesDeploymentColumnFilters(row, now) {
 			return true
 		}
 		if matched < start {
@@ -1836,6 +1973,9 @@ func (a *App) countServices() (int, int) {
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
 			return true
 		}
+		if !a.matchesServiceColumnFilters(row, time.Now()) {
+			return true
+		}
 		filtered++
 		return true
 	})
@@ -1859,6 +1999,9 @@ func (a *App) serviceWindow(start int, limit int, now time.Time) []state.Service
 			return true
 		}
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
+			return true
+		}
+		if !a.matchesServiceColumnFilters(row, now) {
 			return true
 		}
 		if matched < start {
@@ -1894,6 +2037,9 @@ func (a *App) countNodes() (int, int) {
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
 			return true
 		}
+		if !a.matchesNodeColumnFilters(row, time.Now()) {
+			return true
+		}
 		filtered++
 		return true
 	})
@@ -1914,6 +2060,9 @@ func (a *App) nodeWindow(start int, limit int, now time.Time) []state.NodeRow {
 			return true
 		}
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
+			return true
+		}
+		if !a.matchesNodeColumnFilters(row, now) {
 			return true
 		}
 		if matched < start {

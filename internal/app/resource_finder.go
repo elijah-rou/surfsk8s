@@ -20,9 +20,10 @@ func (a *App) openResourceFinder() tea.Cmd {
 	a.prevScreen = a.screen
 	a.screen = screenResourceFinder
 	a.inputMode = inputModeResourceFinder
+	a.resourceFinderQuery = ""
 	a.filter.SetPrompt("r> ")
 	a.filter.SetPlaceholder("resource")
-	a.filter.SetValue(a.resourceFinderQuery)
+	a.filter.SetValue("")
 	a.filter.Activate()
 	a.refreshResourceFinder()
 	return nil

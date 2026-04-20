@@ -134,12 +134,13 @@ func (a *App) genericNeedsMaterializedSort() bool {
 func (a *App) buildSortedPods() (int, int) {
 	a.sortedPods = a.sortedPods[:0]
 	total := 0
+	now := time.Now()
 	a.store.ForEachPod(func(row state.PodRow) bool {
 		if !a.contextMatches(row.Cluster) {
 			return true
 		}
 		total++
-		if !a.matchPodRow(row) {
+		if !a.matchPodRowAt(row, now) {
 			return true
 		}
 		a.sortedPods = append(a.sortedPods, row)
@@ -154,6 +155,7 @@ func (a *App) buildSortedPods() (int, int) {
 func (a *App) buildSortedDeployments() (int, int) {
 	a.sortedDeployments = a.sortedDeployments[:0]
 	total := 0
+	now := time.Now()
 	a.store.ForEachDeployment(func(row state.DeploymentRow) bool {
 		if !a.contextMatches(row.Cluster) {
 			return true
@@ -163,6 +165,9 @@ func (a *App) buildSortedDeployments() (int, int) {
 			return true
 		}
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
+			return true
+		}
+		if !a.matchesDeploymentColumnFilters(row, now) {
 			return true
 		}
 		a.sortedDeployments = append(a.sortedDeployments, row)
@@ -177,6 +182,7 @@ func (a *App) buildSortedDeployments() (int, int) {
 func (a *App) buildSortedServices() (int, int) {
 	a.sortedServices = a.sortedServices[:0]
 	total := 0
+	now := time.Now()
 	a.store.ForEachService(func(row state.ServiceRow) bool {
 		if !a.contextMatches(row.Cluster) {
 			return true
@@ -186,6 +192,9 @@ func (a *App) buildSortedServices() (int, int) {
 			return true
 		}
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
+			return true
+		}
+		if !a.matchesServiceColumnFilters(row, now) {
 			return true
 		}
 		a.sortedServices = append(a.sortedServices, row)
@@ -200,12 +209,16 @@ func (a *App) buildSortedServices() (int, int) {
 func (a *App) buildSortedNodes() (int, int) {
 	a.sortedNodes = a.sortedNodes[:0]
 	total := 0
+	now := time.Now()
 	a.store.ForEachNode(func(row state.NodeRow) bool {
 		if !a.contextMatches(row.Cluster) {
 			return true
 		}
 		total++
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
+			return true
+		}
+		if !a.matchesNodeColumnFilters(row, now) {
 			return true
 		}
 		a.sortedNodes = append(a.sortedNodes, row)
@@ -252,6 +265,7 @@ func compareNodeRows(left state.NodeRow, right state.NodeRow, state listSortStat
 func (a *App) buildSortedGenericResources() (int, int) {
 	a.sortedGenericRows = a.sortedGenericRows[:0]
 	query := strings.TrimSpace(a.resourceQuery2)
+	now := time.Now()
 	for _, row := range a.genericRows {
 		if !a.contextMatches(row.Cluster) {
 			continue
@@ -266,6 +280,9 @@ func (a *App) buildSortedGenericResources() (int, int) {
 			if !matchesSearch(row.SearchText(), query) {
 				continue
 			}
+		}
+		if !a.matchesGenericColumnFilters(row, now) {
+			continue
 		}
 		a.sortedGenericRows = append(a.sortedGenericRows, row)
 	}
