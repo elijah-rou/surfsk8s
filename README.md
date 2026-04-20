@@ -18,7 +18,7 @@ Working, daily-usable build. Current scope includes:
 - pod/node resource usage in details and tables
 - live smoke coverage against real clusters plus fixture-based smoke tooling
 
-See `docs/POC.md` for original goals. See `docs/ROADMAP.md` for next-step improvements and pod-specific needs.
+See `docs/POC.md` for original goals. See `docs/ROADMAP.md` for next-step improvements and pod-specific needs. See `docs/PERFORMANCE-PLAN.md` for the focused performance work plan.
 
 ## Why
 
@@ -90,7 +90,8 @@ surfsk8s/
 │       └── views/          # typed resource views
 └── docs/
     ├── POC.md
-    └── ROADMAP.md
+    ├── ROADMAP.md
+    └── PERFORMANCE-PLAN.md
 ```
 
 ## Run

@@ -76,7 +76,7 @@ func (s StatusBar) View(state StatusBarState) string {
 // FormatListStatusRight renders cluster health, activity, context, and fuzzy filter for list
 // screens where namespace and table row window are shown in the title line.
 func FormatListStatusRight(state StatusBarState) string {
-	parts := make([]string, 0, 8)
+	parts := make([]string, 0, 12)
 	if len(state.Clusters) == 0 {
 		parts = append(parts, theme.StatusWarn.Render("cluster:disconnected"))
 	} else {

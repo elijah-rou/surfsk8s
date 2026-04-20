@@ -16,7 +16,7 @@ func NewNodesView() NodesView {
 			{Title: "CONTEXT", Width: 16},
 			{Title: "NAME", Width: 24},
 			{Title: "STATUS", Width: 10},
-			{Title: "CPU", Width: 20},
+			{Title: "CPU", Width: 22},
 			{Title: "MEMORY", Width: 20},
 			{Title: "EPHEMERAL", Width: 20},
 			{Title: "GPU", Width: 12},

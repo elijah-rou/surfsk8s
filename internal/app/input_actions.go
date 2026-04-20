@@ -80,6 +80,26 @@ func (a *App) updateSearchPrompt(msg tea.Msg) tea.Cmd {
 			a.filter.Deactivate()
 			a.setCurrentQuery(a.filter.Value())
 			a.refreshCurrentScreen(time.Now())
+			switch a.screen {
+			case screenTableFilterColumnPicker:
+				if len(a.visibleTableFilterColumns) == 0 {
+					a.statusMessage = "no column selected"
+					return nil
+				}
+				option := a.visibleTableFilterColumns[0]
+				return a.openTableFilterValuePrompt(option.ColumnIndex, option.ColumnTitle)
+			case screenTableSortColumnPicker:
+				if len(a.visibleTableSortColumns) == 0 {
+					a.statusMessage = "no column selected"
+					return nil
+				}
+				option := a.visibleTableSortColumns[0]
+				a.pendingSortColumnIndex = option.ColumnIndex
+				a.pendingSortColumnTitle = option.ColumnTitle
+				a.screen = screenTableSortDirectionPicker
+				a.refreshTableSortDirectionPicker()
+				return nil
+			}
 			return nil
 		}
 	}

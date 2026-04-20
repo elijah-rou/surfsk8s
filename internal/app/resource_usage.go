@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,50 +17,46 @@ import (
 
 const resourceUsageRefreshInterval = 15 * time.Second
 
-func (a *App) refreshPodUsageSnapshot(now time.Time, storeVersion uint64, visibleRows int) {
-	if a.podUsageListLoading {
-		return
+func (a *App) maybeRefreshPodUsageListCmd(now time.Time) tea.Cmd {
+	if a.screen != screenPods || a.podUsageListLoading {
+		return nil
 	}
-	if a.podUsageListVersion == storeVersion && !a.podUsageListFetchedAt.IsZero() && now.Sub(a.podUsageListFetchedAt) < resourceUsageRefreshInterval {
-		return
+	scopeKey := a.podUsageScopeKey()
+	storeVersion := a.store.Version()
+	if a.podUsageListScopeKey == scopeKey && a.podUsageListVersion == storeVersion && !a.podUsageListFetchedAt.IsZero() && now.Sub(a.podUsageListFetchedAt) < resourceUsageRefreshInterval {
+		return nil
 	}
 	a.podUsageListLoading = true
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	usages := a.manager.ListPodResourceUsages(ctx, a.contextScope, a.namespace)
-	cancel()
-	a.podUsageByKey = usages
-	a.podUsageListVersion = storeVersion
-	if visibleRows > 0 && len(usages) == 0 {
-		a.podUsageListFetchedAt = time.Time{}
-	} else {
-		a.podUsageListFetchedAt = now
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		return podUsageSnapshotMsg{scopeKey: scopeKey, storeVersion: storeVersion, usages: a.manager.ListPodResourceUsages(ctx, a.contextScope, a.namespace)}
 	}
-	a.podUsageListLoading = false
 }
 
-func (a *App) refreshNodeUsageSnapshot(now time.Time, storeVersion uint64, visibleRows int) {
-	if a.nodeUsageListLoading {
-		return
+func (a *App) maybeRefreshNodeUsageListCmd(now time.Time) tea.Cmd {
+	if a.screen != screenResourceList || a.activeResource.Resource != "nodes" || a.activeResource.APIGroup != "" || a.nodeUsageListLoading {
+		return nil
 	}
-	if a.nodeUsageListVersion == storeVersion && !a.nodeUsageListFetchedAt.IsZero() && now.Sub(a.nodeUsageListFetchedAt) < resourceUsageRefreshInterval {
-		return
+	scopeKey := a.nodeUsageScopeKey()
+	storeVersion := a.store.Version()
+	if a.nodeUsageListScopeKey == scopeKey && a.nodeUsageListVersion == storeVersion && !a.nodeUsageListFetchedAt.IsZero() && now.Sub(a.nodeUsageListFetchedAt) < resourceUsageRefreshInterval {
+		return nil
 	}
 	a.nodeUsageListLoading = true
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	usages := a.manager.ListNodeResourceUsages(ctx, a.contextScope)
-	cancel()
-	a.nodeUsageByKey = usages
-	a.nodeUsageListVersion = storeVersion
-	if visibleRows > 0 && len(usages) == 0 {
-		a.nodeUsageListFetchedAt = time.Time{}
-	} else {
-		a.nodeUsageListFetchedAt = now
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		return nodeUsageSnapshotMsg{scopeKey: scopeKey, storeVersion: storeVersion, usages: a.manager.ListNodeResourceUsages(ctx, a.contextScope)}
 	}
-	a.nodeUsageListLoading = false
 }
 
 func (a *App) maybeRefreshResourceUsageCmd(now time.Time) tea.Cmd {
 	switch a.screen {
+	case screenPods:
+		return a.maybeRefreshPodUsageListCmd(now)
+	case screenResourceList:
+		return a.maybeRefreshNodeUsageListCmd(now)
 	case screenPodDetails:
 		if a.activePod.Pod == nil || a.podUsageLoading {
 			return nil
@@ -121,14 +118,129 @@ func (a *App) nodeUsageForRow(row state.NodeRow) cluster.NodeResourceUsage {
 	return cluster.NodeResourceUsage{Key: row.Key}
 }
 
+func (a *App) podUsageSnapshotReady() bool {
+	return a.podUsageListScopeKey == a.podUsageScopeKey() && !a.podUsageListFetchedAt.IsZero()
+}
+
+func (a *App) nodeUsageSnapshotReady() bool {
+	return a.nodeUsageListScopeKey == a.nodeUsageScopeKey() && !a.nodeUsageListFetchedAt.IsZero()
+}
+
+func usageLoadingCell() string {
+	return "loading…"
+}
+
+func (a *App) podCPUCell(row state.PodRow) string {
+	if !a.podUsageSnapshotReady() {
+		return usageLoadingCell()
+	}
+	return formatPodTableCPU(a.podUsageForRow(row))
+}
+
+func (a *App) podMemoryCell(row state.PodRow) string {
+	if !a.podUsageSnapshotReady() {
+		return usageLoadingCell()
+	}
+	return formatPodTableMemory(a.podUsageForRow(row))
+}
+
+func (a *App) podEphemeralCell(row state.PodRow) string {
+	if !a.podUsageSnapshotReady() {
+		return usageLoadingCell()
+	}
+	return formatPodTableEphemeral(a.podUsageForRow(row))
+}
+
+func (a *App) nodeCPUCell(row state.NodeRow) string {
+	if !a.nodeUsageSnapshotReady() {
+		return usageLoadingCell()
+	}
+	return formatNodeTableCPU(a.nodeUsageForRow(row))
+}
+
+func (a *App) nodeMemoryCell(row state.NodeRow) string {
+	if !a.nodeUsageSnapshotReady() {
+		return usageLoadingCell()
+	}
+	return formatNodeTableMemory(a.nodeUsageForRow(row))
+}
+
+func (a *App) nodeEphemeralCell(row state.NodeRow) string {
+	if !a.nodeUsageSnapshotReady() {
+		return usageLoadingCell()
+	}
+	return formatNodeTableEphemeral(a.nodeUsageForRow(row))
+}
+
 func (a *App) podCells(row state.PodRow) []string {
 	usage := a.podUsageForRow(row)
-	return []string{row.Cluster, row.Namespace, row.Name, row.Ready, row.Status, formatPodTableCPU(usage), formatPodTableMemory(usage), formatPodTableEphemeral(usage), formatPodTableGPU(usage), fmt.Sprintf("%d", row.Restarts), row.Age, row.Node}
+	return []string{row.Cluster, row.Namespace, row.Name, row.Ready, row.Status, a.podCPUCell(row), a.podMemoryCell(row), a.podEphemeralCell(row), formatPodTableGPU(usage), fmt.Sprintf("%d", row.Restarts), row.Age, row.Node}
 }
 
 func (a *App) nodeCells(row state.NodeRow) []string {
 	usage := a.nodeUsageForRow(row)
-	return []string{row.Cluster, row.Name, row.Status, formatNodeTableCPU(usage), formatNodeTableMemory(usage), formatNodeTableEphemeral(usage), formatNodeTableGPU(usage), row.Roles, row.Version, row.Age}
+	return []string{row.Cluster, row.Name, row.Status, a.nodeCPUCell(row), a.nodeMemoryCell(row), a.nodeEphemeralCell(row), formatNodeTableGPU(usage), row.Roles, row.Version, row.Age}
+}
+
+// podCellStringAt returns the string for a single pods table column without building the full cell slice.
+// Only the AGE column (index 10) calls WithAge (formats age string).
+func (a *App) podCellStringAt(row state.PodRow, columnIndex int, now time.Time) string {
+	switch columnIndex {
+	case 0:
+		return row.Cluster
+	case 1:
+		return row.Namespace
+	case 2:
+		return row.Name
+	case 3:
+		return row.Ready
+	case 4:
+		return row.Status
+	case 5:
+		return a.podCPUCell(row)
+	case 6:
+		return a.podMemoryCell(row)
+	case 7:
+		return a.podEphemeralCell(row)
+	case 8:
+		return formatPodTableGPU(a.podUsageForRow(row))
+	case 9:
+		return strconv.Itoa(row.Restarts)
+	case 10:
+		return row.WithAge(now).Age
+	case 11:
+		return row.Node
+	default:
+		return ""
+	}
+}
+
+// nodeCellStringAt mirrors nodeCells for a single column; only AGE (index 9) formats via WithAge.
+func (a *App) nodeCellStringAt(row state.NodeRow, columnIndex int, now time.Time) string {
+	switch columnIndex {
+	case 0:
+		return row.Cluster
+	case 1:
+		return row.Name
+	case 2:
+		return row.Status
+	case 3:
+		return a.nodeCPUCell(row)
+	case 4:
+		return a.nodeMemoryCell(row)
+	case 5:
+		return a.nodeEphemeralCell(row)
+	case 6:
+		return formatNodeTableGPU(a.nodeUsageForRow(row))
+	case 7:
+		return row.Roles
+	case 8:
+		return row.Version
+	case 9:
+		return row.WithAge(now).Age
+	default:
+		return ""
+	}
 }
 
 func (a *App) podTableRows(rows []state.PodRow, now time.Time) [][]string {

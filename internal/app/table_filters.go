@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,30 @@ type tableFilterColumnOption struct {
 	ColumnIndex int
 	ColumnTitle string
 	Count       int
+}
+
+func fuzzyTableFilterColumnOptions(options []tableFilterColumnOption, query string) []tableFilterColumnOption {
+	if strings.TrimSpace(query) == "" {
+		return append([]tableFilterColumnOption(nil), options...)
+	}
+	type scoredOption struct {
+		option tableFilterColumnOption
+		score  int
+	}
+	matched := make([]scoredOption, 0, len(options))
+	for _, option := range options {
+		score, ok := scoreSearchCandidate(option.ColumnTitle, query)
+		if !ok {
+			continue
+		}
+		matched = append(matched, scoredOption{option: option, score: score})
+	}
+	sort.SliceStable(matched, func(i int, j int) bool { return matched[i].score > matched[j].score })
+	result := make([]tableFilterColumnOption, 0, len(matched))
+	for _, item := range matched {
+		result = append(result, item.option)
+	}
+	return result
 }
 
 func (a *App) tableFilterBaseScreen() screen {
@@ -107,7 +132,13 @@ func (a *App) tableFilterFooter() string {
 	if total == 0 {
 		return "filters:0"
 	}
-	return fmt.Sprintf("filters:%d/%d", enabled, total)
+	var b strings.Builder
+	b.Grow(24)
+	b.WriteString("filters:")
+	b.WriteString(strconv.Itoa(enabled))
+	b.WriteByte('/')
+	b.WriteString(strconv.Itoa(total))
+	return b.String()
 }
 
 func (a *App) tableFilterCacheKey() string {
@@ -126,6 +157,12 @@ func (a *App) openTableFilterColumnPicker() tea.Cmd {
 	}
 	a.prevScreen = a.screen
 	a.screen = screenTableFilterColumnPicker
+	a.inputMode = inputModeSearch
+	a.tableFilterColumnQuery = ""
+	a.filter.SetPrompt("f> ")
+	a.filter.SetPlaceholder("column")
+	a.filter.SetValue("")
+	a.filter.Activate()
 	a.refreshTableFilterColumnPicker()
 	return nil
 }
@@ -149,16 +186,19 @@ func (a *App) refreshTableFilterColumnPicker() {
 		counts[filter.ColumnIndex]++
 	}
 	options := make([]tableFilterColumnOption, 0, len(columns))
-	rows := make([][]string, 0, len(columns))
 	for idx, column := range columns {
-		option := tableFilterColumnOption{ColumnIndex: idx, ColumnTitle: column.Title, Count: counts[idx]}
-		options = append(options, option)
-		rows = append(rows, []string{fmt.Sprintf("%s  (%d filters)", column.Title, option.Count)})
+		options = append(options, tableFilterColumnOption{ColumnIndex: idx, ColumnTitle: column.Title, Count: counts[idx]})
+	}
+	options = fuzzyTableFilterColumnOptions(options, a.tableFilterColumnQuery)
+	rows := make([][]string, 0, len(options))
+	for _, option := range options {
+		rows = append(rows, []string{fmt.Sprintf("%s  (%d filters)", option.ColumnTitle, option.Count)})
 	}
 	a.visibleTableFilterColumns = options
 	a.visibleRows = len(rows)
 	a.totalRows = len(rows)
 	a.setNavTable("FILTER COLUMNS", rows)
+	a.navTable.MoveTop()
 }
 
 func (a *App) refreshTableFilterManager() {
@@ -183,7 +223,7 @@ func (a *App) openTableFilterValuePrompt(columnIndex int, columnTitle string) te
 	a.screen = screenTableFilterColumnPicker
 	a.inputMode = inputModeTableFilterValue
 	a.filter.SetPrompt("f:" + strings.ToLower(columnTitle) + "> ")
-	a.filter.SetPlaceholder("contains, =exact, or *wildcard*")
+	a.filter.SetPlaceholder("contains, !contains, =exact, !=exact, *wildcard*, !*wildcard*")
 	a.filter.SetValue("")
 	a.filter.Activate()
 	return nil
@@ -294,6 +334,12 @@ func matchesStructuredFilter(candidate string, query string) bool {
 	if query == "" {
 		return true
 	}
+	if strings.HasPrefix(query, "!=") {
+		return candidate != strings.TrimSpace(strings.TrimPrefix(query, "!="))
+	}
+	if strings.HasPrefix(query, "!") {
+		return !matchesStructuredFilter(candidate, strings.TrimSpace(strings.TrimPrefix(query, "!")))
+	}
 	if strings.HasPrefix(query, "=") {
 		return candidate == strings.TrimSpace(strings.TrimPrefix(query, "="))
 	}
@@ -320,6 +366,30 @@ func matchesStructuredFilter(candidate string, query string) bool {
 	return strings.Contains(candidate, query)
 }
 
+func hasAnyEnabledColumnFilters(filters []tableColumnFilter) bool {
+	for _, filter := range filters {
+		if filter.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
+func columnFilterTouchesAge(columns []components.Column, filters []tableColumnFilter) bool {
+	for _, filter := range filters {
+		if !filter.Enabled {
+			continue
+		}
+		if filter.ColumnIndex < 0 || filter.ColumnIndex >= len(columns) {
+			continue
+		}
+		if normalizeSortTitle(columns[filter.ColumnIndex].Title) == "AGE" {
+			return true
+		}
+	}
+	return false
+}
+
 func matchesColumnFilters(cells []string, filters []tableColumnFilter) bool {
 	for _, filter := range filters {
 		if !filter.Enabled {
@@ -344,26 +414,62 @@ func serviceCells(row state.ServiceRow) []string {
 }
 
 func (a *App) matchesPodColumnFilters(row state.PodRow, now time.Time) bool {
-	return matchesColumnFilters(a.podCells(row.WithAge(now)), a.podColumnFilters)
+	if !hasAnyEnabledColumnFilters(a.podColumnFilters) {
+		return true
+	}
+	columns := a.podsView.Columns()
+	if columnFilterTouchesAge(columns, a.podColumnFilters) {
+		return matchesColumnFilters(a.podCells(row.WithAge(now)), a.podColumnFilters)
+	}
+	return matchesColumnFilters(a.podCells(row), a.podColumnFilters)
 }
 
 func (a *App) matchesDeploymentColumnFilters(row state.DeploymentRow, now time.Time) bool {
-	return matchesColumnFilters(deploymentCells(row.WithAge(now)), a.currentTableFilters())
+	filters := a.currentTableFilters()
+	if !hasAnyEnabledColumnFilters(filters) {
+		return true
+	}
+	columns := a.deploymentsView.Columns()
+	if columnFilterTouchesAge(columns, filters) {
+		return matchesColumnFilters(deploymentCells(row.WithAge(now)), filters)
+	}
+	return matchesColumnFilters(deploymentCells(row), filters)
 }
 
 func (a *App) matchesServiceColumnFilters(row state.ServiceRow, now time.Time) bool {
-	return matchesColumnFilters(serviceCells(row.WithAge(now)), a.currentTableFilters())
+	filters := a.currentTableFilters()
+	if !hasAnyEnabledColumnFilters(filters) {
+		return true
+	}
+	columns := a.servicesView.Columns()
+	if columnFilterTouchesAge(columns, filters) {
+		return matchesColumnFilters(serviceCells(row.WithAge(now)), filters)
+	}
+	return matchesColumnFilters(serviceCells(row), filters)
 }
 
 func (a *App) matchesNodeColumnFilters(row state.NodeRow, now time.Time) bool {
-	return matchesColumnFilters(a.nodeCells(row.WithAge(now)), a.currentTableFilters())
+	filters := a.currentTableFilters()
+	if !hasAnyEnabledColumnFilters(filters) {
+		return true
+	}
+	columns := a.nodesView.Columns()
+	if columnFilterTouchesAge(columns, filters) {
+		return matchesColumnFilters(a.nodeCells(row.WithAge(now)), filters)
+	}
+	return matchesColumnFilters(a.nodeCells(row), filters)
 }
 
 func (a *App) matchesGenericColumnFilters(row cluster.GenericResourceRow, now time.Time) bool {
-	return matchesColumnFilters(a.genericCells(row, now), a.currentTableFilters())
+	filters := a.currentTableFilters()
+	if !hasAnyEnabledColumnFilters(filters) {
+		return true
+	}
+	return matchesColumnFilters(a.genericCells(row, now), filters)
 }
 
 func (a *App) genericCells(row cluster.GenericResourceRow, now time.Time) []string {
+	// Always refresh Age for filter matching: printer/row state expects a formatted age like the visible table.
 	row = row.WithAge(now)
 	values := make([]string, 0, 3+len(row.PrinterValues)+1)
 	values = append(values, row.Cluster)

@@ -109,3 +109,54 @@ func TestRenderCatalogOverviewIncludesSections(t *testing.T) {
 func containsText(value string, fragment string) bool {
 	return strings.Contains(value, fragment)
 }
+
+func TestWarningMinHeapKeepsNewestByTime(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	h := &warningMinHeap{}
+	keepWarningCandidate(h, eventOverviewItem{When: now.Add(-3 * time.Hour), Reason: "old"}, 2)
+	keepWarningCandidate(h, eventOverviewItem{When: now, Reason: "newest"}, 2)
+	keepWarningCandidate(h, eventOverviewItem{When: now.Add(-time.Hour), Reason: "mid"}, 2)
+	if h.Len() != 2 {
+		t.Fatalf("heap len = %d, want 2", h.Len())
+	}
+	reasons := map[string]struct{}{}
+	for _, it := range *h {
+		reasons[it.Reason] = struct{}{}
+	}
+	if _, ok := reasons["newest"]; !ok {
+		t.Fatalf("missing newest: %#v", *h)
+	}
+	if _, ok := reasons["mid"]; !ok {
+		t.Fatalf("missing mid: %#v", *h)
+	}
+}
+
+func TestRestartMinHeapKeepsBestBySortOrder(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	h := &restartMinHeap{}
+	items := []restartOverviewItem{
+		{Pod: "a", When: now.Add(-time.Hour), Restarts: 1},
+		{Pod: "b", When: now, Restarts: 9},
+		{Pod: "c", When: now, Restarts: 3},
+		{Pod: "d", When: now.Add(time.Minute), Restarts: 1},
+	}
+	for _, it := range items {
+		keepRestartCandidate(h, it, 2)
+	}
+	if h.Len() != 2 {
+		t.Fatalf("heap len = %d, want 2", h.Len())
+	}
+	// Expect "b" (same time as c, higher restarts) and "d" (newest time).
+	pods := map[string]struct{}{}
+	for _, it := range *h {
+		pods[it.Pod] = struct{}{}
+	}
+	if _, ok := pods["b"]; !ok {
+		t.Fatalf("missing b: %#v", *h)
+	}
+	if _, ok := pods["d"]; !ok {
+		t.Fatalf("missing d: %#v", *h)
+	}
+}
+
+

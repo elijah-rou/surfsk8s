@@ -729,3 +729,112 @@ func TestOpenSelectedResourceFinderItemOpensResource(t *testing.T) {
 		t.Fatalf("resource = %q, want %q", got, want)
 	}
 }
+
+func TestMatchesStructuredFilterSupportsNegation(t *testing.T) {
+	if !matchesStructuredFilter("running", "!error") {
+		t.Fatalf("expected negated contains match")
+	}
+	if matchesStructuredFilter("running", "!run") {
+		t.Fatalf("expected negated contains miss")
+	}
+	if !matchesStructuredFilter("ready", "!=error") {
+		t.Fatalf("expected not-exact match")
+	}
+	if matchesStructuredFilter("ready", "!=ready") {
+		t.Fatalf("expected not-exact miss")
+	}
+	if !matchesStructuredFilter("frontend-api", "!*job*") {
+		t.Fatalf("expected negated wildcard match")
+	}
+	if matchesStructuredFilter("frontend-api", "!*api*") {
+		t.Fatalf("expected negated wildcard miss")
+	}
+}
+
+func TestSortDirectionPickerAcceptsAAndD(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenTableSortDirectionPicker
+	app.prevScreen = screenPods
+	app.pendingSortColumnIndex = 2
+	app.pendingSortColumnTitle = "NAME"
+
+	app.updateTableSortDirectionPickerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if got, want := len(app.podTableSorts), 1; got != want {
+		t.Fatalf("sort count = %d, want %d", got, want)
+	}
+	if app.podTableSorts[0].Desc {
+		t.Fatalf("expected ascending sort")
+	}
+
+	app.screen = screenTableSortDirectionPicker
+	app.prevScreen = screenPods
+	app.pendingSortColumnIndex = 0
+	app.pendingSortColumnTitle = "CONTEXT"
+	app.updateTableSortDirectionPickerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if got, want := len(app.podTableSorts), 2; got != want {
+		t.Fatalf("sort count = %d, want %d", got, want)
+	}
+	if !app.podTableSorts[1].Desc {
+		t.Fatalf("expected descending sort")
+	}
+}
+
+func TestListScreensExposeFooterHints(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPods
+	_, _, footer := app.currentView()
+	if !strings.Contains(footer, "Y CSV") || !strings.Contains(footer, "f add-filter") {
+		t.Fatalf("unexpected pod footer: %q", footer)
+	}
+
+	app.screen = screenResourceList
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	_, _, footer = app.currentView()
+	if !strings.Contains(footer, "S scale") || !strings.Contains(footer, "R restart") {
+		t.Fatalf("unexpected resource footer: %q", footer)
+	}
+}
+
+func TestPodUsageSnapshotRefreshRendersTableGauge(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	app.width = 160
+	app.height = 20
+	app.screen = screenPods
+	app.refreshPods(time.Now())
+
+	key := state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}.String()
+	app.Update(podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), storeVersion: store.Version(), usages: map[string]cluster.PodResourceUsage{
+		key: {Key: state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true},
+	}})
+	_, body, _ := app.currentView()
+	plain := stripUsageANSI(body)
+	if !strings.Contains(plain, "120m/") || !strings.Contains(plain, "█") {
+		t.Fatalf("expected usage gauge in body, got:\n%s", plain)
+	}
+}
+
+func TestNodeUsageSnapshotRefreshRendersTableGauge(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	app.width = 160
+	app.height = 20
+	app.screen = screenResourceList
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	app.refreshResourceList(time.Now())
+
+	key := state.NodeKey{Cluster: "dev", Name: "node-a"}.String()
+	app.Update(nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), storeVersion: store.Version(), usages: map[string]cluster.NodeResourceUsage{
+		key: {Key: state.NodeKey{Cluster: "dev", Name: "node-a"}, CPUUsedMilli: 1200, CPUAllocatableMilli: 4000, HasCPUUsage: true},
+	}})
+	_, body, _ := app.currentView()
+	if !strings.Contains(stripUsageANSI(body), "1200m/4") {
+		t.Fatalf("expected usage gauge in body, got:\n%s", stripUsageANSI(body))
+	}
+}

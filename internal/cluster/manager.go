@@ -63,6 +63,7 @@ type Manager struct {
 	rawConfig clientcmdapi.Config
 	contexts  []ContextInfo
 	conns     map[string]*ClusterConn
+	connOrder []string // sorted context names; mirrors keys in conns
 	resources map[string][]discoveredResource
 	closed    bool
 	version   atomic.Uint64
@@ -199,6 +200,7 @@ func (m *Manager) ConnectContext(ctx context.Context, contextName string) (*Clus
 	}
 	conn.message.Store("connecting")
 	m.conns[contextName] = conn
+	m.insertConnOrderLocked(contextName)
 	m.version.Add(1)
 	m.wg.Add(2)
 	m.mu.Unlock()
@@ -258,36 +260,69 @@ func (m *Manager) Catalog() []ResourceGroup {
 	return buildCatalog(merged)
 }
 
-func (m *Manager) Statuses() []components.ClusterStatus {
+func (m *Manager) insertConnOrderLocked(name string) {
+	i := sort.SearchStrings(m.connOrder, name)
+	if i < len(m.connOrder) && m.connOrder[i] == name {
+		return
+	}
+	m.connOrder = append(m.connOrder, "")
+	copy(m.connOrder[i+1:], m.connOrder[i:])
+	m.connOrder[i] = name
+}
+
+func clusterStatusFromConn(conn *ClusterConn) components.ClusterStatus {
+	status := components.ClusterStatus{
+		Name:    conn.Name,
+		Healthy: conn.Healthy.Load(),
+		Synced:  conn.Synced.Load(),
+	}
+	if message, ok := conn.message.Load().(string); ok {
+		status.Message = message
+	}
+	if warning, ok := conn.warning.Load().(string); ok {
+		status.Warning = warning
+	}
+	if decodeErrors := conn.Watcher.DecodeErrorCount(); decodeErrors > 0 {
+		status.Warning = fmt.Sprintf("decode-errors:%d", decodeErrors)
+	}
+	return status
+}
+
+// StatusesInto fills dst with cluster connection health in stable sorted order.
+// Reuses dst's backing array when cap(dst) is large enough; pass dst[:0] to append into an existing buffer.
+func (m *Manager) StatusesInto(dst []components.ClusterStatus) []components.ClusterStatus {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	ids := make([]string, 0, len(m.conns))
-	for id := range m.conns {
-		ids = append(ids, id)
+	var ids []string
+	switch {
+	case len(m.conns) == 0:
+		return dst[:0]
+	case len(m.connOrder) == len(m.conns):
+		ids = m.connOrder
+	default:
+		// Rare: map/connOrder mismatch; fall back to sorting keys once.
+		ids = make([]string, 0, len(m.conns))
+		for id := range m.conns {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
 	}
-	sort.Strings(ids)
 
-	statuses := make([]components.ClusterStatus, 0, len(ids))
-	for _, id := range ids {
-		conn := m.conns[id]
-		status := components.ClusterStatus{
-			Name:    conn.Name,
-			Healthy: conn.Healthy.Load(),
-			Synced:  conn.Synced.Load(),
-		}
-		if message, ok := conn.message.Load().(string); ok {
-			status.Message = message
-		}
-		if warning, ok := conn.warning.Load().(string); ok {
-			status.Warning = warning
-		}
-		if decodeErrors := conn.Watcher.DecodeErrorCount(); decodeErrors > 0 {
-			status.Warning = fmt.Sprintf("decode-errors:%d", decodeErrors)
-		}
-		statuses = append(statuses, status)
+	n := len(ids)
+	if cap(dst) < n {
+		dst = make([]components.ClusterStatus, n)
+	} else {
+		dst = dst[:n]
 	}
-	return statuses
+	for i, id := range ids {
+		dst[i] = clusterStatusFromConn(m.conns[id])
+	}
+	return dst
+}
+
+func (m *Manager) Statuses() []components.ClusterStatus {
+	return m.StatusesInto(nil)
 }
 
 func (m *Manager) ListGenericResource(ctx context.Context, resource ResourceKind) ([]GenericResourceRow, error) {
@@ -347,6 +382,79 @@ func (m *Manager) ListGenericResource(ctx context.Context, resource ResourceKind
 		return rows, fmt.Errorf("%s", joined)
 	}
 	return rows, nil
+}
+
+// ForEachGenericResourceRow visits every generic row across connected contexts in stable cluster order.
+// When caches are synced, iteration avoids allocating a merged []GenericResourceRow slice per watch.
+// If visit returns false, iteration stops early. Errors mirror ListGenericResource (partial data + trailing error).
+func (m *Manager) ForEachGenericResourceRow(ctx context.Context, resource ResourceKind, visit func(GenericResourceRow) bool) error {
+	if ctx == nil {
+		panic("cluster.Manager.ForEachGenericResourceRow: nil context")
+	}
+	if resource.Resource == "" {
+		panic("cluster.Manager.ForEachGenericResourceRow: empty resource")
+	}
+
+	m.mu.RLock()
+	connections := make([]*ClusterConn, 0, len(m.conns))
+	for _, conn := range m.conns {
+		connections = append(connections, conn)
+	}
+	sort.Slice(connections, func(i int, j int) bool { return connections[i].Name < connections[j].Name })
+	resolved := make(map[string]ResourceKind, len(connections))
+	for _, conn := range connections {
+		resolvedResource, ok := m.resolveResourceLocked(conn.Name, resource)
+		if !ok {
+			continue
+		}
+		resolved[conn.Name] = resolvedResource
+	}
+	m.mu.RUnlock()
+
+	if len(connections) == 0 {
+		return fmt.Errorf("no connected contexts")
+	}
+
+	var rowsVisited int
+	errors := make([]string, 0, len(connections))
+	for _, conn := range connections {
+		resolvedResource, ok := resolved[conn.Name]
+		if !ok {
+			errors = append(errors, conn.Name+": resource not discovered")
+			continue
+		}
+		watch := m.ensureGenericResourceWatch(conn, resolvedResource)
+		if watch.synced.Load() {
+			watch.touch(time.Now())
+			if !watch.forEachRow(func(row GenericResourceRow) bool {
+				rowsVisited++
+				return visit(row)
+			}) {
+				return nil
+			}
+			continue
+		}
+		list, err := listGenericResourceForConnection(ctx, conn, resolvedResource)
+		if err != nil {
+			errors = append(errors, conn.Name+": "+err.Error())
+			continue
+		}
+		built := buildGenericResourceRows(conn.Name, list, resolvedResource.PrinterColumns)
+		for _, row := range built {
+			rowsVisited++
+			if !visit(row) {
+				return nil
+			}
+		}
+	}
+	if len(errors) != 0 {
+		joined := strings.Join(errors, "; ")
+		if rowsVisited == 0 {
+			return fmt.Errorf("%s", joined)
+		}
+		return fmt.Errorf("%s", joined)
+	}
+	return nil
 }
 
 func (m *Manager) GenericResourceDetails(ctx context.Context, resource ResourceKind, key GenericResourceKey, now time.Time) (GenericResourceDetails, error) {

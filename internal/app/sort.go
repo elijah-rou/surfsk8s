@@ -295,8 +295,9 @@ func (a *App) comparePodRowCriterion(left state.PodRow, right state.PodRow, crit
 		return 0
 	}
 	title := columns[criterion.ColumnIndex].Title
-	leftValue := a.podCells(left.WithAge(time.Now()))[criterion.ColumnIndex]
-	rightValue := a.podCells(right.WithAge(time.Now()))[criterion.ColumnIndex]
+	now := time.Now()
+	leftValue := a.podCellStringAt(left, criterion.ColumnIndex, now)
+	rightValue := a.podCellStringAt(right, criterion.ColumnIndex, now)
 	return compareColumnValue(title, leftValue, rightValue, left.CreatedAt(), right.CreatedAt())
 }
 
@@ -348,8 +349,9 @@ func (a *App) compareNodeRowCriterion(left state.NodeRow, right state.NodeRow, c
 		return 0
 	}
 	title := columns[criterion.ColumnIndex].Title
-	leftValue := a.nodeCells(left.WithAge(time.Now()))[criterion.ColumnIndex]
-	rightValue := a.nodeCells(right.WithAge(time.Now()))[criterion.ColumnIndex]
+	now := time.Now()
+	leftValue := a.nodeCellStringAt(left, criterion.ColumnIndex, now)
+	rightValue := a.nodeCellStringAt(right, criterion.ColumnIndex, now)
 	return compareColumnValue(title, leftValue, rightValue, left.CreatedAt(), right.CreatedAt())
 }
 

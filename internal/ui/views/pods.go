@@ -20,7 +20,7 @@ func NewPodsView() PodsView {
 			{Title: "NAME", Width: 24},
 			{Title: "READY", Width: 7},
 			{Title: "STATUS", Width: 14},
-			{Title: "CPU", Width: 16},
+			{Title: "CPU", Width: 18},
 			{Title: "MEMORY", Width: 21},
 			{Title: "EPHEMERAL", Width: 21},
 			{Title: "GPU", Width: 12},

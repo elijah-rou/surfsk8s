@@ -13,6 +13,9 @@ import (
 	"github.com/elijahrou/surfsk8s/internal/ui/theme"
 )
 
+// Cached once; inherits are applied per-cell for width/semantic styles.
+var tableRowSelectedStyle = theme.SelectedRow.Copy()
+
 type Column struct {
 	Title      string
 	Width      int
@@ -59,6 +62,10 @@ type Table struct {
 	selectionActive  bool
 	selectionRowFrom int
 	selectionColFrom int
+
+	columnWidthStyles []lipgloss.Style
+	dividerPlain      string
+	dividerSelected   string
 }
 
 func NewTable(columns []Column) Table {
@@ -108,6 +115,9 @@ func (t *Table) SetColumns(columns []Column) {
 		panic("components.Table.SetColumns: empty columns")
 	}
 	t.columns = columns
+	t.columnWidthStyles = nil
+	t.dividerPlain = ""
+	t.dividerSelected = ""
 	t.clampColumnCursor()
 	t.clampHorizontalViewport()
 }
@@ -340,10 +350,30 @@ func (t *Table) renderColumnDivider(start int, end int, join string) string {
 	return strings.Join(parts, "")
 }
 
+func (t *Table) ensureCellWidthStyles() {
+	if len(t.columnWidthStyles) == len(t.columns) && len(t.columns) > 0 {
+		return
+	}
+	t.columnWidthStyles = make([]lipgloss.Style, len(t.columns))
+	for i, col := range t.columns {
+		t.columnWidthStyles[i] = lipgloss.NewStyle().Width(col.Width).MaxWidth(col.Width).Align(lipgloss.Left)
+	}
+}
+
+func (t *Table) ensureRichDividers() {
+	if t.dividerPlain != "" {
+		return
+	}
+	t.dividerPlain = theme.TableDivider.Render(tableColumnSeparator)
+	t.dividerSelected = theme.TableDivider.Copy().Background(lipgloss.Color("236")).Render(tableColumnSeparator)
+}
+
 func (t *Table) renderDataRow(cells []string, selected bool) string {
 	if t.variant == TableVariantSimple {
 		return t.renderSimpleRow(cells, selected)
 	}
+	t.ensureCellWidthStyles()
+	t.ensureRichDividers()
 	start, end := t.visibleColumnRange()
 	parts := make([]string, 0, (end-start)*2-1)
 	for idx, column := range t.columns[start:end] {
@@ -353,18 +383,18 @@ func (t *Table) renderDataRow(cells []string, selected bool) string {
 			cell = truncateCell(cells[absoluteColumn], column.Width)
 		}
 
-		style := lipgloss.NewStyle().Width(column.Width).MaxWidth(column.Width).Align(lipgloss.Left)
+		style := t.columnWidthStyles[absoluteColumn]
 		if selected {
-			style = style.Inherit(theme.SelectedRow.Copy())
+			style = style.Inherit(tableRowSelectedStyle)
 		}
 		styled := dataStyleForColumn(column.Title, cell).Inherit(style)
 		parts = append(parts, styled.Render(cell))
 		if idx < end-start-1 {
-			divider := theme.TableDivider.Copy()
 			if selected {
-				divider = divider.Background(lipgloss.Color("236"))
+				parts = append(parts, t.dividerSelected)
+			} else {
+				parts = append(parts, t.dividerPlain)
 			}
-			parts = append(parts, divider.Render(tableColumnSeparator))
 		}
 	}
 	return strings.Join(parts, "")
@@ -379,6 +409,7 @@ func (t *Table) headerCells() []string {
 }
 
 func (t *Table) renderSimpleRow(cells []string, selected bool) string {
+	t.ensureCellWidthStyles()
 	start, end := t.visibleColumnRange()
 	parts := make([]string, 0, end-start)
 	for idx, column := range t.columns[start:end] {
@@ -387,9 +418,9 @@ func (t *Table) renderSimpleRow(cells []string, selected bool) string {
 		if absoluteColumn < len(cells) {
 			cell = truncateCell(cells[absoluteColumn], column.Width)
 		}
-		style := lipgloss.NewStyle().Width(column.Width).MaxWidth(column.Width).Align(lipgloss.Left)
+		style := t.columnWidthStyles[absoluteColumn]
 		if selected {
-			style = style.Inherit(theme.SelectedRow.Copy())
+			style = style.Inherit(tableRowSelectedStyle)
 		}
 		parts = append(parts, style.Render(cell))
 	}
@@ -477,7 +508,9 @@ func dataStyleForColumn(title string, value string) lipgloss.Style {
 		return semanticStatusStyle(value)
 	case strings.Contains(normalizedTitle, "RESTART"):
 		return restartStyle(value)
-	case strings.Contains(normalizedTitle, "AGE"):
+	case normalizedTitle == "AGE":
+		// Must be exact: titles like "STORAGE" contain the substring "AGE" and must not use age styling
+		// (usage-bar cells would be mis-styled or look blank).
 		return ageStyle(value)
 	default:
 		return lipgloss.NewStyle()

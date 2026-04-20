@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,6 +26,30 @@ type tableSortColumnOption struct {
 type tableSortDirectionOption struct {
 	Label string
 	Desc  bool
+}
+
+func fuzzyTableSortColumnOptions(options []tableSortColumnOption, query string) []tableSortColumnOption {
+	if strings.TrimSpace(query) == "" {
+		return append([]tableSortColumnOption(nil), options...)
+	}
+	type scoredOption struct {
+		option tableSortColumnOption
+		score  int
+	}
+	matched := make([]scoredOption, 0, len(options))
+	for _, option := range options {
+		score, ok := scoreSearchCandidate(option.ColumnTitle, query)
+		if !ok {
+			continue
+		}
+		matched = append(matched, scoredOption{option: option, score: score})
+	}
+	sort.SliceStable(matched, func(i int, j int) bool { return matched[i].score > matched[j].score })
+	result := make([]tableSortColumnOption, 0, len(matched))
+	for _, item := range matched {
+		result = append(result, item.option)
+	}
+	return result
 }
 
 func (a *App) tableSortBaseScreen() screen {
@@ -79,20 +104,32 @@ func (a *App) enabledTableSorts() []tableSortCriterion {
 }
 
 func (a *App) tableSortLabel() string {
-	enabled := a.enabledTableSorts()
-	if len(enabled) == 0 {
+	criteria := a.currentTableSorts()
+	var first string
+	var firstDesc bool
+	enabledCount := 0
+	for _, c := range criteria {
+		if !c.Enabled {
+			continue
+		}
+		if enabledCount == 0 {
+			first = strings.ToLower(c.ColumnTitle)
+			firstDesc = c.Desc
+		}
+		enabledCount++
+	}
+	if enabledCount == 0 {
 		return "sort:default"
 	}
-	first := strings.ToLower(enabled[0].ColumnTitle)
-	if enabled[0].Desc {
+	if firstDesc {
 		first += "↓"
 	} else {
 		first += "↑"
 	}
-	if len(enabled) == 1 {
+	if enabledCount == 1 {
 		return "sort:" + first
 	}
-	return fmt.Sprintf("sort:%s+%d", first, len(enabled)-1)
+	return fmt.Sprintf("sort:%s+%d", first, enabledCount-1)
 }
 
 func (a *App) tableSortCacheKey() string {
@@ -104,8 +141,17 @@ func (a *App) tableSortCacheKey() string {
 	return strings.Join(parts, "|")
 }
 
+func (a *App) hasAnyEnabledTableSorts() bool {
+	for _, criterion := range a.currentTableSorts() {
+		if criterion.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) tableSortNeedsMaterializedSort() bool {
-	return len(a.enabledTableSorts()) != 0
+	return a.hasAnyEnabledTableSorts()
 }
 
 func (a *App) openTableSortColumnPicker() tea.Cmd {
@@ -115,6 +161,12 @@ func (a *App) openTableSortColumnPicker() tea.Cmd {
 	}
 	a.prevScreen = a.screen
 	a.screen = screenTableSortColumnPicker
+	a.inputMode = inputModeSearch
+	a.tableSortColumnQuery = ""
+	a.filter.SetPrompt("o> ")
+	a.filter.SetPlaceholder("column")
+	a.filter.SetValue("")
+	a.filter.Activate()
 	a.refreshTableSortColumnPicker()
 	return nil
 }
@@ -138,16 +190,19 @@ func (a *App) refreshTableSortColumnPicker() {
 		counts[criterion.ColumnIndex]++
 	}
 	options := make([]tableSortColumnOption, 0, len(columns))
-	rows := make([][]string, 0, len(columns))
 	for idx, column := range columns {
-		option := tableSortColumnOption{ColumnIndex: idx, ColumnTitle: column.Title, Count: counts[idx]}
-		options = append(options, option)
-		rows = append(rows, []string{fmt.Sprintf("%s  (%d sorts)", column.Title, option.Count)})
+		options = append(options, tableSortColumnOption{ColumnIndex: idx, ColumnTitle: column.Title, Count: counts[idx]})
+	}
+	options = fuzzyTableSortColumnOptions(options, a.tableSortColumnQuery)
+	rows := make([][]string, 0, len(options))
+	for _, option := range options {
+		rows = append(rows, []string{fmt.Sprintf("%s  (%d sorts)", option.ColumnTitle, option.Count)})
 	}
 	a.visibleTableSortColumns = options
 	a.visibleRows = len(rows)
 	a.totalRows = len(rows)
 	a.setNavTable("SORT COLUMNS", rows)
+	a.navTable.MoveTop()
 }
 
 func (a *App) refreshTableSortDirectionPicker() {
@@ -210,28 +265,27 @@ func (a *App) updateTableSortColumnPickerKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) updateTableSortDirectionPickerKeys(msg tea.KeyMsg) tea.Cmd {
-	options := []tableSortDirectionOption{{Label: "ascending  (A→Z, 0→9)", Desc: false}, {Label: "descending  (Z→A, 9→0)", Desc: true}}
-	switch msg.String() {
-	case "j", "down":
-		a.navTable.MoveDown(1)
-	case "k", "up":
-		a.navTable.MoveUp(1)
-	case "g", "home":
-		a.navTable.MoveTop()
-	case "G", "end":
-		a.navTable.MoveBottom()
-	case "enter":
-		index := a.navTable.SelectedIndex()
-		if index < 0 || index >= len(options) {
-			a.statusMessage = "no sort direction selected"
-			return nil
-		}
+	applyDirection := func(desc bool) tea.Cmd {
 		criteria := append([]tableSortCriterion(nil), a.currentTableSorts()...)
 		a.nextTableSortID++
-		criteria = append(criteria, tableSortCriterion{ID: a.nextTableSortID, ColumnIndex: a.pendingSortColumnIndex, ColumnTitle: a.pendingSortColumnTitle, Desc: options[index].Desc, Enabled: true})
+		criteria = append(criteria, tableSortCriterion{ID: a.nextTableSortID, ColumnIndex: a.pendingSortColumnIndex, ColumnTitle: a.pendingSortColumnTitle, Desc: desc, Enabled: true})
 		a.setCurrentTableSorts(criteria)
 		a.screen = a.prevScreen
 		a.refreshCurrentScreen(time.Now())
+		return nil
+	}
+
+	switch msg.String() {
+	case "a":
+		return applyDirection(false)
+	case "d":
+		return applyDirection(true)
+	case "enter":
+		index := a.navTable.SelectedIndex()
+		if index <= 0 {
+			return applyDirection(false)
+		}
+		return applyDirection(true)
 	case "esc", "backspace":
 		a.screen = screenTableSortColumnPicker
 		a.refreshTableSortColumnPicker()

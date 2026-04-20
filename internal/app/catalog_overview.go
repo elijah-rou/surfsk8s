@@ -1,12 +1,14 @@
 package app
 
 import (
+	"container/heap"
 	"context"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -49,18 +51,49 @@ type catalogOverviewData struct {
 	Restarts   []overviewLine
 }
 
+const catalogOverviewRefreshInterval = 15 * time.Second
+
+func (a *App) maybeRefreshCatalogOverviewCmd(now time.Time) tea.Cmd {
+	if a.screen != screenCatalog {
+		return nil
+	}
+	if a.catalogOverviewLoading {
+		return nil
+	}
+	scopeKey := a.catalogOverviewCurrentScopeKey()
+	storeVersion := a.store.Version()
+	managerVersion := a.manager.Version()
+	if a.catalogOverviewScopeKey == scopeKey && a.catalogOverviewStoreVersion == storeVersion && a.catalogOverviewManagerVersion == managerVersion && !a.catalogOverviewFetchedAt.IsZero() && now.Sub(a.catalogOverviewFetchedAt) < catalogOverviewRefreshInterval {
+		return nil
+	}
+	a.catalogOverviewLoading = true
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return catalogOverviewResultMsg{scopeKey: scopeKey, storeVersion: storeVersion, managerVersion: managerVersion, data: a.buildCatalogOverviewWithContext(ctx, now)}
+	}
+}
+
+func (a *App) catalogOverviewCurrentScopeKey() string {
+	return a.contextScope + "|" + a.namespace
+}
+
 func (a *App) buildCatalogOverview(now time.Time) catalogOverviewData {
+	return a.buildCatalogOverviewWithContext(context.Background(), now)
+}
+
+func (a *App) buildCatalogOverviewWithContext(ctx context.Context, now time.Time) catalogOverviewData {
 	data := catalogOverviewData{ScopeLabel: a.catalogOverviewScopeLabel()}
 	data.Cards = []overviewCard{
 		a.buildPodOverviewCard(),
-		a.buildGenericWorkloadOverviewCard("Deployments", "apps", "deployments"),
-		a.buildGenericWorkloadOverviewCard("ReplicaSets", "apps", "replicasets"),
-		a.buildGenericWorkloadOverviewCard("DaemonSets", "apps", "daemonsets"),
-		a.buildGenericWorkloadOverviewCard("StatefulSets", "apps", "statefulsets"),
-		a.buildCronJobOverviewCard(),
-		a.buildJobOverviewCard(),
+		a.buildGenericWorkloadOverviewCard(ctx, "Deployments", "apps", "deployments"),
+		a.buildGenericWorkloadOverviewCard(ctx, "ReplicaSets", "apps", "replicasets"),
+		a.buildGenericWorkloadOverviewCard(ctx, "DaemonSets", "apps", "daemonsets"),
+		a.buildGenericWorkloadOverviewCard(ctx, "StatefulSets", "apps", "statefulsets"),
+		a.buildCronJobOverviewCard(ctx),
+		a.buildJobOverviewCard(ctx),
 	}
-	data.Warnings = a.buildRecentWarningLines(now)
+	data.Warnings = a.buildRecentWarningLines(ctx, now)
 	data.Restarts = a.buildRecentRestartLines(now)
 	return data
 }
@@ -69,6 +102,9 @@ func (a *App) renderCatalogBody() string {
 	bodyWidth := max(24, a.width-4)
 	bodyHeight := a.bodyHeight(a.catalogTopRows())
 	overview := renderCatalogOverview(a.catalogOverview, bodyWidth, max(0, bodyHeight-4))
+	if overview == "" && a.catalogOverviewLoading {
+		overview = theme.Muted.Render("Loading overview...")
+	}
 	navHeight := bodyHeight
 	if overview != "" {
 		navHeight = max(4, bodyHeight-countLines(overview)-1)
@@ -118,68 +154,63 @@ func (a *App) buildPodOverviewCard() overviewCard {
 	return overviewCard{Title: "Pods", Metrics: orderedOverviewMetrics(counts, []string{"Running", "Error", "Pending", "Unschedulable", "ImagePullBackOff", "CrashLoopBackOff", "Completed"})}
 }
 
-func (a *App) buildGenericWorkloadOverviewCard(title string, apiGroup string, resource string) overviewCard {
-	rows := a.overviewRowsFor(apiGroup, resource)
+func (a *App) buildGenericWorkloadOverviewCard(ctx context.Context, title string, apiGroup string, resource string) overviewCard {
 	counts := make(map[string]overviewMetric, 4)
-	for _, row := range rows {
+	a.forEachFilteredCatalogRow(ctx, apiGroup, resource, func(row cluster.GenericResourceRow) bool {
 		label, tone := genericReplicaOverviewBucket(row)
 		metric := counts[label]
 		metric.Label = label
 		metric.Tone = tone
 		metric.Count++
 		counts[label] = metric
-	}
+		return true
+	})
 	return overviewCard{Title: title, Metrics: orderedOverviewMetrics(counts, []string{"Running", "Pending", "Unavailable", "Idle", "Failed"})}
 }
 
-func (a *App) buildCronJobOverviewCard() overviewCard {
-	rows := a.overviewRowsFor("batch", "cronjobs")
+func (a *App) buildCronJobOverviewCard(ctx context.Context) overviewCard {
 	counts := make(map[string]overviewMetric, 3)
-	for _, row := range rows {
+	a.forEachFilteredCatalogRow(ctx, "batch", "cronjobs", func(row cluster.GenericResourceRow) bool {
 		label, tone := cronJobOverviewBucket(row.Object)
 		metric := counts[label]
 		metric.Label = label
 		metric.Tone = tone
 		metric.Count++
 		counts[label] = metric
-	}
+		return true
+	})
 	return overviewCard{Title: "CronJobs", Metrics: orderedOverviewMetrics(counts, []string{"Scheduled", "Suspended", "Failed"})}
 }
 
-func (a *App) buildJobOverviewCard() overviewCard {
-	rows := a.overviewRowsFor("batch", "jobs")
+func (a *App) buildJobOverviewCard(ctx context.Context) overviewCard {
 	counts := make(map[string]overviewMetric, 4)
-	for _, row := range rows {
+	a.forEachFilteredCatalogRow(ctx, "batch", "jobs", func(row cluster.GenericResourceRow) bool {
 		label, tone := jobOverviewBucket(row.Object)
 		metric := counts[label]
 		metric.Label = label
 		metric.Tone = tone
 		metric.Count++
 		counts[label] = metric
-	}
+		return true
+	})
 	return overviewCard{Title: "Jobs", Metrics: orderedOverviewMetrics(counts, []string{"Running", "Failed", "Complete", "Pending"})}
 }
 
-func (a *App) overviewRowsFor(apiGroup string, resource string) []cluster.GenericResourceRow {
+// forEachFilteredCatalogRow streams generic rows for the catalog scope without materializing a full slice.
+func (a *App) forEachFilteredCatalogRow(ctx context.Context, apiGroup string, resource string, visit func(cluster.GenericResourceRow) bool) {
 	kind, ok := a.catalogResourceKind(apiGroup, resource)
 	if !ok {
-		return nil
+		return
 	}
-	rows, err := a.manager.ListGenericResource(context.Background(), kind)
-	if err != nil {
-		return nil
-	}
-	filtered := make([]cluster.GenericResourceRow, 0, len(rows))
-	for _, row := range rows {
+	_ = a.manager.ForEachGenericResourceRow(ctx, kind, func(row cluster.GenericResourceRow) bool {
 		if !a.contextMatches(row.Cluster) {
-			continue
+			return true
 		}
 		if kind.Namespaced && a.namespace != "" && row.Namespace != a.namespace {
-			continue
+			return true
 		}
-		filtered = append(filtered, row)
-	}
-	return filtered
+		return visit(row)
+	})
 }
 
 func (a *App) catalogResourceKind(apiGroup string, resource string) (cluster.ResourceKind, bool) {
@@ -201,16 +232,48 @@ type eventOverviewItem struct {
 	When    time.Time
 }
 
-func (a *App) buildRecentWarningLines(now time.Time) []overviewLine {
-	rows := a.overviewRowsFor("", "events")
-	items := make([]eventOverviewItem, 0, len(rows))
-	for _, row := range rows {
+// warningMinHeap keeps the newest Warning events by time using a min-heap of size k (oldest of the k at index 0).
+type warningMinHeap []eventOverviewItem
+
+func (h warningMinHeap) Len() int           { return len(h) }
+func (h warningMinHeap) Less(i, j int) bool { return h[i].When.Before(h[j].When) }
+func (h warningMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+
+func (h *warningMinHeap) Push(x interface{}) { *h = append(*h, x.(eventOverviewItem)) }
+
+func (h *warningMinHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+func keepWarningCandidate(h *warningMinHeap, item eventOverviewItem, k int) {
+	if k <= 0 {
+		return
+	}
+	if h.Len() < k {
+		heap.Push(h, item)
+		return
+	}
+	// Root holds the oldest Warning among the current top-k by time.
+	if item.When.After((*h)[0].When) {
+		heap.Pop(h)
+		heap.Push(h, item)
+	}
+}
+
+func (a *App) buildRecentWarningLines(ctx context.Context, now time.Time) []overviewLine {
+	const topK = 5
+	h := &warningMinHeap{}
+	a.forEachFilteredCatalogRow(ctx, "", "events", func(row cluster.GenericResourceRow) bool {
 		if row.Object == nil {
-			continue
+			return true
 		}
 		eventType, _, _ := unstructured.NestedString(row.Object.Object, "type")
 		if !strings.EqualFold(eventType, "Warning") {
-			continue
+			return true
 		}
 		reason, _, _ := unstructured.NestedString(row.Object.Object, "reason")
 		count, found, _ := unstructured.NestedInt64(row.Object.Object, "count")
@@ -218,8 +281,11 @@ func (a *App) buildRecentWarningLines(now time.Time) []overviewLine {
 			count = 1
 		}
 		when := overviewEventTime(row.Object)
-		items = append(items, eventOverviewItem{Cluster: row.Cluster, Reason: firstNonEmptyString(reason, row.Status, row.Name), Count: count, When: when})
-	}
+		item := eventOverviewItem{Cluster: row.Cluster, Reason: firstNonEmptyString(reason, row.Status, row.Name), Count: count, When: when}
+		keepWarningCandidate(h, item, topK)
+		return true
+	})
+	items := append([]eventOverviewItem(nil), *h...)
 	sort.SliceStable(items, func(i int, j int) bool {
 		if !items[i].When.Equal(items[j].When) {
 			return items[i].When.After(items[j].When)
@@ -229,9 +295,6 @@ func (a *App) buildRecentWarningLines(now time.Time) []overviewLine {
 		}
 		return items[i].Reason < items[j].Reason
 	})
-	if len(items) > 5 {
-		items = items[:5]
-	}
 	lines := make([]overviewLine, 0, max(1, len(items)))
 	showCluster := a.contextScope == "" && len(a.manager.ConnectedContextNames()) > 1
 	for _, item := range items {
@@ -258,8 +321,53 @@ type restartOverviewItem struct {
 	When      time.Time
 }
 
+// restartWorse reports whether a should sort after b (lower priority for the overview).
+func restartWorse(a, b restartOverviewItem) bool {
+	if !a.When.Equal(b.When) {
+		return a.When.Before(b.When)
+	}
+	if a.Restarts != b.Restarts {
+		return a.Restarts < b.Restarts
+	}
+	return a.Pod > b.Pod
+}
+
+// restartMinHeap keeps the best restartOverviewItem rows using a min-heap where the root is the worst among k.
+type restartMinHeap []restartOverviewItem
+
+func (h restartMinHeap) Len() int { return len(h) }
+func (h restartMinHeap) Less(i, j int) bool {
+	return restartWorse(h[i], h[j])
+}
+func (h restartMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+
+func (h *restartMinHeap) Push(x interface{}) { *h = append(*h, x.(restartOverviewItem)) }
+
+func (h *restartMinHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	x := old[n-1]
+	*h = old[:n-1]
+	return x
+}
+
+func keepRestartCandidate(h *restartMinHeap, item restartOverviewItem, k int) {
+	if k <= 0 {
+		return
+	}
+	if h.Len() < k {
+		heap.Push(h, item)
+		return
+	}
+	if restartWorse((*h)[0], item) {
+		heap.Pop(h)
+		heap.Push(h, item)
+	}
+}
+
 func (a *App) buildRecentRestartLines(now time.Time) []overviewLine {
-	items := make([]restartOverviewItem, 0, 32)
+	const topK = 5
+	h := &restartMinHeap{}
 	a.store.ForEachPod(func(row state.PodRow) bool {
 		if !a.contextMatches(row.Cluster) {
 			return true
@@ -270,17 +378,18 @@ func (a *App) buildRecentRestartLines(now time.Time) []overviewLine {
 		if row.Restarts == 0 {
 			return true
 		}
-		details, ok := a.store.PodDetailsByKey(row.Key, now)
-		if !ok || details.Pod == nil {
-			return true
-		}
-		item, ok := podRestartOverviewItem(details.Pod, row)
+		pod, ok := a.store.PodObjectByKey(row.Key)
 		if !ok {
 			return true
 		}
-		items = append(items, item)
+		item, ok := podRestartOverviewItem(pod, row)
+		if !ok {
+			return true
+		}
+		keepRestartCandidate(h, item, topK)
 		return true
 	})
+	items := append([]restartOverviewItem(nil), *h...)
 	sort.SliceStable(items, func(i int, j int) bool {
 		if !items[i].When.Equal(items[j].When) {
 			return items[i].When.After(items[j].When)
@@ -290,9 +399,6 @@ func (a *App) buildRecentRestartLines(now time.Time) []overviewLine {
 		}
 		return items[i].Pod < items[j].Pod
 	})
-	if len(items) > 5 {
-		items = items[:5]
-	}
 	lines := make([]overviewLine, 0, max(1, len(items)))
 	showCluster := a.contextScope == "" && len(a.manager.ConnectedContextNames()) > 1
 	for _, item := range items {
@@ -320,42 +426,44 @@ func podRestartOverviewItem(pod *corev1.Pod, row state.PodRow) (restartOverviewI
 	if pod == nil {
 		return restartOverviewItem{}, false
 	}
-	statuses := append([]corev1.ContainerStatus(nil), pod.Status.InitContainerStatuses...)
-	statuses = append(statuses, pod.Status.ContainerStatuses...)
 	best := restartOverviewItem{}
 	found := false
-	for _, status := range statuses {
-		if status.RestartCount == 0 {
-			continue
-		}
-		terminated := status.LastTerminationState.Terminated
-		if terminated == nil {
-			terminated = status.State.Terminated
-		}
-		when := pod.CreationTimestamp.Time
-		reason := row.Status
-		var exitCode int32
-		if terminated != nil {
-			if !terminated.FinishedAt.Time.IsZero() {
-				when = terminated.FinishedAt.Time
+	consider := func(statuses []corev1.ContainerStatus) {
+		for _, status := range statuses {
+			if status.RestartCount == 0 {
+				continue
 			}
-			reason = firstNonEmptyString(terminated.Reason, reason)
-			exitCode = terminated.ExitCode
-		}
-		item := restartOverviewItem{
-			Cluster:   row.Cluster,
-			Namespace: row.Namespace,
-			Pod:       row.Name,
-			Reason:    reason,
-			ExitCode:  exitCode,
-			Restarts:  int(status.RestartCount),
-			When:      when,
-		}
-		if !found || item.When.After(best.When) || (item.When.Equal(best.When) && item.Restarts > best.Restarts) {
-			best = item
-			found = true
+			terminated := status.LastTerminationState.Terminated
+			if terminated == nil {
+				terminated = status.State.Terminated
+			}
+			when := pod.CreationTimestamp.Time
+			reason := row.Status
+			var exitCode int32
+			if terminated != nil {
+				if !terminated.FinishedAt.Time.IsZero() {
+					when = terminated.FinishedAt.Time
+				}
+				reason = firstNonEmptyString(terminated.Reason, reason)
+				exitCode = terminated.ExitCode
+			}
+			item := restartOverviewItem{
+				Cluster:   row.Cluster,
+				Namespace: row.Namespace,
+				Pod:       row.Name,
+				Reason:    reason,
+				ExitCode:  exitCode,
+				Restarts:  int(status.RestartCount),
+				When:      when,
+			}
+			if !found || item.When.After(best.When) || (item.When.Equal(best.When) && item.Restarts > best.Restarts) {
+				best = item
+				found = true
+			}
 		}
 	}
+	consider(pod.Status.InitContainerStatuses)
+	consider(pod.Status.ContainerStatuses)
 	return best, found
 }
 

@@ -89,6 +89,25 @@ func TestStorePodResourceVersionByKey(t *testing.T) {
 	}
 }
 
+func TestStorePodObjectByKey(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	pod := newTestPod("frontend", "web", corev1.PodRunning, 1, 1, "node-a", now.Add(-time.Minute), "42")
+	store.UpsertPod("dev", pod)
+
+	key := PodKey{Cluster: "dev", Namespace: "web", Name: "frontend"}
+	obj, ok := store.PodObjectByKey(key)
+	if !ok {
+		t.Fatalf("expected pod object")
+	}
+	if obj == nil || obj.Name != "frontend" {
+		t.Fatalf("unexpected pod object")
+	}
+	if _, ok := store.PodObjectByKey(PodKey{Cluster: "dev", Namespace: "missing", Name: "x"}); ok {
+		t.Fatalf("expected miss")
+	}
+}
+
 func newTestPod(name string, namespace string, phase corev1.PodPhase, containers int, ready int, node string, createdAt time.Time, resourceVersion string) *corev1.Pod {
 	statuses := make([]corev1.ContainerStatus, 0, containers)
 	for idx := range containers {

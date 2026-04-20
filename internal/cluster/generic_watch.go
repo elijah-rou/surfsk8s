@@ -115,6 +115,27 @@ func (w *genericResourceWatch) listRows() []GenericResourceRow {
 	return result
 }
 
+// forEachRow visits cached rows in sort order without allocating a full copy slice.
+// If visit returns false, iteration stops. Returns false iff visit stopped early.
+func (w *genericResourceWatch) forEachRow(visit func(GenericResourceRow) bool) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.sortedDirty {
+		w.sortedRows = w.sortedRows[:0]
+		for _, row := range w.rows {
+			w.sortedRows = append(w.sortedRows, row)
+		}
+		sortGenericResourceRows(w.sortedRows)
+		w.sortedDirty = false
+	}
+	for _, row := range w.sortedRows {
+		if !visit(row) {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *genericResourceWatch) details(key GenericResourceKey, now time.Time) (GenericResourceDetails, bool, error) {
 	w.mu.RLock()
 	object, ok := w.objects[key]

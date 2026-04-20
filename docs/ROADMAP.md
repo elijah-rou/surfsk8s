@@ -4,6 +4,8 @@ Current build already covers the core workflow: multi-context connect, catalog b
 
 This doc tracks the next improvements worth doing from here.
 
+For the focused next performance pass, see `PERFORMANCE-PLAN.md`.
+
 ## Suggested Improvements
 
 ### Near-term UX

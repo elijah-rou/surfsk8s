@@ -234,6 +234,10 @@ func (m *Manager) ListNodeResourceUsages(ctx context.Context, clusterScope strin
 				usage.HasCPUUsage = true
 				usage.HasMemoryUsage = true
 			}
+			if usedBytes, ok := fetchNodeEphemeralUsage(ctx, conn, details.Row.Name); ok {
+				usage.EphemeralUsedBytes = usedBytes
+				usage.HasEphemeralUsage = true
+			}
 			result[details.Row.Key.String()] = usage
 		}
 	}
@@ -467,7 +471,14 @@ func podEphemeralUsageFromSummary(summary summaryStats, pod *corev1.Pod) (int64,
 
 func fetchNodeEphemeralUsage(ctx context.Context, conn *ClusterConn, nodeName string) (int64, bool) {
 	summary, ok := fetchNodeSummary(ctx, conn, nodeName)
-	if !ok || summary.Node.Fs == nil || summary.Node.Fs.UsedBytes == nil {
+	if !ok {
+		return 0, false
+	}
+	return nodeEphemeralUsageFromSummary(summary)
+}
+
+func nodeEphemeralUsageFromSummary(summary summaryStats) (int64, bool) {
+	if summary.Node.Fs == nil || summary.Node.Fs.UsedBytes == nil {
 		return 0, false
 	}
 	return int64(*summary.Node.Fs.UsedBytes), true

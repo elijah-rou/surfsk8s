@@ -4,8 +4,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elijahrou/surfsk8s/internal/cluster"
+	"github.com/elijahrou/surfsk8s/internal/state"
 )
 
 var usageANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -67,5 +69,35 @@ func TestRenderNodeUsageSectionIncludesAllocatedGPU(t *testing.T) {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("missing %q in\n%s", fragment, rendered)
 		}
+	}
+}
+
+func TestUsageCellsShowLoadingUntilSnapshotReady(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.podUsageByKey = make(map[string]cluster.PodResourceUsage)
+	app.nodeUsageByKey = make(map[string]cluster.NodeResourceUsage)
+	podRow := state.PodRow{Key: state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}}
+	nodeRow := state.NodeRow{Key: state.NodeKey{Cluster: "dev", Name: "node-a"}}
+
+	if got := app.podCPUCell(podRow); got != "loading…" {
+		t.Fatalf("pod loading cell = %q, want loading placeholder", got)
+	}
+	if got := app.nodeEphemeralCell(nodeRow); got != "loading…" {
+		t.Fatalf("node loading cell = %q, want loading placeholder", got)
+	}
+
+	app.podUsageListScopeKey = app.podUsageScopeKey()
+	app.podUsageListFetchedAt = time.Now()
+	app.podUsageByKey[podRow.Key.String()] = cluster.PodResourceUsage{Key: podRow.Key, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true}
+	if got := stripUsageANSI(app.podCPUCell(podRow)); !strings.Contains(got, "120m/") {
+		t.Fatalf("pod ready cell = %q, want rendered usage", got)
+	}
+
+	app.nodeUsageListScopeKey = app.nodeUsageScopeKey()
+	app.nodeUsageListFetchedAt = time.Now()
+	app.nodeUsageByKey[nodeRow.Key.String()] = cluster.NodeResourceUsage{Key: nodeRow.Key, EphemeralUsedBytes: 50 * 1024 * 1024 * 1024, EphemeralAllocatable: 100 * 1024 * 1024 * 1024, HasEphemeralUsage: true}
+	if got := stripUsageANSI(app.nodeEphemeralCell(nodeRow)); !strings.Contains(got, "50") {
+		t.Fatalf("node ready cell = %q, want rendered usage", got)
 	}
 }

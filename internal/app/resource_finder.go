@@ -37,6 +37,7 @@ func (a *App) refreshResourceFinder() {
 	a.visibleRows = len(a.visibleResourceItems)
 	a.totalRows = len(a.resourceFinderItems)
 	a.setNavTable("RESOURCES", renderResourceFinderRows(a.visibleResourceItems, a.favoriteResources))
+	a.navTable.MoveTop()
 }
 
 func buildResourceFinderItems(groups []cluster.ResourceGroup) []resourceFinderItem {
@@ -219,5 +220,5 @@ func (a *App) openSelectedResourceFinderItem() tea.Cmd {
 	a.inputMode = inputModeSearch
 	a.filter.Deactivate()
 	a.openResourceList(resource)
-	return nil
+	return a.maybeRefreshResourceUsageCmd(time.Now())
 }

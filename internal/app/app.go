@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,9 +38,28 @@ type podUsageResultMsg struct {
 	usage cluster.PodResourceUsage
 }
 
+type podUsageSnapshotMsg struct {
+	scopeKey     string
+	storeVersion uint64
+	usages       map[string]cluster.PodResourceUsage
+}
+
 type nodeUsageResultMsg struct {
 	key   state.NodeKey
 	usage cluster.NodeResourceUsage
+}
+
+type nodeUsageSnapshotMsg struct {
+	scopeKey     string
+	storeVersion uint64
+	usages       map[string]cluster.NodeResourceUsage
+}
+
+type catalogOverviewResultMsg struct {
+	scopeKey       string
+	storeVersion   uint64
+	managerVersion uint64
+	data           catalogOverviewData
 }
 
 type screen int
@@ -93,8 +113,9 @@ type commandItem struct {
 // Orchestrates cluster connections, state, and UI views.
 type App struct {
 	store    *state.Store
-	manager  *cluster.Manager
-	executor *actions.Executor
+	manager          *cluster.Manager
+	clusterStatusBuf []components.ClusterStatus
+	executor         *actions.Executor
 
 	podsView        views.PodsView
 	deploymentsView views.DeploymentsView
@@ -137,10 +158,15 @@ type App struct {
 	favoriteResourceIDs []string
 	favoriteResources   map[string]bool
 
-	catalog         []cluster.ResourceGroup
-	visibleGroups   []cluster.ResourceGroup
-	catalogQuery    string
-	catalogOverview catalogOverviewData
+	catalog                       []cluster.ResourceGroup
+	visibleGroups                 []cluster.ResourceGroup
+	catalogQuery                  string
+	catalogOverview               catalogOverviewData
+	catalogOverviewFetchedAt      time.Time
+	catalogOverviewLoading        bool
+	catalogOverviewScopeKey       string
+	catalogOverviewStoreVersion   uint64
+	catalogOverviewManagerVersion uint64
 
 	activeGroup      cluster.ResourceGroup
 	visibleResources []cluster.ResourceKind
@@ -149,6 +175,9 @@ type App struct {
 
 	namespace              string
 	namespaces             []string
+	podNamespacesCacheKey         string
+	deploymentNamespacesCacheKey  string
+	serviceNamespacesCacheKey     string
 	podQuery               string
 	resourceQuery2         string
 	activePod              state.PodDetails
@@ -164,6 +193,8 @@ type App struct {
 	nodeUsageFetchedAt     time.Time
 	podUsageListFetchedAt  time.Time
 	nodeUsageListFetchedAt time.Time
+	podUsageListScopeKey   string
+	nodeUsageListScopeKey  string
 	podUsageListVersion    uint64
 	nodeUsageListVersion   uint64
 	podUsageLoading        bool
@@ -195,6 +226,7 @@ type App struct {
 
 	pendingFilterColumnIndex  int
 	pendingFilterColumnTitle  string
+	tableFilterColumnQuery    string
 	visibleTableFilterColumns []tableFilterColumnOption
 	visibleTableFilters       []tableColumnFilter
 	podColumnFilters          []tableColumnFilter
@@ -203,6 +235,7 @@ type App struct {
 
 	pendingSortColumnIndex  int
 	pendingSortColumnTitle  string
+	tableSortColumnQuery    string
 	visibleTableSortColumns []tableSortColumnOption
 	visibleTableSorts       []tableSortCriterion
 	podTableSorts           []tableSortCriterion
@@ -391,12 +424,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		now := time.Time(typed)
-		var cmd tea.Cmd
 		if a.shouldRefresh(now) {
 			a.refreshCurrentScreen(now)
 		}
-		cmd = a.maybeRefreshResourceUsageCmd(now)
-		return a, tea.Batch(tickCmd(), cmd)
+		return a, tea.Batch(tickCmd(), a.maybeRefreshCatalogOverviewCmd(now), a.maybeRefreshResourceUsageCmd(now))
 
 	case connectResultMsg:
 		a.connecting = false
@@ -409,7 +440,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.statusMessage = fmt.Sprintf("connected %d context(s)", len(typed.contexts))
 		a.screen = screenCatalog
 		a.refreshCatalog()
-		return a, nil
+		return a, a.maybeRefreshCatalogOverviewCmd(time.Now())
 
 	case actionResultMsg:
 		if typed.err != nil {
@@ -442,6 +473,43 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.refreshCurrentScreen(time.Now())
 		}
 		return a, nil
+
+	case podUsageSnapshotMsg:
+		a.podUsageListLoading = false
+		if typed.scopeKey == a.podUsageScopeKey() && typed.storeVersion == a.store.Version() {
+			a.podUsageByKey = typed.usages
+			a.podUsageListScopeKey = typed.scopeKey
+			a.podUsageListVersion = typed.storeVersion
+			a.podUsageListFetchedAt = time.Now()
+			if a.screen == screenPods {
+				a.refreshPods(time.Now())
+			}
+		}
+		return a, nil
+
+	case nodeUsageSnapshotMsg:
+		a.nodeUsageListLoading = false
+		if typed.scopeKey == a.nodeUsageScopeKey() && typed.storeVersion == a.store.Version() {
+			a.nodeUsageByKey = typed.usages
+			a.nodeUsageListScopeKey = typed.scopeKey
+			a.nodeUsageListVersion = typed.storeVersion
+			a.nodeUsageListFetchedAt = time.Now()
+			if a.screen == screenResourceList && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
+				a.refreshResourceList(time.Now())
+			}
+		}
+		return a, nil
+
+	case catalogOverviewResultMsg:
+		a.catalogOverviewLoading = false
+		if typed.scopeKey == a.catalogOverviewCurrentScopeKey() && typed.storeVersion == a.store.Version() && typed.managerVersion == a.manager.Version() {
+			a.catalogOverview = typed.data
+			a.catalogOverviewScopeKey = typed.scopeKey
+			a.catalogOverviewStoreVersion = typed.storeVersion
+			a.catalogOverviewManagerVersion = typed.managerVersion
+			a.catalogOverviewFetchedAt = time.Now()
+		}
+		return a, nil
 	}
 
 	return a, nil
@@ -452,8 +520,9 @@ func (a *App) View() string {
 	compactList := a.screen == screenPods || a.screen == screenResourceList
 	catalogScreen := a.screen == screenCatalog
 
+	a.clusterStatusBuf = a.manager.StatusesInto(a.clusterStatusBuf[:0])
 	statusState := components.StatusBarState{
-		Clusters:    a.manager.Statuses(),
+		Clusters:    a.clusterStatusBuf,
 		Context:     a.currentContextLabel(),
 		Namespace:   a.currentNamespaceLabel(),
 		InputLabel:  inputLabel,
@@ -464,11 +533,12 @@ func (a *App) View() string {
 		Activity:    a.activity,
 	}
 
-	var sections []string
+	title, body, footer := a.currentView()
+
+	sections := make([]string, 0, 8)
 	if compactList {
 		sections = append(sections, a.listScreenCombinedHeader(statusState))
 	} else {
-		title, _, _ := a.currentView()
 		sections = append(sections, theme.HeaderStyle.Render(title))
 		sections = append(sections, a.statusBar.View(statusState))
 	}
@@ -487,10 +557,6 @@ func (a *App) View() string {
 		sections = append(sections, a.listScreenHeaderDivider())
 	}
 
-	_, body, footer := a.currentView()
-	if compactList {
-		footer = ""
-	}
 	if catalogScreen {
 		body = a.renderCatalogBody()
 	} else if a.usesTextViewport() {
@@ -512,26 +578,24 @@ func (a *App) listScreenHeaderDivider() string {
 }
 
 func (a *App) listScreenCombinedHeader(state components.StatusBarState) string {
-	left := strings.Join([]string{
-		"surfsk8s",
-		a.titleNamespaceSegment(),
-		a.listResourceTitleSegment(),
-	}, " · ")
-	var meta string
+	var b strings.Builder
+	b.Grow(256)
+	b.WriteString("surfsk8s")
+	b.WriteString(" · ")
+	b.WriteString(a.titleNamespaceSegment())
+	b.WriteString(" · ")
+	b.WriteString(a.listResourceTitleSegment())
+	b.WriteString(" · ")
 	if a.screen == screenPods {
-		meta = strings.Join([]string{
-			a.podTable.Footer(),
-			a.tableFilterFooter(),
-			a.tableSortLabel(),
-		}, " · ")
+		b.WriteString(a.podTable.Footer())
 	} else {
-		meta = strings.Join([]string{
-			a.resourceTable.Footer(),
-			a.tableFilterFooter(),
-			a.tableSortLabel(),
-		}, " · ")
+		b.WriteString(a.resourceTable.Footer())
 	}
-	leftLine := left + " · " + meta
+	b.WriteString(" · ")
+	b.WriteString(a.tableFilterFooter())
+	b.WriteString(" · ")
+	b.WriteString(a.tableSortLabel())
+	leftLine := b.String()
 	right := components.FormatListStatusRight(state)
 	sep := theme.Muted.Render(" │ ")
 	return theme.HeaderStyle.Render(leftLine) + sep + right
@@ -739,6 +803,7 @@ func (a *App) updateGroupKeys(msg tea.KeyMsg) tea.Cmd {
 		index := a.navTable.SelectedIndex()
 		if index >= 0 && index < len(a.visibleResources) {
 			a.openResourceList(a.visibleResources[index])
+			return a.maybeRefreshResourceUsageCmd(time.Now())
 		}
 	case "+":
 		if resource, ok := a.selectedGroupResource(); ok {
@@ -1051,9 +1116,9 @@ func (a *App) currentView() (string, string, string) {
 	case screenGroupResources:
 		return "surfsk8s · " + a.activeGroup.Name, a.navTable.View(), "+ fav  - unfav  r resource-find  enter open resource  : commands  / filter  esc clear/back"
 	case screenPods:
-		return "", a.podTable.View(), ""
+		return "", a.podTable.View(), a.podListFooter()
 	case screenResourceList:
-		return "", a.resourceTable.View(), ""
+		return "", a.resourceTable.View(), a.resourceListFooter()
 	case screenPodDetails:
 		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  g/G edge  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  esc back"
 	case screenResourceDetails:
@@ -1076,13 +1141,13 @@ func (a *App) currentView() (string, string, string) {
 		if a.filter.Active() && a.inputMode == inputModeTableFilterValue {
 			return "surfsk8s · add filter", a.navTable.View(), "type filter  enter add  esc cancel"
 		}
-		return "surfsk8s · add filter", a.navTable.View(), "j/k move  g/G edge  enter select-column  esc cancel"
+		return "surfsk8s · add filter", a.navTable.View(), "type fuzzy-find  enter select-column  esc cancel"
 	case screenTableFilterManager:
 		return "surfsk8s · filters", a.navTable.View(), "j/k move  g/G edge  enter/space toggle  x remove  esc close"
 	case screenTableSortColumnPicker:
-		return "surfsk8s · add sort", a.navTable.View(), "j/k move  g/G edge  enter select-column  esc cancel"
+		return "surfsk8s · add sort", a.navTable.View(), "type fuzzy-find  enter select-column  esc cancel"
 	case screenTableSortDirectionPicker:
-		return "surfsk8s · sort direction", a.navTable.View(), "j/k move  g/G edge  enter add-sort  esc cancel"
+		return "surfsk8s · sort direction", a.navTable.View(), "a asc  d desc  esc cancel"
 	case screenTableSortManager:
 		return "surfsk8s · sorts", a.navTable.View(), "j/k move  J/K reorder  enter/space toggle  x remove  esc close"
 	default:
@@ -1204,19 +1269,24 @@ func (a *App) refreshContextRows() {
 	a.visibleRows = len(matches)
 	a.totalRows = len(a.contexts)
 	a.setNavTable("CONTEXTS", renderContextRows(matches, a.selectedContext, a.pickerMode))
+	a.navTable.MoveTop()
 }
 
 func (a *App) refreshCatalog() {
 	now := time.Now()
+	a.lastDataVersion = a.store.Version()
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
 	a.catalog = applyFavoriteResources(a.manager.Catalog(), a.favoriteResourceIDs)
-	a.catalogOverview = a.buildCatalogOverview(now)
+	if a.catalogOverviewScopeKey != a.catalogOverviewCurrentScopeKey() {
+		a.catalogOverview = catalogOverviewData{ScopeLabel: a.catalogOverviewScopeLabel()}
+	}
 	groups := fuzzyGroups(a.catalog, a.catalogQuery)
 	a.visibleGroups = groups
 	a.visibleRows = len(groups)
 	a.totalRows = len(a.catalog)
 	a.setNavTable("GROUPS", renderGroupRows(groups))
+	a.navTable.MoveTop()
 }
 
 func (a *App) refreshGroupResources() {
@@ -1227,6 +1297,7 @@ func (a *App) refreshGroupResources() {
 	a.visibleRows = len(resources)
 	a.totalRows = len(a.activeGroup.Resources)
 	a.setNavTable(strings.ToUpper(a.activeGroup.Name), renderResourceRows(resources, a.favoriteResources))
+	a.navTable.MoveTop()
 }
 
 func (a *App) backToResourceOrigin() {
@@ -1239,10 +1310,26 @@ func (a *App) backToResourceOrigin() {
 	a.refreshGroupResources()
 }
 
+func (a *App) namespaceListCacheKey(storeVersion uint64, listKind string) string {
+	var b strings.Builder
+	b.Grow(48)
+	b.WriteString(strconv.FormatUint(storeVersion, 10))
+	b.WriteByte('|')
+	b.WriteString(a.contextScope)
+	b.WriteByte('|')
+	b.WriteString(listKind)
+	return b.String()
+}
+
 func (a *App) refreshPods(now time.Time) {
 	total := 0
 	filtered := 0
-	namespaces := a.podNamespacesForScope()
+	storeVersion := a.store.Version()
+	nsKey := a.namespaceListCacheKey(storeVersion, "pods")
+	if nsKey != a.podNamespacesCacheKey {
+		a.namespaces = a.podNamespacesForScope()
+		a.podNamespacesCacheKey = nsKey
+	}
 	if a.podNeedsMaterializedSort() {
 		total, filtered = a.buildSortedPods()
 	} else {
@@ -1257,12 +1344,9 @@ func (a *App) refreshPods(now time.Time) {
 		})
 	}
 
-	storeVersion := a.store.Version()
-	a.refreshPodUsageSnapshot(now, storeVersion, filtered)
 	a.lastDataVersion = storeVersion
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
-	a.namespaces = namespaces
 	a.visibleRows = filtered
 	a.totalRows = total
 	a.podTable.SetEmptyMessage(a.emptyMessageFor("pods"))
@@ -1272,12 +1356,17 @@ func (a *App) refreshPods(now time.Time) {
 }
 
 func (a *App) refreshResourceList(now time.Time) {
-	a.lastDataVersion = a.store.Version()
+	storeVersion := a.store.Version()
+	a.lastDataVersion = storeVersion
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		a.namespaces = a.deploymentNamespacesForScope()
+		nsKey := a.namespaceListCacheKey(storeVersion, "deployments")
+		if nsKey != a.deploymentNamespacesCacheKey {
+			a.namespaces = a.deploymentNamespacesForScope()
+			a.deploymentNamespacesCacheKey = nsKey
+		}
 		total := 0
 		filtered := 0
 		if a.deploymentNeedsMaterializedSort() {
@@ -1294,7 +1383,11 @@ func (a *App) refreshResourceList(now time.Time) {
 			return a.deploymentsView.Rows(a.deploymentWindow(start, end-start, time.Now()))
 		})
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		a.namespaces = a.serviceNamespacesForScope()
+		nsKey := a.namespaceListCacheKey(storeVersion, "services")
+		if nsKey != a.serviceNamespacesCacheKey {
+			a.namespaces = a.serviceNamespacesForScope()
+			a.serviceNamespacesCacheKey = nsKey
+		}
 		total := 0
 		filtered := 0
 		if a.serviceNeedsMaterializedSort() {
@@ -1320,7 +1413,6 @@ func (a *App) refreshResourceList(now time.Time) {
 			a.sortedNodes = a.sortedNodes[:0]
 			total, filtered = a.countNodes()
 		}
-		a.refreshNodeUsageSnapshot(now, a.store.Version(), filtered)
 		a.visibleRows = filtered
 		a.totalRows = total
 		a.resourceTable.SetColumns(a.nodesView.Columns())
@@ -1341,6 +1433,7 @@ func (a *App) refreshCommands() {
 	a.visibleRows = len(commands)
 	a.totalRows = len(a.commands)
 	a.setNavTable("COMMANDS", renderCommandRows(commands))
+	a.navTable.MoveTop()
 }
 
 func (a *App) refreshActivePodDetails(now time.Time) {
@@ -1553,6 +1646,27 @@ func (a *App) renderResourceDetails() string {
 	}
 }
 
+func (a *App) podListFooter() string {
+	return "hjkl nav  HJKL jump  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  n ns-find  c ctx-find  esc back"
+}
+
+func (a *App) resourceListFooter() string {
+	base := "hjkl nav  HJKL jump  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  c ctx-find  "
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		return base + "n ns-find  S scale  R restart  esc back"
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		return base + "n ns-find  P port-forward  esc back"
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		return base + "esc back"
+	default:
+		if a.activeResource.Namespaced {
+			return base + "n ns-find  esc back"
+		}
+		return base + "esc back"
+	}
+}
+
 func (a *App) resourceDetailFooter() string {
 	prefix := "j/k scroll  pgup/pgdn page  g/G edge  R resource-find  c ctx-find  "
 	switch {
@@ -1576,22 +1690,15 @@ func (a *App) shouldRefresh(now time.Time) bool {
 	}
 
 	switch a.screen {
+	case screenCatalog:
+		return a.store.Version() != a.lastDataVersion
 	case screenPods:
-		if a.store.Version() != a.lastDataVersion {
-			return true
-		}
-		return now.Sub(a.lastTick) >= time.Second
+		return a.store.Version() != a.lastDataVersion
 	case screenResourceList:
 		if isBuiltInResourceList(a.activeResource) {
-			if a.store.Version() != a.lastDataVersion {
-				return true
-			}
-			return now.Sub(a.lastTick) >= time.Second
+			return a.store.Version() != a.lastDataVersion
 		}
-		if a.manager.Version() != a.lastManagerVersion {
-			return true
-		}
-		return now.Sub(a.lastTick) >= time.Second
+		return a.manager.Version() != a.lastManagerVersion
 	case screenPodDetails:
 		return a.store.Version() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
 	case screenResourceDetails:
@@ -1599,8 +1706,6 @@ func (a *App) shouldRefresh(now time.Time) bool {
 			return a.store.Version() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
 		}
 		return a.manager.Version() != a.lastManagerVersion || now.Sub(a.lastTick) >= time.Second
-	case screenCatalog, screenGroupResources, screenContexts, screenCommands, screenResourceFinder, screenScopePicker:
-		return now.Sub(a.lastTick) >= time.Second
 	default:
 		return false
 	}
@@ -1769,6 +1874,10 @@ func (a *App) currentQuery() string {
 		return a.resourceFinderQuery
 	case screenScopePicker:
 		return a.scopeQuery
+	case screenTableFilterColumnPicker:
+		return a.tableFilterColumnQuery
+	case screenTableSortColumnPicker:
+		return a.tableSortColumnQuery
 	default:
 		return ""
 	}
@@ -1792,6 +1901,10 @@ func (a *App) setCurrentQuery(value string) {
 		a.resourceFinderQuery = value
 	case screenScopePicker:
 		a.scopeQuery = value
+	case screenTableFilterColumnPicker:
+		a.tableFilterColumnQuery = value
+	case screenTableSortColumnPicker:
+		a.tableSortColumnQuery = value
 	}
 }
 
@@ -2464,7 +2577,8 @@ func isBuiltInResourceList(resource cluster.ResourceKind) bool {
 }
 
 func (a *App) emptyMessageFor(kind string) string {
-	statuses := a.manager.Statuses()
+	a.clusterStatusBuf = a.manager.StatusesInto(a.clusterStatusBuf[:0])
+	statuses := a.clusterStatusBuf
 	if len(statuses) != 0 {
 		allConnecting := true
 		for _, status := range statuses {

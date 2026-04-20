@@ -71,6 +71,7 @@ func (a *App) refreshScopePicker() {
 		title = "CONTEXT"
 	}
 	a.setNavTable(title, renderScopeRows(visible))
+	a.navTable.MoveTop()
 }
 
 func (a *App) scopePickerOptions() []scopeOption {

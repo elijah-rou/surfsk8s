@@ -4,6 +4,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -158,5 +160,16 @@ func TestTableVisualCellSelectionHighlightsRange(t *testing.T) {
 	}
 	if got, want := colEnd, 2; got != want {
 		t.Fatalf("colEnd = %d, want %d", got, want)
+	}
+}
+
+func TestDataStyleForColumnStorageNotTreatedAsAge(t *testing.T) {
+	// Regression: "STORAGE" contains substring "AGE"; it must not use ageStyle.
+	// Use a CPU-like millicore string that ageStyle would interpret as "120 minutes" if misclassified.
+	val := "120m"
+	plain := lipgloss.NewStyle().Render(val)
+	storage := dataStyleForColumn("STORAGE", val).Render(val)
+	if storage != plain {
+		t.Fatalf("STORAGE column should use default styling for %q, got %q want %q", val, storage, plain)
 	}
 }

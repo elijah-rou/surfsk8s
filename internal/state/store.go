@@ -366,6 +366,22 @@ func (s *Store) PodDetailsByKey(key PodKey, now time.Time) (PodDetails, bool) {
 	return PodDetails{Row: row.WithAge(now), Pod: pod.DeepCopy()}, true
 }
 
+// PodObjectByKey returns the live API pod object for read-only use (no DeepCopy).
+// Callers must not mutate the returned pointer. Safe for sequential UI use.
+func (s *Store) PodObjectByKey(key PodKey) (*corev1.Pod, bool) {
+	s.ensurePodsReady()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.pods[key.String()]; !ok {
+		return nil, false
+	}
+	pod := s.podObjects[key.String()]
+	if pod == nil {
+		return nil, false
+	}
+	return pod, true
+}
+
 func (s *Store) PodResourceVersionByKey(key PodKey) (string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

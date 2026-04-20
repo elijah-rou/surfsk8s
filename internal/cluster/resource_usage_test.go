@@ -48,3 +48,18 @@ func TestNodeGPUCapacityCountsAllocatableGPUs(t *testing.T) {
 		t.Fatalf("gpu capacity = %d, want %d", got, want)
 	}
 }
+
+func TestNodeEphemeralUsageFromSummary(t *testing.T) {
+	used := uint64(123456)
+	summary := summaryStats{}
+	summary.Node.Fs = &struct {
+		UsedBytes *uint64 `json:"usedBytes"`
+	}{UsedBytes: &used}
+	if got, ok := nodeEphemeralUsageFromSummary(summary); !ok || got != int64(used) {
+		t.Fatalf("ephemeral usage = %d,%t want %d,true", got, ok, used)
+	}
+
+	if got, ok := nodeEphemeralUsageFromSummary(summaryStats{}); ok || got != 0 {
+		t.Fatalf("empty summary = %d,%t want 0,false", got, ok)
+	}
+}
