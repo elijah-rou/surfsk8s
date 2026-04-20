@@ -478,10 +478,14 @@ func (a *App) View() string {
 	if a.filter.Active() || strings.TrimSpace(a.currentQuery()) != "" {
 		sections = append(sections, a.filter.View())
 	}
+	extraLines := 1
+	if compactList {
+		extraLines++
+	}
+	a.resizeTablesForBody(len(sections) + extraLines)
 	if compactList {
 		sections = append(sections, a.listScreenHeaderDivider())
 	}
-	a.resizeTablesForBody(len(sections) + 1)
 
 	_, body, footer := a.currentView()
 	if compactList {
@@ -501,24 +505,10 @@ func (a *App) View() string {
 }
 
 func (a *App) listScreenHeaderDivider() string {
-	width := a.width - 2
-	if width <= 1 {
-		columns := a.currentCompactListColumns()
-		for idx, column := range columns {
-			width += column.Width
-			if idx < len(columns)-1 {
-				width += 1
-			}
-		}
-	}
-	return theme.TableDivider.Render(strings.Repeat("─", max(1, width)))
-}
-
-func (a *App) currentCompactListColumns() []components.Column {
 	if a.screen == screenPods {
-		return a.podsView.Columns()
+		return a.podTable.TopDivider()
 	}
-	return a.currentResourceColumns()
+	return a.resourceTable.TopDivider()
 }
 
 func (a *App) listScreenCombinedHeader(state components.StatusBarState) string {

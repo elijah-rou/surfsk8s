@@ -112,6 +112,16 @@ func TestTableRendersWrappedCenteredHeadersAndDividers(t *testing.T) {
 	}
 }
 
+func TestTableTopDividerUsesColumnJoins(t *testing.T) {
+	table := NewTable([]Column{{Title: "A", Width: 4}, {Title: "B", Width: 4}, {Title: "C", Width: 4}})
+	table.SetVariant(TableVariantRich)
+	table.SetSize(20, 5)
+	divider := stripANSI(table.TopDivider())
+	if !strings.Contains(divider, "┬") {
+		t.Fatalf("missing top divider join: %q", divider)
+	}
+}
+
 func TestTableHorizontalViewportKeepsSelectedColumnVisible(t *testing.T) {
 	table := NewTable([]Column{{Title: "A", Width: 8}, {Title: "B", Width: 8}, {Title: "C", Width: 8}, {Title: "D", Width: 8}})
 	table.SetVariant(TableVariantRich)

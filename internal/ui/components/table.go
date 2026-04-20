@@ -22,6 +22,7 @@ type Column struct {
 const (
 	tableColumnSeparator = "│"
 	tableHeaderJoin      = "┼"
+	tableTopJoin         = "┬"
 	tableDividerRune     = "─"
 )
 
@@ -312,12 +313,28 @@ func (t *Table) renderHeaderLine(cells []string, start int) string {
 	return strings.Join(parts, "")
 }
 
+func (t *Table) TopDivider() string {
+	if len(t.columns) == 0 {
+		return ""
+	}
+	start, end := t.visibleColumnRange()
+	join := tableTopJoin
+	if t.variant == TableVariantSimple {
+		join = tableDividerRune
+	}
+	return t.renderColumnDivider(start, end, join)
+}
+
 func (t *Table) renderDivider(start int, end int) string {
+	return t.renderColumnDivider(start, end, tableHeaderJoin)
+}
+
+func (t *Table) renderColumnDivider(start int, end int, join string) string {
 	parts := make([]string, 0, (end-start)*2-1)
 	for idx, column := range t.columns[start:end] {
 		parts = append(parts, theme.TableDivider.Render(strings.Repeat(tableDividerRune, max(1, column.Width))))
 		if idx < end-start-1 {
-			parts = append(parts, theme.TableDivider.Render(tableHeaderJoin))
+			parts = append(parts, theme.TableDivider.Render(join))
 		}
 	}
 	return strings.Join(parts, "")
