@@ -595,6 +595,10 @@ func (a *App) listScreenCombinedHeader(state components.StatusBarState) string {
 	b.WriteString(a.tableFilterFooter())
 	b.WriteString(" · ")
 	b.WriteString(a.tableSortLabel())
+	if usage := a.listUsageStatus(time.Now()); usage != "" {
+		b.WriteString(" · ")
+		b.WriteString(usage)
+	}
 	leftLine := b.String()
 	right := components.FormatListStatusRight(state)
 	sep := theme.Muted.Render(" │ ")
@@ -1614,7 +1618,7 @@ func (a *App) renderPodDetails() string {
 		fmt.Sprintf("Age:       %s", a.activePod.Row.Age),
 	}
 
-	if usage := renderPodUsageSection(a.activePodUsage); usage != "" {
+	if usage := renderPodUsageSectionWithLabel(a.activePodUsage, formatUsageDetailLabel(time.Now(), a.podUsageFetchedAt, a.podUsageLoading)); usage != "" {
 		sections = append(sections, "", usage)
 	}
 	if len(pod.Spec.Containers) != 0 {
@@ -1640,7 +1644,7 @@ func (a *App) renderResourceDetails() string {
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		return renderServiceDetails(a.activeService)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return renderNodeDetails(a.activeNode, a.activeNodeUsage)
+		return renderNodeDetails(a.activeNode, a.activeNodeUsage, formatUsageDetailLabel(time.Now(), a.nodeUsageFetchedAt, a.nodeUsageLoading))
 	default:
 		return a.renderGenericResourceDetails()
 	}
@@ -2231,7 +2235,7 @@ func renderServiceDetails(details state.ServiceDetails) string {
 	return strings.Join(sections, "\n")
 }
 
-func renderNodeDetails(details state.NodeDetails, usage cluster.NodeResourceUsage) string {
+func renderNodeDetails(details state.NodeDetails, usage cluster.NodeResourceUsage, usageLabel string) string {
 	node := details.Node
 	if node == nil {
 		return "node disappeared"
@@ -2247,7 +2251,7 @@ func renderNodeDetails(details state.NodeDetails, usage cluster.NodeResourceUsag
 	if internalIP := nodeAddress(node, corev1.NodeInternalIP); internalIP != "" {
 		sections = append(sections, fmt.Sprintf("Internal IP: %s", internalIP))
 	}
-	if usageSection := renderNodeUsageSection(usage); usageSection != "" {
+	if usageSection := renderNodeUsageSectionWithLabel(usage, usageLabel); usageSection != "" {
 		sections = append(sections, "", usageSection)
 	}
 	if len(node.Labels) != 0 {

@@ -14,6 +14,7 @@ import (
 
 	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
+	"github.com/elijahrou/surfsk8s/internal/ui/components"
 )
 
 func TestMatchesSearchSupportsWildcardAndExact(t *testing.T) {
@@ -794,6 +795,24 @@ func TestListScreensExposeFooterHints(t *testing.T) {
 	_, _, footer = app.currentView()
 	if !strings.Contains(footer, "S scale") || !strings.Contains(footer, "R restart") {
 		t.Fatalf("unexpected resource footer: %q", footer)
+	}
+}
+
+func TestListHeaderShowsUsageStatus(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPods
+	app.podUsageListLoading = true
+	header := app.listScreenCombinedHeader(components.StatusBarState{})
+	if !strings.Contains(header, "usage:loading") {
+		t.Fatalf("expected usage loading in header: %q", header)
+	}
+
+	app.podUsageListLoading = false
+	app.podUsageListFetchedAt = time.Now().Add(-8 * time.Second)
+	header = app.listScreenCombinedHeader(components.StatusBarState{})
+	if !strings.Contains(header, "usage:8s") {
+		t.Fatalf("expected usage age in header: %q", header)
 	}
 }
 

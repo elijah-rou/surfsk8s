@@ -80,15 +80,18 @@ func TestUsageCellsShowLoadingUntilSnapshotReady(t *testing.T) {
 	podRow := state.PodRow{Key: state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}}
 	nodeRow := state.NodeRow{Key: state.NodeKey{Cluster: "dev", Name: "node-a"}}
 
-	if got := app.podCPUCell(podRow); got != "loading…" {
+	if got := stripUsageANSI(app.podCPUCell(podRow)); got != "loading…" {
 		t.Fatalf("pod loading cell = %q, want loading placeholder", got)
 	}
-	if got := app.nodeEphemeralCell(nodeRow); got != "loading…" {
+	if got := stripUsageANSI(app.nodeEphemeralCell(nodeRow)); got != "loading…" {
 		t.Fatalf("node loading cell = %q, want loading placeholder", got)
 	}
 
 	app.podUsageListScopeKey = app.podUsageScopeKey()
 	app.podUsageListFetchedAt = time.Now()
+	if got := stripUsageANSI(app.podMemoryCell(podRow)); got != "n/a" {
+		t.Fatalf("pod unavailable cell = %q, want n/a", got)
+	}
 	app.podUsageByKey[podRow.Key.String()] = cluster.PodResourceUsage{Key: podRow.Key, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true}
 	if got := stripUsageANSI(app.podCPUCell(podRow)); !strings.Contains(got, "120m/") {
 		t.Fatalf("pod ready cell = %q, want rendered usage", got)
@@ -96,8 +99,23 @@ func TestUsageCellsShowLoadingUntilSnapshotReady(t *testing.T) {
 
 	app.nodeUsageListScopeKey = app.nodeUsageScopeKey()
 	app.nodeUsageListFetchedAt = time.Now()
+	if got := stripUsageANSI(app.nodeCPUCell(nodeRow)); got != "n/a" {
+		t.Fatalf("node unavailable cell = %q, want n/a", got)
+	}
 	app.nodeUsageByKey[nodeRow.Key.String()] = cluster.NodeResourceUsage{Key: nodeRow.Key, EphemeralUsedBytes: 50 * 1024 * 1024 * 1024, EphemeralAllocatable: 100 * 1024 * 1024 * 1024, HasEphemeralUsage: true}
 	if got := stripUsageANSI(app.nodeEphemeralCell(nodeRow)); !strings.Contains(got, "50") {
 		t.Fatalf("node ready cell = %q, want rendered usage", got)
+	}
+}
+
+func TestRenderUsageSectionsWithLabel(t *testing.T) {
+	pod := renderPodUsageSectionWithLabel(cluster.PodResourceUsage{}, "loading ⠋")
+	if !strings.Contains(stripUsageANSI(pod), "Resource usage (loading") || !strings.Contains(stripUsageANSI(pod), "waiting for metrics") {
+		t.Fatalf("unexpected pod labeled section: %q", stripUsageANSI(pod))
+	}
+
+	node := renderNodeUsageSectionWithLabel(cluster.NodeResourceUsage{}, "updated 8s ago")
+	if !strings.Contains(stripUsageANSI(node), "updated 8s ago") {
+		t.Fatalf("unexpected node labeled section: %q", stripUsageANSI(node))
 	}
 }

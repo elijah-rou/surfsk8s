@@ -17,6 +17,82 @@ import (
 
 const resourceUsageRefreshInterval = 15 * time.Second
 
+func usageSpinner(now time.Time) string {
+	frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	if len(frames) == 0 {
+		return ""
+	}
+	idx := int(now.UnixNano()/int64(120*time.Millisecond)) % len(frames)
+	if idx < 0 {
+		idx = 0
+	}
+	return frames[idx]
+}
+
+func usageStatusStyle(age time.Duration, loading bool, fetchedAt time.Time) lipgloss.Style {
+	if loading && fetchedAt.IsZero() {
+		return theme.StatusWarn.Copy()
+	}
+	if fetchedAt.IsZero() {
+		return theme.Muted.Copy()
+	}
+	switch {
+	case age <= 15*time.Second:
+		return theme.StatusOK.Copy()
+	case age <= 45*time.Second:
+		return theme.StatusWarn.Copy()
+	default:
+		return theme.StatusError.Copy()
+	}
+}
+
+func formatUsageAge(now time.Time, fetchedAt time.Time, loading bool) string {
+	if loading && fetchedAt.IsZero() {
+		return usageStatusStyle(0, loading, fetchedAt).Render("usage:loading " + usageSpinner(now))
+	}
+	if fetchedAt.IsZero() {
+		return usageStatusStyle(0, loading, fetchedAt).Render("usage:pending")
+	}
+	age := now.Sub(fetchedAt)
+	if age < 0 {
+		age = 0
+	}
+	label := "usage:" + formatOverviewAge(age)
+	if loading {
+		label += " " + usageSpinner(now) + " refresh"
+	}
+	return usageStatusStyle(age, loading, fetchedAt).Render(label)
+}
+
+func formatUsageDetailLabel(now time.Time, fetchedAt time.Time, loading bool) string {
+	if loading && fetchedAt.IsZero() {
+		return usageStatusStyle(0, loading, fetchedAt).Render("loading " + usageSpinner(now))
+	}
+	if fetchedAt.IsZero() {
+		return usageStatusStyle(0, loading, fetchedAt).Render("pending")
+	}
+	age := now.Sub(fetchedAt)
+	if age < 0 {
+		age = 0
+	}
+	label := "updated " + formatOverviewAge(age) + " ago"
+	if loading {
+		label = "refreshing " + usageSpinner(now) + " · " + label
+	}
+	return usageStatusStyle(age, loading, fetchedAt).Render(label)
+}
+
+func (a *App) listUsageStatus(now time.Time) string {
+	switch {
+	case a.screen == screenPods:
+		return formatUsageAge(now, a.podUsageListFetchedAt, a.podUsageListLoading)
+	case a.screen == screenResourceList && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		return formatUsageAge(now, a.nodeUsageListFetchedAt, a.nodeUsageListLoading)
+	default:
+		return ""
+	}
+}
+
 func (a *App) maybeRefreshPodUsageListCmd(now time.Time) tea.Cmd {
 	if a.screen != screenPods || a.podUsageListLoading {
 		return nil
@@ -127,49 +203,77 @@ func (a *App) nodeUsageSnapshotReady() bool {
 }
 
 func usageLoadingCell() string {
-	return "loading…"
+	return theme.Muted.Render("loading…")
+}
+
+func usageUnavailableCell() string {
+	return theme.Muted.Render("n/a")
 }
 
 func (a *App) podCPUCell(row state.PodRow) string {
 	if !a.podUsageSnapshotReady() {
 		return usageLoadingCell()
 	}
-	return formatPodTableCPU(a.podUsageForRow(row))
+	usage := a.podUsageForRow(row)
+	if !usage.HasCPUUsage {
+		return usageUnavailableCell()
+	}
+	return formatPodTableCPU(usage)
 }
 
 func (a *App) podMemoryCell(row state.PodRow) string {
 	if !a.podUsageSnapshotReady() {
 		return usageLoadingCell()
 	}
-	return formatPodTableMemory(a.podUsageForRow(row))
+	usage := a.podUsageForRow(row)
+	if !usage.HasMemoryUsage {
+		return usageUnavailableCell()
+	}
+	return formatPodTableMemory(usage)
 }
 
 func (a *App) podEphemeralCell(row state.PodRow) string {
 	if !a.podUsageSnapshotReady() {
 		return usageLoadingCell()
 	}
-	return formatPodTableEphemeral(a.podUsageForRow(row))
+	usage := a.podUsageForRow(row)
+	if !usage.HasEphemeralUsage {
+		return usageUnavailableCell()
+	}
+	return formatPodTableEphemeral(usage)
 }
 
 func (a *App) nodeCPUCell(row state.NodeRow) string {
 	if !a.nodeUsageSnapshotReady() {
 		return usageLoadingCell()
 	}
-	return formatNodeTableCPU(a.nodeUsageForRow(row))
+	usage := a.nodeUsageForRow(row)
+	if !usage.HasCPUUsage {
+		return usageUnavailableCell()
+	}
+	return formatNodeTableCPU(usage)
 }
 
 func (a *App) nodeMemoryCell(row state.NodeRow) string {
 	if !a.nodeUsageSnapshotReady() {
 		return usageLoadingCell()
 	}
-	return formatNodeTableMemory(a.nodeUsageForRow(row))
+	usage := a.nodeUsageForRow(row)
+	if !usage.HasMemoryUsage {
+		return usageUnavailableCell()
+	}
+	return formatNodeTableMemory(usage)
 }
 
 func (a *App) nodeEphemeralCell(row state.NodeRow) string {
 	if !a.nodeUsageSnapshotReady() {
 		return usageLoadingCell()
 	}
-	return formatNodeTableEphemeral(a.nodeUsageForRow(row))
+	usage := a.nodeUsageForRow(row)
+	if !usage.HasEphemeralUsage {
+		return usageUnavailableCell()
+	}
+	return formatNodeTableEphemeral(usage)
 }
 
 func (a *App) podCells(row state.PodRow) []string {
@@ -259,6 +363,13 @@ func (a *App) nodeTableRows(rows []state.NodeRow, now time.Time) [][]string {
 	return result
 }
 
+func renderUsageSection(title string, lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	return title + "\n" + strings.Join(lines, "\n")
+}
+
 func renderPodUsageSection(usage cluster.PodResourceUsage) string {
 	lines := make([]string, 0, 6)
 	if usage.HasCPUUsage || usage.CPURequestMilli > 0 || usage.CPULimitMilli > 0 {
@@ -273,10 +384,21 @@ func renderPodUsageSection(usage cluster.PodResourceUsage) string {
 	if usage.HasGPU {
 		lines = append(lines, renderUsageLine("GPU", fmt.Sprintf("%d allocated", usage.GPUAllocated), "", -1))
 	}
-	if len(lines) == 0 {
-		return ""
+	return renderUsageSection("Resource usage:", lines)
+}
+
+func renderPodUsageSectionWithLabel(usage cluster.PodResourceUsage, label string) string {
+	base := renderPodUsageSection(usage)
+	if base == "" {
+		if strings.TrimSpace(label) == "" {
+			return ""
+		}
+		return "Resource usage (" + label + "):\n- waiting for metrics..."
 	}
-	return "Resource usage:\n" + strings.Join(lines, "\n")
+	if strings.TrimSpace(label) == "" {
+		return base
+	}
+	return strings.Replace(base, "Resource usage:", "Resource usage ("+label+"):", 1)
 }
 
 func renderNodeUsageSection(usage cluster.NodeResourceUsage) string {
@@ -293,10 +415,21 @@ func renderNodeUsageSection(usage cluster.NodeResourceUsage) string {
 	if usage.HasGPU {
 		lines = append(lines, renderUsageLine("GPU", fmt.Sprintf("%d", usage.GPUAllocated), formatCountReference(usage.GPUAllocatable), barRatio(float64(usage.GPUAllocated), float64(usage.GPUAllocatable))))
 	}
-	if len(lines) == 0 {
-		return ""
+	return renderUsageSection("Resource usage:", lines)
+}
+
+func renderNodeUsageSectionWithLabel(usage cluster.NodeResourceUsage, label string) string {
+	base := renderNodeUsageSection(usage)
+	if base == "" {
+		if strings.TrimSpace(label) == "" {
+			return ""
+		}
+		return "Resource usage (" + label + "):\n- waiting for metrics..."
 	}
-	return "Resource usage:\n" + strings.Join(lines, "\n")
+	if strings.TrimSpace(label) == "" {
+		return base
+	}
+	return strings.Replace(base, "Resource usage:", "Resource usage ("+label+"):", 1)
 }
 
 func renderUsageLine(label string, used string, reference string, ratio float64) string {
