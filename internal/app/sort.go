@@ -464,8 +464,15 @@ func parseResourcePortion(value string) (int64, bool) {
 	if value == "" {
 		return 0, false
 	}
-	if strings.Contains(value, "/") {
-		value = strings.TrimSpace(strings.SplitN(value, "/", 2)[0])
+	for _, field := range strings.Fields(value) {
+		if !strings.Contains(field, "/") {
+			continue
+		}
+		left := strings.TrimSpace(strings.SplitN(field, "/", 2)[0])
+		quantity, err := resource.ParseQuantity(left)
+		if err == nil {
+			return quantity.MilliValue(), true
+		}
 	}
 	quantity, err := resource.ParseQuantity(value)
 	if err != nil {
@@ -478,7 +485,16 @@ func parseFractionOrInt(value string) (int, int, bool) {
 	if left, right, ok := parseFraction(value); ok {
 		return left, right, true
 	}
-	if parsed, ok := parseInt(value); ok {
+	for _, field := range strings.Fields(strings.TrimSpace(value)) {
+		if !strings.Contains(field, "/") {
+			continue
+		}
+		left, right, ok := parseFraction(field)
+		if ok {
+			return left, right, true
+		}
+	}
+	if parsed, ok := parseInt(strings.TrimSpace(value)); ok {
 		return parsed, 0, true
 	}
 	return 0, 0, false

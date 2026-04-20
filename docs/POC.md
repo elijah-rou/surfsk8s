@@ -1,5 +1,7 @@
 # surfsk8s POC Plan
 
+Status: original proving document. Large parts are now implemented. For current status and next-step work, see `../README.md` and `ROADMAP.md`.
+
 ## Goal
 
 Prove that a Go+Bubbletea TUI can display 10k+ pods across multiple clusters with sub-100ms interaction latency. If this works, everything else is feature work.

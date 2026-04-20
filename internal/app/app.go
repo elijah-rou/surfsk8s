@@ -42,18 +42,6 @@ type nodeUsageResultMsg struct {
 	usage cluster.NodeResourceUsage
 }
 
-type podUsageSnapshotMsg struct {
-	scopeKey     string
-	storeVersion uint64
-	usages       map[string]cluster.PodResourceUsage
-}
-
-type nodeUsageSnapshotMsg struct {
-	scopeKey     string
-	storeVersion uint64
-	usages       map[string]cluster.NodeResourceUsage
-}
-
 type screen int
 
 const (
@@ -454,44 +442,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.refreshCurrentScreen(time.Now())
 		}
 		return a, nil
-
-	case podUsageSnapshotMsg:
-		a.podUsageListLoading = false
-		if typed.scopeKey == a.podUsageScopeKey() {
-			a.podUsageByKey = typed.usages
-			stale := typed.storeVersion != a.store.Version()
-			if !stale {
-				a.podUsageListFetchedAt = time.Now()
-			} else {
-				a.podUsageListFetchedAt = time.Time{}
-			}
-			if a.screen == screenPods {
-				a.refreshPods(time.Now())
-			}
-			if stale && a.screen == screenPods {
-				return a, a.maybeRefreshResourceUsageCmd(time.Now())
-			}
-		}
-		return a, nil
-
-	case nodeUsageSnapshotMsg:
-		a.nodeUsageListLoading = false
-		if typed.scopeKey == a.nodeUsageScopeKey() {
-			a.nodeUsageByKey = typed.usages
-			stale := typed.storeVersion != a.store.Version()
-			if !stale {
-				a.nodeUsageListFetchedAt = time.Now()
-			} else {
-				a.nodeUsageListFetchedAt = time.Time{}
-			}
-			if a.screen == screenResourceList && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
-				a.refreshResourceList(time.Now())
-			}
-			if stale && a.screen == screenResourceList && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
-				return a, a.maybeRefreshResourceUsageCmd(time.Now())
-			}
-		}
-		return a, nil
 	}
 
 	return a, nil
@@ -528,6 +478,9 @@ func (a *App) View() string {
 	if a.filter.Active() || strings.TrimSpace(a.currentQuery()) != "" {
 		sections = append(sections, a.filter.View())
 	}
+	if compactList {
+		sections = append(sections, a.listScreenHeaderDivider())
+	}
 	a.resizeTablesForBody(len(sections) + 1)
 
 	_, body, footer := a.currentView()
@@ -545,6 +498,27 @@ func (a *App) View() string {
 		sections = append(sections, theme.Muted.Render(footer))
 	}
 	return lipgloss.NewStyle().Padding(0, 1).Render(strings.Join(sections, "\n"))
+}
+
+func (a *App) listScreenHeaderDivider() string {
+	width := a.width - 2
+	if width <= 1 {
+		columns := a.currentCompactListColumns()
+		for idx, column := range columns {
+			width += column.Width
+			if idx < len(columns)-1 {
+				width += 1
+			}
+		}
+	}
+	return theme.TableDivider.Render(strings.Repeat("─", max(1, width)))
+}
+
+func (a *App) currentCompactListColumns() []components.Column {
+	if a.screen == screenPods {
+		return a.podsView.Columns()
+	}
+	return a.currentResourceColumns()
 }
 
 func (a *App) listScreenCombinedHeader(state components.StatusBarState) string {

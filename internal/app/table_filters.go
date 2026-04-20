@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
@@ -327,7 +328,7 @@ func matchesColumnFilters(cells []string, filters []tableColumnFilter) bool {
 		if filter.ColumnIndex < 0 || filter.ColumnIndex >= len(cells) {
 			return false
 		}
-		if !matchesStructuredFilter(cells[filter.ColumnIndex], filter.Query) {
+		if !matchesStructuredFilter(ansi.Strip(cells[filter.ColumnIndex]), filter.Query) {
 			return false
 		}
 	}

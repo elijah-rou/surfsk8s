@@ -84,6 +84,18 @@ func TestTableTruncatesLongCells(t *testing.T) {
 	}
 }
 
+func TestTableTruncatesANSIColoredCellsByVisibleWidth(t *testing.T) {
+	table := NewTable([]Column{{Title: "CPU", Width: 12}})
+	table.SetRows([][]string{{"\x1b[31m████████\x1b[0m 120m/500m"}})
+	view := stripANSI(table.View())
+	if !strings.Contains(view, "████████") {
+		t.Fatalf("missing visible bar content:\n%s", view)
+	}
+	if strings.Contains(view, "120m/500m") {
+		t.Fatalf("expected visible-width truncation to clip long ANSI cell:\n%s", view)
+	}
+}
+
 func TestTableRendersWrappedCenteredHeadersAndDividers(t *testing.T) {
 	table := NewTable([]Column{{Title: "Context", Width: 10}, {Title: "Cluster-IP", Width: 10}, {Title: "Age", Width: 6}})
 	table.SetVariant(TableVariantRich)

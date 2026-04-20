@@ -1,11 +1,18 @@
 package app
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/elijahrou/surfsk8s/internal/cluster"
 )
+
+var usageANSIPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripUsageANSI(value string) string {
+	return usageANSIPattern.ReplaceAllString(value, "")
+}
 
 func TestRenderPodUsageSectionIncludesGPUAndEphemeral(t *testing.T) {
 	rendered := renderPodUsageSection(cluster.PodResourceUsage{
@@ -25,6 +32,19 @@ func TestRenderPodUsageSectionIncludesGPUAndEphemeral(t *testing.T) {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("missing %q in\n%s", fragment, rendered)
 		}
+	}
+}
+
+func TestFormatUsageBarCellPutsBarFirstAndFractionAfter(t *testing.T) {
+	rendered := stripUsageANSI(formatUsageBarCell("120m", "500m", 0.24, 0.5))
+	if !strings.Contains(rendered, "120m/500m") {
+		t.Fatalf("missing usage fraction: %q", rendered)
+	}
+	if strings.Index(rendered, "120m/500m") < 8 {
+		t.Fatalf("expected fixed-width bar prefix before fraction: %q", rendered)
+	}
+	if !strings.Contains(rendered, "│") {
+		t.Fatalf("missing request marker: %q", rendered)
 	}
 }
 

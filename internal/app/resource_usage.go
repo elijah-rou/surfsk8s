@@ -300,65 +300,143 @@ func formatBytesReference(bytes int64) string {
 	return formatBytes(bytes)
 }
 
+const tableUsageBarWidth = 8
+
 func formatPodTableCPU(usage cluster.PodResourceUsage) string {
 	if !usage.HasCPUUsage {
 		return ""
 	}
-	return formatCPU(usage.CPUUsedMilli)
+	total := podUsageReference(formatCPUReference(usage.CPULimitMilli), formatCPUReference(usage.CPURequestMilli))
+	return formatUsageBarCell(formatCPU(usage.CPUUsedMilli), total, barRatio(float64(usage.CPUUsedMilli), float64(podUsageDenominator(usage.CPULimitMilli, usage.CPURequestMilli))), requestRatio(usage.CPURequestMilli, podUsageDenominator(usage.CPULimitMilli, usage.CPURequestMilli)))
 }
 
 func formatPodTableMemory(usage cluster.PodResourceUsage) string {
 	if !usage.HasMemoryUsage {
 		return ""
 	}
-	return formatBytes(usage.MemoryUsedBytes)
+	total := podUsageReference(formatBytesReference(usage.MemoryLimitBytes), formatBytesReference(usage.MemoryRequestBytes))
+	return formatUsageBarCell(formatBytes(usage.MemoryUsedBytes), total, barRatio(float64(usage.MemoryUsedBytes), float64(podUsageDenominator(usage.MemoryLimitBytes, usage.MemoryRequestBytes))), requestRatio(usage.MemoryRequestBytes, podUsageDenominator(usage.MemoryLimitBytes, usage.MemoryRequestBytes)))
 }
 
 func formatPodTableEphemeral(usage cluster.PodResourceUsage) string {
 	if !usage.HasEphemeralUsage {
 		return ""
 	}
-	return formatBytes(usage.EphemeralUsedBytes)
+	total := podUsageReference(formatBytesReference(usage.EphemeralLimitBytes), formatBytesReference(usage.EphemeralRequestBytes))
+	return formatUsageBarCell(formatBytes(usage.EphemeralUsedBytes), total, barRatio(float64(usage.EphemeralUsedBytes), float64(podUsageDenominator(usage.EphemeralLimitBytes, usage.EphemeralRequestBytes))), requestRatio(usage.EphemeralRequestBytes, podUsageDenominator(usage.EphemeralLimitBytes, usage.EphemeralRequestBytes)))
 }
 
 func formatPodTableGPU(usage cluster.PodResourceUsage) string {
 	if !usage.HasGPU {
 		return ""
 	}
-	return fmt.Sprintf("%d", usage.GPUAllocated)
+	total := formatCountReference(usage.GPUAllocated)
+	return formatUsageBarCell(fmt.Sprintf("%d", usage.GPUAllocated), total, 1, -1)
 }
 
 func formatNodeTableCPU(usage cluster.NodeResourceUsage) string {
 	if !usage.HasCPUUsage {
 		return ""
 	}
-	return usedWithTotal(formatCPU(usage.CPUUsedMilli), formatCPUReference(usage.CPUAllocatableMilli))
+	return formatUsageBarCell(formatCPU(usage.CPUUsedMilli), formatCPUReference(usage.CPUAllocatableMilli), barRatio(float64(usage.CPUUsedMilli), float64(usage.CPUAllocatableMilli)), -1)
 }
 
 func formatNodeTableMemory(usage cluster.NodeResourceUsage) string {
 	if !usage.HasMemoryUsage {
 		return ""
 	}
-	return usedWithTotal(formatBytes(usage.MemoryUsedBytes), formatBytesReference(usage.MemoryAllocatable))
+	return formatUsageBarCell(formatBytes(usage.MemoryUsedBytes), formatBytesReference(usage.MemoryAllocatable), barRatio(float64(usage.MemoryUsedBytes), float64(usage.MemoryAllocatable)), -1)
 }
 
 func formatNodeTableEphemeral(usage cluster.NodeResourceUsage) string {
 	if !usage.HasEphemeralUsage {
 		return ""
 	}
-	return usedWithTotal(formatBytes(usage.EphemeralUsedBytes), formatBytesReference(usage.EphemeralAllocatable))
+	return formatUsageBarCell(formatBytes(usage.EphemeralUsedBytes), formatBytesReference(usage.EphemeralAllocatable), barRatio(float64(usage.EphemeralUsedBytes), float64(usage.EphemeralAllocatable)), -1)
 }
 
 func formatNodeTableGPU(usage cluster.NodeResourceUsage) string {
 	if !usage.HasGPU {
 		return ""
 	}
-	return fmt.Sprintf("%d/%d", usage.GPUAllocated, usage.GPUAllocatable)
+	return formatUsageBarCell(fmt.Sprintf("%d", usage.GPUAllocated), formatCountReference(usage.GPUAllocatable), barRatio(float64(usage.GPUAllocated), float64(usage.GPUAllocatable)), -1)
 }
 
-func usedWithTotal(used string, total string) string {
-	if strings.TrimSpace(total) == "" {
-		return used
+func formatUsageBarCell(current string, total string, usedRatio float64, markerRatio float64) string {
+	if strings.TrimSpace(current) == "" {
+		return ""
 	}
-	return used + "/" + total
+	bar := renderMiniUsageBar(usedRatio, markerRatio, tableUsageBarWidth)
+	if strings.TrimSpace(total) == "" {
+		if bar == "" {
+			return current
+		}
+		return bar + " " + current
+	}
+	if bar == "" {
+		return current + "/" + total
+	}
+	return bar + " " + current + "/" + total
+}
+
+func renderMiniUsageBar(usedRatio float64, markerRatio float64, width int) string {
+	if width <= 0 || usedRatio < 0 {
+		return ""
+	}
+	if usedRatio > 1 {
+		usedRatio = 1
+	}
+	filled := int(usedRatio * float64(width))
+	if filled == 0 && usedRatio > 0 {
+		filled = 1
+	}
+	if filled > width {
+		filled = width
+	}
+	marker := -1
+	if markerRatio >= 0 && markerRatio < 1 {
+		marker = int(markerRatio * float64(width))
+		if marker >= width {
+			marker = width - 1
+		}
+		if marker < 0 {
+			marker = 0
+		}
+	}
+	fillStyle := usageBarFillStyle(usedRatio)
+	emptyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	markerStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("255")).Bold(true)
+	parts := make([]string, 0, width)
+	for idx := 0; idx < width; idx++ {
+		if idx == marker {
+			parts = append(parts, markerStyle.Render("│"))
+			continue
+		}
+		if idx < filled {
+			parts = append(parts, fillStyle.Render("█"))
+			continue
+		}
+		parts = append(parts, emptyStyle.Render("░"))
+	}
+	return strings.Join(parts, "")
+}
+
+func usageBarFillStyle(ratio float64) lipgloss.Style {
+	switch {
+	case ratio >= 0.9:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	case ratio >= 0.75:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("208"))
+	case ratio >= 0.55:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	default:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	}
+}
+
+func requestRatio(request int64, total int64) float64 {
+	if request <= 0 || total <= 0 || request >= total {
+		return -1
+	}
+	return float64(request) / float64(total)
 }

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/elijahrou/surfsk8s/internal/ui/components"
 )
@@ -142,7 +143,7 @@ func csvTableWithHeader(columns []components.Column, rows [][]string) (string, e
 		record := make([]string, len(columns))
 		for i := range columns {
 			if i < len(row) {
-				record[i] = strings.TrimSpace(row[i])
+				record[i] = strings.TrimSpace(ansi.Strip(row[i]))
 			}
 		}
 		if err := w.Write(record); err != nil {
@@ -170,7 +171,7 @@ func pipeTableFromCells(rows [][]string) (string, error) {
 func formatPipeTableRow(cells []string) string {
 	parts := make([]string, len(cells))
 	for idx, cell := range cells {
-		parts[idx] = strings.TrimSpace(cell)
+		parts[idx] = strings.TrimSpace(ansi.Strip(cell))
 	}
 	return "| " + strings.Join(parts, " | ") + " |"
 }
