@@ -48,7 +48,7 @@ func (a *App) openContextScopePicker() tea.Cmd {
 
 func (a *App) screenUsesNamespaceScope() bool {
 	switch a.screen {
-	case screenPods, screenPodDetails:
+	case screenCatalog, screenPods, screenPodDetails:
 		return true
 	case screenResourceList, screenResourceDetails:
 		return a.activeResource.Namespaced
@@ -118,6 +118,28 @@ func (a *App) availableNamespacesForScope() []string {
 		namespaces = append(namespaces, namespace)
 	}
 	switch a.scopeBaseScreen() {
+	case screenCatalog:
+		a.store.ForEachPod(func(row state.PodRow) bool {
+			if !a.contextMatches(row.Cluster) {
+				return true
+			}
+			appendNamespace(row.Namespace)
+			return true
+		})
+		a.store.ForEachDeployment(func(row state.DeploymentRow) bool {
+			if !a.contextMatches(row.Cluster) {
+				return true
+			}
+			appendNamespace(row.Namespace)
+			return true
+		})
+		a.store.ForEachService(func(row state.ServiceRow) bool {
+			if !a.contextMatches(row.Cluster) {
+				return true
+			}
+			appendNamespace(row.Namespace)
+			return true
+		})
 	case screenPods, screenPodDetails:
 		a.store.ForEachPod(func(row state.PodRow) bool {
 			if !a.contextMatches(row.Cluster) {

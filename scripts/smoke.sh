@@ -147,14 +147,14 @@ fi
 
 if [[ "$mode" == "live" ]]; then
   grep -q "surfsk8s · resource catalog" "$sanitized_output"
-  grep -q "surfsk8s · pods" "$sanitized_output"
-  grep -q "surfsk8s · deployments" "$sanitized_output"
-  grep -q "surfsk8s · services" "$sanitized_output"
-  grep -q "surfsk8s · nodes" "$sanitized_output"
+  grep -q "surfsk8s · ns:all · pods" "$sanitized_output"
+  grep -q "surfsk8s · ns:all · deployments" "$sanitized_output"
+  grep -q "surfsk8s · ns:all · services" "$sanitized_output"
+  grep -q "surfsk8s · ns:cluster · nodes" "$sanitized_output"
   grep -q "surfsk8s · CRDs" "$sanitized_output"
-  grep -q "sort:name" "$sanitized_output"
+  grep -q "sort:" "$sanitized_output"
   grep -q "\*service\*serving.knative.dev\*" "$sanitized_output"
-  grep -q "surfsk8s · services · serving.knative.dev" "$sanitized_output"
+  grep -q "surfsk8s · ns:all · services · serving.knative.dev" "$sanitized_output"
   grep -q "LATESTCREATED" "$sanitized_output"
   grep -q "surfsk8s · commands" "$sanitized_output"
   if [[ "$apply_fixture" == "true" ]]; then

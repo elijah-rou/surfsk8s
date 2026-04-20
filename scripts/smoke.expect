@@ -39,7 +39,7 @@ if {$mode == "live"} {
 
     send -- "\r"
     expect {
-        -re "surfsk8s . pods" {}
+        -re "surfsk8s . ns:.* . pods" {}
         timeout { exit 5 }
     }
     expect {
@@ -48,13 +48,28 @@ if {$mode == "live"} {
     }
     send -- "o"
     expect {
-        -re "sort:name" {}
+        -re "surfsk8s . add sort" {}
         timeout { exit 21 }
+    }
+    send -- "jj\r"
+    expect {
+        -re "surfsk8s . sort direction" {}
+        timeout { exit 22 }
+    }
+    send -- "j\r"
+    expect {
+        -re "sort:.*↓" {}
+        timeout { exit 52 }
     }
     send -- "O"
     expect {
-        -re "sort:name↓|sort:name" {}
-        timeout { exit 22 }
+        -re "surfsk8s . sorts" {}
+        timeout { exit 53 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . ns:.* . pods" {}
+        timeout { exit 54 }
     }
     send -- "\033"
     expect {
@@ -64,7 +79,7 @@ if {$mode == "live"} {
 
     send -- "j\r"
     expect {
-        -re "surfsk8s . deployments" {}
+        -re "surfsk8s . ns:.* . deployments" {}
         timeout { exit 7 }
     }
     send -- "\033"
@@ -75,7 +90,7 @@ if {$mode == "live"} {
 
     send -- "j\r"
     expect {
-        -re "surfsk8s . services" {}
+        -re "surfsk8s . ns:.* . services" {}
         timeout { exit 9 }
     }
     send -- "\033"
@@ -86,7 +101,7 @@ if {$mode == "live"} {
 
     send -- "j\r"
     expect {
-        -re "surfsk8s . nodes" {}
+        -re "surfsk8s . ns:.* . nodes" {}
         timeout { exit 11 }
     }
     send -- "\033"
@@ -124,12 +139,12 @@ if {$mode == "live"} {
     after 300
     send -- "\r"
     expect {
-        -re "filter:\*service\*serving.knative.dev\*|surfsk8s . CRDs" {}
+        -re "filter:\*service\*serving.knative.dev\*|surfsk8s . CRDs|rows:1/134|services  \[CRD\]" {}
         timeout { exit 16 }
     }
     send -- "g\r"
     expect {
-        -re "surfsk8s . services . serving.knative.dev" {}
+        -re "surfsk8s . ns:.* . services . serving.knative.dev" {}
         timeout { exit 17 }
     }
     expect {

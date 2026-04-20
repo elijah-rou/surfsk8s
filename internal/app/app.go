@@ -49,6 +49,9 @@ const (
 	screenConfirmAction
 	screenTableFilterColumnPicker
 	screenTableFilterManager
+	screenTableSortColumnPicker
+	screenTableSortDirectionPicker
+	screenTableSortManager
 )
 
 type pickerMode int
@@ -117,14 +120,17 @@ type App struct {
 	confirmDescription  string
 	confirmRun          func() tea.Cmd
 
-	contexts        []cluster.ContextInfo
-	visibleContexts []cluster.ContextInfo
-	selectedContext map[string]bool
-	contextQuery    string
+	contexts            []cluster.ContextInfo
+	visibleContexts     []cluster.ContextInfo
+	selectedContext     map[string]bool
+	contextQuery        string
+	favoriteResourceIDs []string
+	favoriteResources   map[string]bool
 
-	catalog       []cluster.ResourceGroup
-	visibleGroups []cluster.ResourceGroup
-	catalogQuery  string
+	catalog         []cluster.ResourceGroup
+	visibleGroups   []cluster.ResourceGroup
+	catalogQuery    string
+	catalogOverview catalogOverviewData
 
 	activeGroup      cluster.ResourceGroup
 	visibleResources []cluster.ResourceKind
@@ -171,6 +177,14 @@ type App struct {
 	resourceColumnFilters     map[string][]tableColumnFilter
 	nextTableFilterID         int
 
+	pendingSortColumnIndex  int
+	pendingSortColumnTitle  string
+	visibleTableSortColumns []tableSortColumnOption
+	visibleTableSorts       []tableSortCriterion
+	podTableSorts           []tableSortCriterion
+	resourceTableSorts      map[string][]tableSortCriterion
+	nextTableSortID         int
+
 	contextScope        string
 	scopeReturnScreen   screen
 	scopePickerKind     scopePickerKind
@@ -213,28 +227,35 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	textViewport := viewport.New(0, 0)
 	contexts := manager.AvailableContexts()
 	selectedContext := loadSelectedContexts(contexts)
+	favoriteResourceIDs := loadFavoriteResourceIDs(manager.Catalog())
+	favoriteResources := make(map[string]bool, len(favoriteResourceIDs))
+	for _, id := range favoriteResourceIDs {
+		favoriteResources[id] = true
+	}
 
 	app := &App{
-		namespace:       cfg.InitialNamespace,
-		store:           store,
-		manager:         manager,
-		executor:        actions.NewExecutor(cfg.KubeconfigPath),
-		podsView:        podsView,
-		deploymentsView: deploymentsView,
-		servicesView:    servicesView,
-		nodesView:       nodesView,
-		genericView:     genericView,
-		navTable:        navTable,
-		podTable:        podTable,
-		resourceTable:   resourceTable,
-		filter:          filter,
-		statusBar:       statusBar,
-		textViewport:    textViewport,
-		screen:          screenContexts,
-		pickerMode:      pickerModeEnter,
-		contexts:        contexts,
-		selectedContext: selectedContext,
-		namespaces:      []string{""},
+		namespace:           cfg.InitialNamespace,
+		store:               store,
+		manager:             manager,
+		executor:            actions.NewExecutor(cfg.KubeconfigPath),
+		podsView:            podsView,
+		deploymentsView:     deploymentsView,
+		servicesView:        servicesView,
+		nodesView:           nodesView,
+		genericView:         genericView,
+		navTable:            navTable,
+		podTable:            podTable,
+		resourceTable:       resourceTable,
+		filter:              filter,
+		statusBar:           statusBar,
+		textViewport:        textViewport,
+		screen:              screenContexts,
+		pickerMode:          pickerModeEnter,
+		contexts:            contexts,
+		selectedContext:     selectedContext,
+		favoriteResourceIDs: favoriteResourceIDs,
+		favoriteResources:   favoriteResources,
+		namespaces:          []string{""},
 	}
 	app.commands = []commandItem{
 		{Name: "add-context", Description: "Open context picker, connect more kubeconfig contexts", Run: func(a *App) { a.openContextPicker(pickerModeAdd) }},
@@ -286,7 +307,41 @@ func loadSelectedContexts(contexts []cluster.ContextInfo) map[string]bool {
 }
 
 func (a *App) persistSelectedContexts() {
-	if err := savePreferences(preferences{SelectedContexts: a.selectedContextNames()}); err != nil {
+	if err := updatePreferences(func(prefs *preferences) {
+		prefs.SelectedContexts = a.selectedContextNames()
+	}); err != nil {
+		a.statusMessage = err.Error()
+	}
+}
+
+func loadFavoriteResourceIDs(catalog []cluster.ResourceGroup) []string {
+	prefs, err := loadPreferences()
+	if err == nil && prefs.FavoriteResourcesSet {
+		return append([]string(nil), prefs.FavoriteResources...)
+	}
+	ids := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	for _, group := range catalog {
+		for _, resource := range group.Resources {
+			if !resource.Favorite {
+				continue
+			}
+			if _, ok := seen[resource.ID]; ok {
+				continue
+			}
+			seen[resource.ID] = struct{}{}
+			ids = append(ids, resource.ID)
+		}
+	}
+	return ids
+}
+
+func (a *App) persistFavoriteResources() {
+	ids := append([]string(nil), a.favoriteResourceIDs...)
+	if err := updatePreferences(func(prefs *preferences) {
+		prefs.FavoriteResources = ids
+		prefs.FavoriteResourcesSet = true
+	}); err != nil {
 		a.statusMessage = err.Error()
 	}
 }
@@ -349,10 +404,30 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) View() string {
-	title, _, footer := a.currentView()
 	inputLabel, inputValue, inputActive := a.statusInputState()
+	compactList := a.screen == screenPods || a.screen == screenResourceList
+	catalogScreen := a.screen == screenCatalog
 
-	sections := []string{theme.HeaderStyle.Render(title)}
+	statusState := components.StatusBarState{
+		Clusters:    a.manager.Statuses(),
+		Context:     a.currentContextLabel(),
+		Namespace:   a.currentNamespaceLabel(),
+		InputLabel:  inputLabel,
+		InputValue:  inputValue,
+		InputActive: inputActive,
+		VisibleRows: a.visibleRows,
+		TotalRows:   a.totalRows,
+		Activity:    a.activity,
+	}
+
+	var sections []string
+	if compactList {
+		sections = append(sections, a.listScreenCombinedHeader(statusState))
+	} else {
+		title, _, _ := a.currentView()
+		sections = append(sections, theme.HeaderStyle.Render(title))
+		sections = append(sections, a.statusBar.View(statusState))
+	}
 	if a.statusMessage != "" {
 		sections = append(sections, theme.StatusWarn.Render(a.statusMessage))
 	}
@@ -362,24 +437,64 @@ func (a *App) View() string {
 	a.resizeTablesForBody(len(sections) + 1)
 
 	_, body, footer := a.currentView()
-	if a.usesTextViewport() {
+	if compactList {
+		footer = ""
+	}
+	if catalogScreen {
+		body = a.renderCatalogBody()
+	} else if a.usesTextViewport() {
 		body = a.renderTextViewport(body, len(sections))
 	}
 
-	status := a.statusBar.View(components.StatusBarState{
-		Clusters:    a.manager.Statuses(),
-		Context:     a.currentContextLabel(),
-		Namespace:   a.currentNamespaceLabel(),
-		InputLabel:  inputLabel,
-		InputValue:  inputValue,
-		InputActive: inputActive,
-		VisibleRows: a.visibleRows,
-		TotalRows:   a.totalRows,
-		Footer:      footer,
-		Activity:    a.activity,
-	})
-	sections = append(sections, body, status)
+	sections = append(sections, body)
+	if strings.TrimSpace(footer) != "" {
+		sections = append(sections, theme.Muted.Render(footer))
+	}
 	return lipgloss.NewStyle().Padding(0, 1).Render(strings.Join(sections, "\n"))
+}
+
+func (a *App) listScreenCombinedHeader(state components.StatusBarState) string {
+	left := strings.Join([]string{
+		"surfsk8s",
+		a.titleNamespaceSegment(),
+		a.listResourceTitleSegment(),
+	}, " · ")
+	var meta string
+	if a.screen == screenPods {
+		meta = strings.Join([]string{
+			a.podTable.Footer(),
+			a.tableFilterFooter(),
+			a.tableSortLabel(),
+		}, " · ")
+	} else {
+		meta = strings.Join([]string{
+			a.resourceTable.Footer(),
+			a.tableFilterFooter(),
+			a.tableSortLabel(),
+		}, " · ")
+	}
+	leftLine := left + " · " + meta
+	right := components.FormatListStatusRight(state)
+	sep := theme.Muted.Render(" │ ")
+	return theme.HeaderStyle.Render(leftLine) + sep + right
+}
+
+func (a *App) titleNamespaceSegment() string {
+	ns := strings.TrimSpace(a.currentNamespaceLabel())
+	if ns == "" {
+		return "ns:all"
+	}
+	return "ns:" + ns
+}
+
+func (a *App) listResourceTitleSegment() string {
+	if a.screen == screenPods {
+		return "pods"
+	}
+	if !isBuiltInResourceList(a.activeResource) {
+		return a.genericResourceTitle()
+	}
+	return strings.ToLower(a.activeResource.Display)
 }
 
 func (a *App) updateFilter(msg tea.Msg) tea.Cmd {
@@ -413,12 +528,12 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case "/":
-		if a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager {
+		if a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager && a.screen != screenTableSortColumnPicker && a.screen != screenTableSortDirectionPicker && a.screen != screenTableSortManager {
 			a.openFilter()
 		}
 		return nil
 	case "R":
-		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager {
+		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager && a.screen != screenTableSortColumnPicker && a.screen != screenTableSortDirectionPicker && a.screen != screenTableSortManager {
 			return a.openResourceFinder()
 		}
 		return nil
@@ -453,6 +568,12 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		return a.updateTableFilterColumnPickerKeys(msg)
 	case screenTableFilterManager:
 		return a.updateTableFilterManagerKeys(msg)
+	case screenTableSortColumnPicker:
+		return a.updateTableSortColumnPickerKeys(msg)
+	case screenTableSortDirectionPicker:
+		return a.updateTableSortDirectionPickerKeys(msg)
+	case screenTableSortManager:
+		return a.updateTableSortManagerKeys(msg)
 	}
 
 	return nil
@@ -525,6 +646,13 @@ func (a *App) updateCatalogKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 	case "r":
 		return a.openResourceFinder()
+	case "a":
+		a.namespace = ""
+		a.refreshCatalog()
+	case "n":
+		return a.openNamespacePicker()
+	case "c":
+		return a.openContextScopePicker()
 	case "esc", "backspace":
 		if a.catalogQuery != "" {
 			a.catalogQuery = ""
@@ -550,6 +678,23 @@ func (a *App) updateGroupKeys(msg tea.KeyMsg) tea.Cmd {
 		index := a.navTable.SelectedIndex()
 		if index >= 0 && index < len(a.visibleResources) {
 			a.openResourceList(a.visibleResources[index])
+		}
+	case "+":
+		if resource, ok := a.selectedGroupResource(); ok {
+			a.addFavoriteResource(resource)
+			a.refreshCatalog()
+			a.syncActiveGroupAfterFavoriteChange()
+			a.refreshGroupResources()
+		}
+	case "-":
+		if resource, ok := a.selectedGroupResource(); ok {
+			a.removeFavoriteResource(resource)
+			a.refreshCatalog()
+			a.syncActiveGroupAfterFavoriteChange()
+			if a.screen == screenCatalog {
+				return nil
+			}
+			a.refreshGroupResources()
 		}
 	case "r":
 		return a.openResourceFinder()
@@ -613,11 +758,9 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 	case "Y":
 		return a.yankFullTableRow()
 	case "o":
-		a.cyclePodSort()
-		a.refreshPods(time.Now())
+		return a.openTableSortColumnPicker()
 	case "O", "shift+o":
-		a.togglePodSortReverse()
-		a.refreshPods(time.Now())
+		return a.openTableSortManager()
 	case "enter":
 		row, ok := a.podRowAt(a.podTable.SelectedIndex(), time.Now())
 		if !ok {
@@ -699,11 +842,9 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 	case "Y":
 		return a.yankFullTableRow()
 	case "o":
-		a.cycleResourceSort()
-		a.refreshResourceList(time.Now())
+		return a.openTableSortColumnPicker()
 	case "O", "shift+o":
-		a.toggleResourceSortReverse()
-		a.refreshResourceList(time.Now())
+		return a.openTableSortManager()
 	case "enter":
 		if !a.openCurrentResourceSelection(a.resourceTable.SelectedIndex(), time.Now()) {
 			a.statusMessage = "resource vanished during refresh"
@@ -815,22 +956,13 @@ func (a *App) currentView() (string, string, string) {
 		}
 		return "surfsk8s · " + mode, a.navTable.View(), "space toggle  / filter  esc clear-find  enter connect  q quit"
 	case screenCatalog:
-		return "surfsk8s · resource catalog", a.navTable.View(), "r resource-find  enter open group  : commands  / filter  esc clear/back"
+		return "surfsk8s · resource catalog", a.navTable.View(), "r resource-find  n ns-find  c ctx-find  a all  enter open group  : commands  / filter  esc clear/back"
 	case screenGroupResources:
-		return "surfsk8s · " + a.activeGroup.Name, a.navTable.View(), "r resource-find  enter open resource  : commands  / filter  esc clear/back"
+		return "surfsk8s · " + a.activeGroup.Name, a.navTable.View(), "+ fav  - unfav  r resource-find  enter open resource  : commands  / filter  esc clear/back"
 	case screenPods:
-		footer := a.podTable.Footer() + "  " + a.tableFilterFooter() + "  sort:" + a.podSort.Label() + "  hjkl move  HJKL jump  f add-filter  F manage-filters  y row  Y CSV  o next-sort  O reverse  r resource-find  / fuzzy  n ns-find  c ctx-find  tab ns  a all  enter details  esc clear/back"
-		return "surfsk8s · pods", a.podTable.View(), footer
+		return "", a.podTable.View(), ""
 	case screenResourceList:
-		footer := a.resourceTable.Footer() + "  " + a.tableFilterFooter() + "  sort:" + a.currentResourceSort().Label() + "  hjkl move  HJKL jump  f add-filter  F manage-filters  y row  Y CSV  o next-sort  O reverse  r resource-find  / fuzzy  c ctx-find  enter details  esc clear/back"
-		if a.activeResource.Namespaced {
-			footer += "  n ns-find  tab ns  a all"
-		}
-		title := strings.ToLower(a.activeResource.Display)
-		if !isBuiltInResourceList(a.activeResource) {
-			title = a.genericResourceTitle()
-		}
-		return "surfsk8s · " + title, a.resourceTable.View(), footer
+		return "", a.resourceTable.View(), ""
 	case screenPodDetails:
 		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  g/G edge  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  esc back"
 	case screenResourceDetails:
@@ -838,7 +970,7 @@ func (a *App) currentView() (string, string, string) {
 	case screenCommands:
 		return "surfsk8s · commands", a.navTable.View(), "type to filter  j/k move  g/G edge  enter run  esc clear/close"
 	case screenResourceFinder:
-		return "surfsk8s · resource finder", a.navTable.View(), "type to filter  j/k move  g/G edge  enter open  esc close"
+		return "surfsk8s · resource finder", a.navTable.View(), "+ fav  - unfav  type to filter  j/k move  g/G edge  enter open  esc close"
 	case screenScopePicker:
 		title := "namespace scope"
 		if a.scopePickerKind == scopePickerContext {
@@ -856,6 +988,12 @@ func (a *App) currentView() (string, string, string) {
 		return "surfsk8s · add filter", a.navTable.View(), "j/k move  g/G edge  enter select-column  esc cancel"
 	case screenTableFilterManager:
 		return "surfsk8s · filters", a.navTable.View(), "j/k move  g/G edge  enter/space toggle  x remove  esc close"
+	case screenTableSortColumnPicker:
+		return "surfsk8s · add sort", a.navTable.View(), "j/k move  g/G edge  enter select-column  esc cancel"
+	case screenTableSortDirectionPicker:
+		return "surfsk8s · sort direction", a.navTable.View(), "j/k move  g/G edge  enter add-sort  esc cancel"
+	case screenTableSortManager:
+		return "surfsk8s · sorts", a.navTable.View(), "j/k move  J/K reorder  enter/space toggle  x remove  esc close"
 	default:
 		return "surfsk8s", "", ""
 	}
@@ -958,6 +1096,12 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 		a.refreshTableFilterColumnPicker()
 	case screenTableFilterManager:
 		a.refreshTableFilterManager()
+	case screenTableSortColumnPicker:
+		a.refreshTableSortColumnPicker()
+	case screenTableSortDirectionPicker:
+		a.refreshTableSortDirectionPicker()
+	case screenTableSortManager:
+		a.refreshTableSortManager()
 	}
 }
 
@@ -972,9 +1116,11 @@ func (a *App) refreshContextRows() {
 }
 
 func (a *App) refreshCatalog() {
+	now := time.Now()
 	a.lastManagerVersion = a.manager.Version()
-	a.lastTick = time.Now()
-	a.catalog = a.manager.Catalog()
+	a.lastTick = now
+	a.catalog = applyFavoriteResources(a.manager.Catalog(), a.favoriteResourceIDs)
+	a.catalogOverview = a.buildCatalogOverview(now)
 	groups := fuzzyGroups(a.catalog, a.catalogQuery)
 	a.visibleGroups = groups
 	a.visibleRows = len(groups)
@@ -989,7 +1135,7 @@ func (a *App) refreshGroupResources() {
 	a.visibleResources = resources
 	a.visibleRows = len(resources)
 	a.totalRows = len(a.activeGroup.Resources)
-	a.setNavTable(strings.ToUpper(a.activeGroup.Name), renderResourceRows(resources))
+	a.setNavTable(strings.ToUpper(a.activeGroup.Name), renderResourceRows(resources, a.favoriteResources))
 }
 
 func (a *App) backToResourceOrigin() {
@@ -1398,6 +1544,97 @@ func (a *App) selectedContextNames() []string {
 	return names
 }
 
+func (a *App) isFavoriteResource(resource cluster.ResourceKind) bool {
+	return a.favoriteResources[resource.ID]
+}
+
+func (a *App) addFavoriteResource(resource cluster.ResourceKind) {
+	if a.favoriteResources[resource.ID] {
+		a.statusMessage = resource.Display + " already in favourites"
+		return
+	}
+	a.favoriteResourceIDs = append(a.favoriteResourceIDs, resource.ID)
+	if a.favoriteResources == nil {
+		a.favoriteResources = make(map[string]bool, 8)
+	}
+	a.favoriteResources[resource.ID] = true
+	a.persistFavoriteResources()
+	a.statusMessage = resource.Display + " added to favourites"
+}
+
+func (a *App) removeFavoriteResource(resource cluster.ResourceKind) {
+	if !a.favoriteResources[resource.ID] {
+		a.statusMessage = resource.Display + " not in favourites"
+		return
+	}
+	delete(a.favoriteResources, resource.ID)
+	filtered := a.favoriteResourceIDs[:0]
+	for _, id := range a.favoriteResourceIDs {
+		if id == resource.ID {
+			continue
+		}
+		filtered = append(filtered, id)
+	}
+	a.favoriteResourceIDs = filtered
+	a.persistFavoriteResources()
+	a.statusMessage = resource.Display + " removed from favourites"
+}
+
+func (a *App) selectedGroupResource() (cluster.ResourceKind, bool) {
+	index := a.navTable.SelectedIndex()
+	if index < 0 || index >= len(a.visibleResources) {
+		return cluster.ResourceKind{}, false
+	}
+	return a.visibleResources[index], true
+}
+
+func (a *App) syncActiveGroupAfterFavoriteChange() {
+	for _, group := range a.catalog {
+		if group.Name != a.activeGroup.Name {
+			continue
+		}
+		a.activeGroup = group
+		return
+	}
+	if a.activeGroup.Name == "Favourites" {
+		a.screen = screenCatalog
+	}
+}
+
+func applyFavoriteResources(catalog []cluster.ResourceGroup, favoriteResourceIDs []string) []cluster.ResourceGroup {
+	resourceByID := make(map[string]cluster.ResourceKind, 64)
+	groups := make([]cluster.ResourceGroup, 0, len(catalog)+1)
+	for _, group := range catalog {
+		if group.Name == "Favourites" {
+			continue
+		}
+		groups = append(groups, group)
+		for _, resource := range group.Resources {
+			if _, ok := resourceByID[resource.ID]; ok {
+				continue
+			}
+			resourceByID[resource.ID] = resource
+		}
+	}
+	favorites := make([]cluster.ResourceKind, 0, len(favoriteResourceIDs))
+	for _, id := range favoriteResourceIDs {
+		resource, ok := resourceByID[id]
+		if !ok {
+			continue
+		}
+		resource.GroupName = "Favourites"
+		resource.Favorite = true
+		favorites = append(favorites, resource)
+	}
+	if len(favorites) == 0 {
+		return groups
+	}
+	result := make([]cluster.ResourceGroup, 0, len(groups)+1)
+	result = append(result, cluster.ResourceGroup{Name: "Favourites", Resources: favorites})
+	result = append(result, groups...)
+	return result
+}
+
 func (a *App) toggleAllSelectedContexts() {
 	if len(a.selectedContext) == 0 {
 		for _, context := range a.contexts {
@@ -1577,7 +1814,7 @@ func renderGroupRows(groups []cluster.ResourceGroup) [][]string {
 	return rows
 }
 
-func renderResourceRows(resources []cluster.ResourceKind) [][]string {
+func renderResourceRows(resources []cluster.ResourceKind, favorites map[string]bool) [][]string {
 	rows := make([][]string, 0, len(resources))
 	for _, resource := range resources {
 		scope := "cluster"
@@ -1589,7 +1826,11 @@ func renderResourceRows(resources []cluster.ResourceKind) [][]string {
 		if resource.Custom {
 			prefix = resource.Display + "  [CRD]"
 		}
-		rows = append(rows, []string{fmt.Sprintf("%s  (%s · %s)", prefix, apiGroup, scope)})
+		marker := "  "
+		if favorites[resource.ID] {
+			marker = "★ "
+		}
+		rows = append(rows, []string{fmt.Sprintf("%s%s  (%s · %s)", marker, prefix, apiGroup, scope)})
 	}
 	return rows
 }

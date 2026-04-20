@@ -60,6 +60,20 @@ func TestNewLoadsPersistedSelectedContexts(t *testing.T) {
 	}
 }
 
+func TestNewLoadsPersistedFavoriteResources(t *testing.T) {
+	previousUserConfigDir := userConfigDir
+	userConfigDir = func() (string, error) { return t.TempDir(), nil }
+	defer func() { userConfigDir = previousUserConfigDir }()
+	if err := savePreferences(preferences{FavoriteResources: []string{"apps/deployments"}, FavoriteResourcesSet: true}); err != nil {
+		t.Fatalf("savePreferences error: %v", err)
+	}
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	if !app.favoriteResources["apps/deployments"] {
+		t.Fatalf("expected persisted favorite resource")
+	}
+}
+
 func newTestManager(t *testing.T) *cluster.Manager {
 	t.Helper()
 	dir := t.TempDir()

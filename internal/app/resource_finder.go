@@ -32,11 +32,11 @@ func (a *App) openResourceFinder() tea.Cmd {
 func (a *App) refreshResourceFinder() {
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = time.Now()
-	a.resourceFinderItems = buildResourceFinderItems(a.manager.Catalog())
+	a.resourceFinderItems = buildResourceFinderItems(applyFavoriteResources(a.manager.Catalog(), a.favoriteResourceIDs))
 	a.visibleResourceItems = fuzzyResourceFinderItems(a.resourceFinderItems, a.resourceFinderQuery)
 	a.visibleRows = len(a.visibleResourceItems)
 	a.totalRows = len(a.resourceFinderItems)
-	a.setNavTable("RESOURCES", renderResourceFinderRows(a.visibleResourceItems))
+	a.setNavTable("RESOURCES", renderResourceFinderRows(a.visibleResourceItems, a.favoriteResources))
 }
 
 func buildResourceFinderItems(groups []cluster.ResourceGroup) []resourceFinderItem {
@@ -85,10 +85,14 @@ func fuzzyResourceFinderItems(items []resourceFinderItem, query string) []resour
 	return result
 }
 
-func renderResourceFinderRows(items []resourceFinderItem) [][]string {
+func renderResourceFinderRows(items []resourceFinderItem, favorites map[string]bool) [][]string {
 	rows := make([][]string, 0, len(items))
 	for _, item := range items {
-		rows = append(rows, []string{item.label})
+		label := item.label
+		if favorites[item.resource.ID] {
+			label = "★ " + label
+		}
+		rows = append(rows, []string{label})
 	}
 	return rows
 }
@@ -128,6 +132,10 @@ func (a *App) updateResourceFinderPrompt(msg tea.Msg) tea.Cmd {
 		case "G", "end":
 			a.navTable.MoveBottom()
 			return nil
+		case "+":
+			return a.addSelectedResourceFinderFavorite()
+		case "-":
+			return a.removeSelectedResourceFinderFavorite()
 		case "enter":
 			return a.openSelectedResourceFinderItem()
 		}
@@ -158,21 +166,58 @@ func (a *App) updateResourceFinderKeys(msg tea.KeyMsg) tea.Cmd {
 		a.filter.Deactivate()
 		a.screen = a.prevScreen
 		a.refreshCurrentScreen(time.Now())
+	case "+":
+		return a.addSelectedResourceFinderFavorite()
+	case "-":
+		return a.removeSelectedResourceFinderFavorite()
 	case "enter":
 		return a.openSelectedResourceFinderItem()
 	}
 	return nil
 }
 
-func (a *App) openSelectedResourceFinderItem() tea.Cmd {
+func (a *App) selectedResourceFinderResource() (cluster.ResourceKind, bool) {
 	index := a.navTable.SelectedIndex()
 	if index < 0 || index >= len(a.visibleResourceItems) {
+		return cluster.ResourceKind{}, false
+	}
+	return a.visibleResourceItems[index].resource, true
+}
+
+func (a *App) addSelectedResourceFinderFavorite() tea.Cmd {
+	resource, ok := a.selectedResourceFinderResource()
+	if !ok {
+		a.statusMessage = "resource selection disappeared"
+		return nil
+	}
+	a.addFavoriteResource(resource)
+	a.refreshCatalog()
+	a.syncActiveGroupAfterFavoriteChange()
+	a.refreshResourceFinder()
+	return nil
+}
+
+func (a *App) removeSelectedResourceFinderFavorite() tea.Cmd {
+	resource, ok := a.selectedResourceFinderResource()
+	if !ok {
+		a.statusMessage = "resource selection disappeared"
+		return nil
+	}
+	a.removeFavoriteResource(resource)
+	a.refreshCatalog()
+	a.syncActiveGroupAfterFavoriteChange()
+	a.refreshResourceFinder()
+	return nil
+}
+
+func (a *App) openSelectedResourceFinderItem() tea.Cmd {
+	resource, ok := a.selectedResourceFinderResource()
+	if !ok {
 		a.statusMessage = "resource selection disappeared"
 		return nil
 	}
 	a.inputMode = inputModeSearch
 	a.filter.Deactivate()
-	resource := a.visibleResourceItems[index].resource
 	a.openResourceList(resource)
 	return nil
 }

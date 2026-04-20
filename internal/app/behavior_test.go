@@ -55,7 +55,9 @@ func TestPodSortByNameDescending(t *testing.T) {
 	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "zeta", Namespace: "default", CreationTimestamp: metav1.NewTime(time.Unix(100, 0))}})
 	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "alpha", Namespace: "default", CreationTimestamp: metav1.NewTime(time.Unix(200, 0))}})
 
-	app.podSort = listSortState{key: sortKeyName, reverse: true}
+	app.screen = screenPods
+	app.height = 10
+	app.podTableSorts = []tableSortCriterion{{ID: 1, ColumnIndex: 2, ColumnTitle: "NAME", Desc: true, Enabled: true}}
 	app.refreshPods(time.Now())
 	rows := app.podWindow(0, 2, time.Now())
 	if len(rows) != 2 {
@@ -157,6 +159,66 @@ func TestOpenResourceFinderResetsPreviousQuery(t *testing.T) {
 	}
 }
 
+func TestGroupResourcePlusAddsFavorite(t *testing.T) {
+	previousUserConfigDir := userConfigDir
+	userConfigDir = func() (string, error) { return t.TempDir(), nil }
+	defer func() { userConfigDir = previousUserConfigDir }()
+
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.refreshCatalog()
+	for _, group := range app.catalog {
+		if group.Name != "Workloads" {
+			continue
+		}
+		app.activeGroup = group
+		break
+	}
+	app.screen = screenGroupResources
+	app.refreshGroupResources()
+	resourceIndex := -1
+	for idx, resource := range app.visibleResources {
+		if resource.ID == "apps/statefulsets" {
+			resourceIndex = idx
+			break
+		}
+	}
+	if resourceIndex < 0 {
+		t.Fatalf("expected statefulsets in visible resources")
+	}
+	app.navTable.MoveDown(resourceIndex)
+	resource := app.visibleResources[resourceIndex]
+	app.updateGroupKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}})
+	if !app.favoriteResources[resource.ID] {
+		t.Fatalf("expected resource %q added to favorites", resource.ID)
+	}
+}
+
+func TestResourceFinderMinusRemovesFavorite(t *testing.T) {
+	previousUserConfigDir := userConfigDir
+	userConfigDir = func() (string, error) { return t.TempDir(), nil }
+	defer func() { userConfigDir = previousUserConfigDir }()
+
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.favoriteResourceIDs = append(app.favoriteResourceIDs, "apps/deployments")
+	if app.favoriteResources == nil {
+		app.favoriteResources = make(map[string]bool, 8)
+	}
+	app.favoriteResources["apps/deployments"] = true
+	app.openResourceFinder()
+	for idx, item := range app.visibleResourceItems {
+		if item.resource.ID == "apps/deployments" {
+			app.navTable.MoveDown(idx)
+			break
+		}
+	}
+	app.updateResourceFinderPrompt(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'-'}})
+	if app.favoriteResources["apps/deployments"] {
+		t.Fatalf("expected deployments removed from favorites")
+	}
+}
+
 func TestPodColumnFilterAddFlowFiltersRows(t *testing.T) {
 	manager := newTestManager(t)
 	store := state.NewStore()
@@ -190,6 +252,35 @@ func TestPodColumnFilterAddFlowFiltersRows(t *testing.T) {
 	}
 	if got, want := len(app.podColumnFilters), 1; got != want {
 		t.Fatalf("filter count = %d, want %d", got, want)
+	}
+}
+
+func TestTableSortManagerReordersAndRemovesSorts(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "toolbox", Namespace: "default"}})
+	app.screen = screenPods
+	app.height = 10
+	app.podTableSorts = []tableSortCriterion{{ID: 1, ColumnIndex: 2, ColumnTitle: "NAME", Enabled: true}, {ID: 2, ColumnIndex: 0, ColumnTitle: "CONTEXT", Desc: true, Enabled: true}}
+	app.refreshPods(time.Now())
+
+	app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'O'}})
+	if got, want := app.screen, screenTableSortManager; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	app.updateTableSortManagerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}})
+	if got, want := app.podTableSorts[0].ColumnTitle, "CONTEXT"; got != want {
+		t.Fatalf("sort[0] = %q, want %q", got, want)
+	}
+	app.updateTableSortManagerKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if app.podTableSorts[1].Enabled {
+		t.Fatalf("expected sort toggled off")
+	}
+	app.updateTableSortManagerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if got, want := len(app.podTableSorts), 1; got != want {
+		t.Fatalf("sort count = %d, want %d", got, want)
 	}
 }
 
@@ -622,7 +713,7 @@ func TestOpenSelectedResourceFinderItemOpensResource(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})
 	app.visibleResourceItems = []resourceFinderItem{{resource: cluster.ResourceKind{Display: "Revisions", Resource: "revisions", APIGroup: "serving.knative.dev", Version: "v1", Namespaced: true, Custom: true}}}
-	app.navTable.SetRows(renderResourceFinderRows(app.visibleResourceItems))
+	app.navTable.SetRows(renderResourceFinderRows(app.visibleResourceItems, nil))
 	app.screen = screenResourceFinder
 	app.inputMode = inputModeResourceFinder
 	app.filter.Activate()

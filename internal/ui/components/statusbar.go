@@ -26,7 +26,6 @@ type StatusBarState struct {
 	InputActive bool
 	VisibleRows int
 	TotalRows   int
-	Footer      string
 	Activity    string
 }
 
@@ -71,10 +70,45 @@ func (s StatusBar) View(state StatusBarState) string {
 	parts = append(parts, input)
 
 	parts = append(parts, fmt.Sprintf("rows:%d/%d", state.VisibleRows, state.TotalRows))
-	if state.Footer != "" {
-		parts = append(parts, theme.Muted.Render(state.Footer))
-	}
 	return strings.Join(parts, "  ")
+}
+
+// FormatListStatusRight renders cluster health, activity, context, and fuzzy filter for list
+// screens where namespace and table row window are shown in the title line.
+func FormatListStatusRight(state StatusBarState) string {
+	parts := make([]string, 0, 8)
+	if len(state.Clusters) == 0 {
+		parts = append(parts, theme.StatusWarn.Render("cluster:disconnected"))
+	} else {
+		for _, cluster := range state.Clusters {
+			parts = append(parts, formatClusterSegment(cluster))
+		}
+	}
+
+	if state.Activity != "" {
+		parts = append(parts, theme.StatusWarn.Render("activity:"+state.Activity))
+	}
+
+	contextLabel := "ctx:all"
+	if state.Context != "" {
+		contextLabel = "ctx:" + state.Context
+	}
+	parts = append(parts, theme.ClusterLabel.Render(contextLabel))
+
+	inputLabel := state.InputLabel
+	if inputLabel == "" {
+		inputLabel = "filter"
+	}
+	input := inputLabel + ":off"
+	if strings.TrimSpace(state.InputValue) != "" {
+		input = inputLabel + ":" + state.InputValue
+	}
+	if state.InputActive {
+		input = lipgloss.NewStyle().Underline(true).Render(input)
+	}
+	parts = append(parts, input)
+
+	return strings.Join(parts, " · ")
 }
 
 func renderClusters(clusters []ClusterStatus) string {
@@ -84,30 +118,34 @@ func renderClusters(clusters []ClusterStatus) string {
 
 	parts := make([]string, 0, len(clusters))
 	for _, cluster := range clusters {
-		label := cluster.Name
-		if label == "" {
-			label = "unknown"
-		}
-
-		suffix := "connecting"
-		style := theme.StatusWarn
-		switch {
-		case cluster.Message != "":
-			suffix = cluster.Message
-			if cluster.Message == "connecting" {
-				style = theme.StatusWarn
-			} else {
-				style = theme.StatusError
-			}
-		case cluster.Warning != "":
-			suffix = cluster.Warning
-			style = theme.StatusWarn
-		case cluster.Synced && cluster.Healthy:
-			suffix = "ok"
-			style = theme.StatusOK
-		}
-
-		parts = append(parts, style.Render(label+":"+suffix))
+		parts = append(parts, formatClusterSegment(cluster))
 	}
 	return strings.Join(parts, " ")
+}
+
+func formatClusterSegment(cluster ClusterStatus) string {
+	label := cluster.Name
+	if label == "" {
+		label = "unknown"
+	}
+
+	suffix := "connecting"
+	style := theme.StatusWarn
+	switch {
+	case cluster.Message != "":
+		suffix = cluster.Message
+		if cluster.Message == "connecting" {
+			style = theme.StatusWarn
+		} else {
+			style = theme.StatusError
+		}
+	case cluster.Warning != "":
+		suffix = cluster.Warning
+		style = theme.StatusWarn
+	case cluster.Synced && cluster.Healthy:
+		suffix = "ok"
+		style = theme.StatusOK
+	}
+
+	return style.Render(label + ":" + suffix)
 }

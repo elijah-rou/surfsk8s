@@ -30,7 +30,7 @@ type tableFilterColumnOption struct {
 
 func (a *App) tableFilterBaseScreen() screen {
 	switch a.screen {
-	case screenTableFilterColumnPicker, screenTableFilterManager:
+	case screenTableFilterColumnPicker, screenTableFilterManager, screenTableSortColumnPicker, screenTableSortDirectionPicker, screenTableSortManager:
 		return a.prevScreen
 	default:
 		return a.screen

@@ -11,7 +11,9 @@ import (
 var userConfigDir = os.UserConfigDir
 
 type preferences struct {
-	SelectedContexts []string `json:"selected_contexts"`
+	SelectedContexts     []string `json:"selected_contexts"`
+	FavoriteResources    []string `json:"favorite_resources,omitempty"`
+	FavoriteResourcesSet bool     `json:"favorite_resources_set,omitempty"`
 }
 
 func preferencesPath() (string, error) {
@@ -58,4 +60,13 @@ func savePreferences(prefs preferences) error {
 		return fmt.Errorf("write preferences: %w", err)
 	}
 	return nil
+}
+
+func updatePreferences(update func(*preferences)) error {
+	prefs, err := loadPreferences()
+	if err != nil {
+		return err
+	}
+	update(&prefs)
+	return savePreferences(prefs)
 }
