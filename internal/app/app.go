@@ -189,6 +189,12 @@ type App struct {
 	activeNodeUsage        cluster.NodeResourceUsage
 	podUsageByKey          map[string]cluster.PodResourceUsage
 	nodeUsageByKey         map[string]cluster.NodeResourceUsage
+	podUsageCellByKey      map[string]podUsageTableCells
+	nodeUsageCellByKey     map[string]nodeUsageTableCells
+	podTableRowBuf         [][]string
+	deploymentTableRowBuf  [][]string
+	serviceTableRowBuf     [][]string
+	nodeTableRowBuf        [][]string
 	podUsageFetchedAt      time.Time
 	nodeUsageFetchedAt     time.Time
 	podUsageListFetchedAt  time.Time
@@ -214,6 +220,8 @@ type App struct {
 	genericRowsResourceID         string
 	genericCompiledColumns        []cluster.CompiledPrinterColumn
 	genericCompiledColumnsVersion string
+	genericPrinterValueCache      map[string][]string
+	genericTableRowBuf            [][]string
 	genericListCacheKey           string
 	lastGenericFetchAt            time.Time
 	genericDetailFetchedAt        time.Time
@@ -478,6 +486,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.podUsageListLoading = false
 		if typed.scopeKey == a.podUsageScopeKey() && typed.storeVersion == a.store.Version() {
 			a.podUsageByKey = typed.usages
+			a.podUsageCellByKey = buildPodUsageTableCellCache(typed.usages)
 			a.podUsageListScopeKey = typed.scopeKey
 			a.podUsageListVersion = typed.storeVersion
 			a.podUsageListFetchedAt = time.Now()
@@ -491,6 +500,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.nodeUsageListLoading = false
 		if typed.scopeKey == a.nodeUsageScopeKey() && typed.storeVersion == a.store.Version() {
 			a.nodeUsageByKey = typed.usages
+			a.nodeUsageCellByKey = buildNodeUsageTableCellCache(typed.usages)
 			a.nodeUsageListScopeKey = typed.scopeKey
 			a.nodeUsageListVersion = typed.storeVersion
 			a.nodeUsageListFetchedAt = time.Now()
@@ -1384,7 +1394,7 @@ func (a *App) refreshResourceList(now time.Time) {
 		a.resourceTable.SetColumns(a.deploymentsView.Columns())
 		a.resourceTable.SetEmptyMessage(a.emptyMessageFor("deployments"))
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
-			return a.deploymentsView.Rows(a.deploymentWindow(start, end-start, time.Now()))
+			return a.deploymentTableRows(a.deploymentWindow(start, end-start, time.Now()), time.Now())
 		})
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		nsKey := a.namespaceListCacheKey(storeVersion, "services")
@@ -1405,7 +1415,7 @@ func (a *App) refreshResourceList(now time.Time) {
 		a.resourceTable.SetColumns(a.servicesView.Columns())
 		a.resourceTable.SetEmptyMessage(a.emptyMessageFor("services"))
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
-			return a.servicesView.Rows(a.serviceWindow(start, end-start, time.Now()))
+			return a.serviceTableRows(a.serviceWindow(start, end-start, time.Now()), time.Now())
 		})
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		a.namespaces = []string{""}

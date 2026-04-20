@@ -45,6 +45,7 @@ func (a *App) loadGenericResourceRows(now time.Time) {
 	}
 	a.genericRowsResourceID = a.activeResource.ID
 	a.lastGenericFetchAt = now
+	a.genericPrinterValueCache = nil
 	a.genericListCacheKey = ""
 }
 
@@ -85,7 +86,7 @@ func (a *App) refreshGenericResourceList(now time.Time) {
 	a.resourceTable.SetColumns(a.genericView.Columns(a.activeResource))
 	a.resourceTable.SetEmptyMessage(a.emptyMessageFor(a.activeResource.Resource))
 	a.resourceTable.SetWindowProvider(a.visibleRows, func(start int, end int) [][]string {
-		return a.genericView.Rows(a.genericResourceWindow(start, end-start, time.Now()), a.activeResource)
+		return a.genericTableRows(start, end-start, time.Now())
 	})
 }
 
@@ -151,7 +152,62 @@ func (a *App) renderGenericResourceDetails() string {
 	return strings.Join(sections, "\n")
 }
 
-func (a *App) genericResourceWindow(start int, limit int, now time.Time) []cluster.GenericResourceRow {
+func genericPrinterCacheKey(row cluster.GenericResourceRow) string {
+	return row.Cluster + "\x00" + row.Namespace + "\x00" + row.Name + "\x00" + row.ResourceVersion
+}
+
+func (a *App) genericPrinterValues(row cluster.GenericResourceRow) []string {
+	if len(a.activeResource.PrinterColumns) == 0 {
+		return nil
+	}
+	if len(row.PrinterValues) != 0 {
+		return row.PrinterValues
+	}
+	if row.Object == nil {
+		return nil
+	}
+	if values, ok := a.genericPrinterValueCache[genericPrinterCacheKey(row)]; ok {
+		return values
+	}
+	a.ensureGenericCompiledColumns()
+	values := cluster.EvaluateCompiledPrinterColumns(row.Object, a.genericCompiledColumns)
+	if a.genericPrinterValueCache == nil {
+		a.genericPrinterValueCache = make(map[string][]string, 64)
+	}
+	a.genericPrinterValueCache[genericPrinterCacheKey(row)] = values
+	return values
+}
+
+func (a *App) fillGenericCells(dst []string, row cluster.GenericResourceRow, now time.Time) {
+	if len(dst) < len(a.currentResourceColumns()) {
+		panic("app.fillGenericCells: short dst")
+	}
+	row = row.WithAge(now)
+	idx := 0
+	dst[idx] = row.Cluster
+	idx++
+	if a.activeResource.Namespaced {
+		dst[idx] = row.Namespace
+		idx++
+	}
+	dst[idx] = row.Name
+	idx++
+	if len(a.activeResource.PrinterColumns) != 0 {
+		printerValues := a.genericPrinterValues(row)
+		for _, value := range printerValues {
+			dst[idx] = value
+			idx++
+		}
+	} else {
+		dst[idx] = row.Ready
+		idx++
+		dst[idx] = row.Status
+		idx++
+	}
+	dst[idx] = row.Age
+}
+
+func (a *App) genericTableRows(start int, limit int, now time.Time) [][]string {
 	if limit <= 0 || start >= len(a.sortedGenericRows) {
 		return nil
 	}
@@ -159,23 +215,23 @@ func (a *App) genericResourceWindow(start int, limit int, now time.Time) []clust
 	if end > len(a.sortedGenericRows) {
 		end = len(a.sortedGenericRows)
 	}
-	window := make([]cluster.GenericResourceRow, 0, end-start)
-	for _, row := range a.sortedGenericRows[start:end] {
-		row = row.WithAge(now)
-		if len(a.genericCompiledColumns) != 0 && row.Object != nil {
-			row.PrinterValues = cluster.EvaluateCompiledPrinterColumns(row.Object, a.genericCompiledColumns)
-		}
-		window = append(window, row)
+	columnCount := len(a.currentResourceColumns())
+	result := ensureRowCellBuffer(&a.genericTableRowBuf, end-start, columnCount)
+	for i, row := range a.sortedGenericRows[start:end] {
+		a.fillGenericCells(result[i], row, now)
 	}
-	return window
+	return result
 }
 
 func (a *App) genericResourceRowAt(index int, now time.Time) (cluster.GenericResourceRow, bool) {
-	rows := a.genericResourceWindow(index, 1, now)
-	if len(rows) == 0 {
+	if index < 0 || index >= len(a.sortedGenericRows) {
 		return cluster.GenericResourceRow{}, false
 	}
-	return rows[0], true
+	row := a.sortedGenericRows[index].WithAge(now)
+	if len(a.activeResource.PrinterColumns) != 0 {
+		row.PrinterValues = a.genericPrinterValues(row)
+	}
+	return row, true
 }
 
 func clusterNamespaces(rows []cluster.GenericResourceRow) []string {

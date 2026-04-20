@@ -199,6 +199,52 @@ func (a *App) nodeUsageForRow(row state.NodeRow) cluster.NodeResourceUsage {
 	return cluster.NodeResourceUsage{Key: row.Key}
 }
 
+type podUsageTableCells struct {
+	CPU       string
+	Memory    string
+	Ephemeral string
+	GPU       string
+}
+
+type nodeUsageTableCells struct {
+	CPU       string
+	Memory    string
+	Ephemeral string
+	GPU       string
+}
+
+func buildPodUsageTableCellCache(usages map[string]cluster.PodResourceUsage) map[string]podUsageTableCells {
+	if len(usages) == 0 {
+		return nil
+	}
+	cache := make(map[string]podUsageTableCells, len(usages))
+	for key, usage := range usages {
+		cache[key] = podUsageTableCells{
+			CPU:       formatPodTableCPU(usage),
+			Memory:    formatPodTableMemory(usage),
+			Ephemeral: formatPodTableEphemeral(usage),
+			GPU:       formatPodTableGPU(usage),
+		}
+	}
+	return cache
+}
+
+func buildNodeUsageTableCellCache(usages map[string]cluster.NodeResourceUsage) map[string]nodeUsageTableCells {
+	if len(usages) == 0 {
+		return nil
+	}
+	cache := make(map[string]nodeUsageTableCells, len(usages))
+	for key, usage := range usages {
+		cache[key] = nodeUsageTableCells{
+			CPU:       formatNodeTableCPU(usage),
+			Memory:    formatNodeTableMemory(usage),
+			Ephemeral: formatNodeTableEphemeral(usage),
+			GPU:       formatNodeTableGPU(usage),
+		}
+	}
+	return cache
+}
+
 func (a *App) podUsageSnapshotReady() bool {
 	return a.podUsageListScopeKey == a.podUsageScopeKey() && !a.podUsageListFetchedAt.IsZero()
 }
@@ -215,80 +261,168 @@ func usageUnavailableCell() string {
 	return usageUnavailableCellText
 }
 
-func (a *App) podCPUCell(row state.PodRow) string {
-	if !a.podUsageSnapshotReady() {
+func podCPUCellFromUsage(usage cluster.PodResourceUsage, ready bool) string {
+	if !ready {
 		return usageLoadingCell()
 	}
-	usage := a.podUsageForRow(row)
 	if !usage.HasCPUUsage {
 		return usageUnavailableCell()
 	}
 	return formatPodTableCPU(usage)
 }
 
-func (a *App) podMemoryCell(row state.PodRow) string {
-	if !a.podUsageSnapshotReady() {
+func podMemoryCellFromUsage(usage cluster.PodResourceUsage, ready bool) string {
+	if !ready {
 		return usageLoadingCell()
 	}
-	usage := a.podUsageForRow(row)
 	if !usage.HasMemoryUsage {
 		return usageUnavailableCell()
 	}
 	return formatPodTableMemory(usage)
 }
 
-func (a *App) podEphemeralCell(row state.PodRow) string {
-	if !a.podUsageSnapshotReady() {
+func podEphemeralCellFromUsage(usage cluster.PodResourceUsage, ready bool) string {
+	if !ready {
 		return usageLoadingCell()
 	}
-	usage := a.podUsageForRow(row)
 	if !usage.HasEphemeralUsage {
 		return usageUnavailableCell()
 	}
 	return formatPodTableEphemeral(usage)
 }
 
-func (a *App) nodeCPUCell(row state.NodeRow) string {
-	if !a.nodeUsageSnapshotReady() {
+func nodeCPUCellFromUsage(usage cluster.NodeResourceUsage, ready bool) string {
+	if !ready {
 		return usageLoadingCell()
 	}
-	usage := a.nodeUsageForRow(row)
 	if !usage.HasCPUUsage {
 		return usageUnavailableCell()
 	}
 	return formatNodeTableCPU(usage)
 }
 
-func (a *App) nodeMemoryCell(row state.NodeRow) string {
-	if !a.nodeUsageSnapshotReady() {
+func nodeMemoryCellFromUsage(usage cluster.NodeResourceUsage, ready bool) string {
+	if !ready {
 		return usageLoadingCell()
 	}
-	usage := a.nodeUsageForRow(row)
 	if !usage.HasMemoryUsage {
 		return usageUnavailableCell()
 	}
 	return formatNodeTableMemory(usage)
 }
 
-func (a *App) nodeEphemeralCell(row state.NodeRow) string {
-	if !a.nodeUsageSnapshotReady() {
+func nodeEphemeralCellFromUsage(usage cluster.NodeResourceUsage, ready bool) string {
+	if !ready {
 		return usageLoadingCell()
 	}
-	usage := a.nodeUsageForRow(row)
 	if !usage.HasEphemeralUsage {
 		return usageUnavailableCell()
 	}
 	return formatNodeTableEphemeral(usage)
 }
 
+func (a *App) podCPUCell(row state.PodRow) string {
+	return podCPUCellFromUsage(a.podUsageForRow(row), a.podUsageSnapshotReady())
+}
+
+func (a *App) podMemoryCell(row state.PodRow) string {
+	return podMemoryCellFromUsage(a.podUsageForRow(row), a.podUsageSnapshotReady())
+}
+
+func (a *App) podEphemeralCell(row state.PodRow) string {
+	return podEphemeralCellFromUsage(a.podUsageForRow(row), a.podUsageSnapshotReady())
+}
+
+func (a *App) nodeCPUCell(row state.NodeRow) string {
+	return nodeCPUCellFromUsage(a.nodeUsageForRow(row), a.nodeUsageSnapshotReady())
+}
+
+func (a *App) nodeMemoryCell(row state.NodeRow) string {
+	return nodeMemoryCellFromUsage(a.nodeUsageForRow(row), a.nodeUsageSnapshotReady())
+}
+
+func (a *App) nodeEphemeralCell(row state.NodeRow) string {
+	return nodeEphemeralCellFromUsage(a.nodeUsageForRow(row), a.nodeUsageSnapshotReady())
+}
+
+func (a *App) fillPodCells(dst []string, row state.PodRow) {
+	if len(dst) < 12 {
+		panic("app.fillPodCells: short dst")
+	}
+	ready := a.podUsageSnapshotReady()
+	dst[0] = row.Cluster
+	dst[1] = row.Namespace
+	dst[2] = row.Name
+	dst[3] = row.Ready
+	dst[4] = row.Status
+	if ready {
+		if cached, ok := a.podUsageCellByKey[row.Key.String()]; ok {
+			dst[5] = cached.CPU
+			dst[6] = cached.Memory
+			dst[7] = cached.Ephemeral
+			dst[8] = cached.GPU
+		} else {
+			usage := a.podUsageForRow(row)
+			dst[5] = podCPUCellFromUsage(usage, true)
+			dst[6] = podMemoryCellFromUsage(usage, true)
+			dst[7] = podEphemeralCellFromUsage(usage, true)
+			dst[8] = formatPodTableGPU(usage)
+		}
+	} else {
+		usage := a.podUsageForRow(row)
+		dst[5] = podCPUCellFromUsage(usage, false)
+		dst[6] = podMemoryCellFromUsage(usage, false)
+		dst[7] = podEphemeralCellFromUsage(usage, false)
+		dst[8] = formatPodTableGPU(usage)
+	}
+	dst[9] = strconv.Itoa(row.Restarts)
+	dst[10] = row.Age
+	dst[11] = row.Node
+}
+
 func (a *App) podCells(row state.PodRow) []string {
-	usage := a.podUsageForRow(row)
-	return []string{row.Cluster, row.Namespace, row.Name, row.Ready, row.Status, a.podCPUCell(row), a.podMemoryCell(row), a.podEphemeralCell(row), formatPodTableGPU(usage), fmt.Sprintf("%d", row.Restarts), row.Age, row.Node}
+	cells := make([]string, 12)
+	a.fillPodCells(cells, row)
+	return cells
+}
+
+func (a *App) fillNodeCells(dst []string, row state.NodeRow) {
+	if len(dst) < 10 {
+		panic("app.fillNodeCells: short dst")
+	}
+	ready := a.nodeUsageSnapshotReady()
+	dst[0] = row.Cluster
+	dst[1] = row.Name
+	dst[2] = row.Status
+	if ready {
+		if cached, ok := a.nodeUsageCellByKey[row.Key.String()]; ok {
+			dst[3] = cached.CPU
+			dst[4] = cached.Memory
+			dst[5] = cached.Ephemeral
+			dst[6] = cached.GPU
+		} else {
+			usage := a.nodeUsageForRow(row)
+			dst[3] = nodeCPUCellFromUsage(usage, true)
+			dst[4] = nodeMemoryCellFromUsage(usage, true)
+			dst[5] = nodeEphemeralCellFromUsage(usage, true)
+			dst[6] = formatNodeTableGPU(usage)
+		}
+	} else {
+		usage := a.nodeUsageForRow(row)
+		dst[3] = nodeCPUCellFromUsage(usage, false)
+		dst[4] = nodeMemoryCellFromUsage(usage, false)
+		dst[5] = nodeEphemeralCellFromUsage(usage, false)
+		dst[6] = formatNodeTableGPU(usage)
+	}
+	dst[7] = row.Roles
+	dst[8] = row.Version
+	dst[9] = row.Age
 }
 
 func (a *App) nodeCells(row state.NodeRow) []string {
-	usage := a.nodeUsageForRow(row)
-	return []string{row.Cluster, row.Name, row.Status, a.nodeCPUCell(row), a.nodeMemoryCell(row), a.nodeEphemeralCell(row), formatNodeTableGPU(usage), row.Roles, row.Version, row.Age}
+	cells := make([]string, 10)
+	a.fillNodeCells(cells, row)
+	return cells
 }
 
 // podCellStringAt returns the string for a single pods table column without building the full cell slice.
@@ -352,18 +486,44 @@ func (a *App) nodeCellStringAt(row state.NodeRow, columnIndex int, now time.Time
 	}
 }
 
+func ensureRowCellBuffer(buf *[][]string, rows int, columns int) [][]string {
+	if rows < 0 {
+		panic("app.ensureRowCellBuffer: negative rows")
+	}
+	if columns <= 0 {
+		panic("app.ensureRowCellBuffer: non-positive columns")
+	}
+	if cap(*buf) < rows {
+		grown := make([][]string, rows)
+		copy(grown, *buf)
+		for i := 0; i < rows; i++ {
+			grown[i] = make([]string, columns)
+		}
+		*buf = grown
+	}
+	result := (*buf)[:rows]
+	for i := range result {
+		if cap(result[i]) < columns {
+			result[i] = make([]string, columns)
+			continue
+		}
+		result[i] = result[i][:columns]
+	}
+	return result
+}
+
 func (a *App) podTableRows(rows []state.PodRow, now time.Time) [][]string {
-	result := make([][]string, 0, len(rows))
-	for _, row := range rows {
-		result = append(result, a.podCells(row.WithAge(now)))
+	result := ensureRowCellBuffer(&a.podTableRowBuf, len(rows), 12)
+	for i, row := range rows {
+		a.fillPodCells(result[i], row.WithAge(now))
 	}
 	return result
 }
 
 func (a *App) nodeTableRows(rows []state.NodeRow, now time.Time) [][]string {
-	result := make([][]string, 0, len(rows))
-	for _, row := range rows {
-		result = append(result, a.nodeCells(row.WithAge(now)))
+	result := ensureRowCellBuffer(&a.nodeTableRowBuf, len(rows), 10)
+	for i, row := range rows {
+		a.fillNodeCells(result[i], row.WithAge(now))
 	}
 	return result
 }

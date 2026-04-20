@@ -465,28 +465,25 @@ func (a *App) matchesGenericColumnFilters(row cluster.GenericResourceRow, now ti
 	if !hasAnyEnabledColumnFilters(filters) {
 		return true
 	}
-	return matchesColumnFilters(a.genericCells(row, now), filters)
+	columns := a.currentResourceColumns()
+	for _, filter := range filters {
+		if !filter.Enabled {
+			continue
+		}
+		if filter.ColumnIndex < 0 || filter.ColumnIndex >= len(columns) {
+			return false
+		}
+		value := a.genericCellValueAtNow(row, filter.ColumnIndex, now)
+		if !matchesStructuredFilter(ansi.Strip(value), filter.Query) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) genericCells(row cluster.GenericResourceRow, now time.Time) []string {
-	// Always refresh Age for filter matching: printer/row state expects a formatted age like the visible table.
 	row = row.WithAge(now)
-	values := make([]string, 0, 3+len(row.PrinterValues)+1)
-	values = append(values, row.Cluster)
-	if a.activeResource.Namespaced {
-		values = append(values, row.Namespace)
-	}
-	values = append(values, row.Name)
-	if len(a.activeResource.PrinterColumns) != 0 {
-		printerValues := row.PrinterValues
-		if len(printerValues) == 0 && row.Object != nil {
-			a.ensureGenericCompiledColumns()
-			printerValues = cluster.EvaluateCompiledPrinterColumns(row.Object, a.genericCompiledColumns)
-		}
-		values = append(values, printerValues...)
-	} else {
-		values = append(values, row.Ready, row.Status)
-	}
-	values = append(values, row.Age)
+	values := make([]string, len(a.currentResourceColumns()))
+	a.fillGenericCells(values, row, now)
 	return values
 }

@@ -112,50 +112,49 @@ func containsText(value string, fragment string) bool {
 
 func TestWarningMinHeapKeepsNewestByTime(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	h := &warningMinHeap{}
-	keepWarningCandidate(h, eventOverviewItem{When: now.Add(-3 * time.Hour), Reason: "old"}, 2)
-	keepWarningCandidate(h, eventOverviewItem{When: now, Reason: "newest"}, 2)
-	keepWarningCandidate(h, eventOverviewItem{When: now.Add(-time.Hour), Reason: "mid"}, 2)
-	if h.Len() != 2 {
-		t.Fatalf("heap len = %d, want 2", h.Len())
+	items := make([]eventOverviewItem, 0, 2)
+	items = keepWarningCandidate(items, eventOverviewItem{When: now.Add(-3 * time.Hour), Reason: "old"}, 2)
+	items = keepWarningCandidate(items, eventOverviewItem{When: now, Reason: "newest"}, 2)
+	items = keepWarningCandidate(items, eventOverviewItem{When: now.Add(-time.Hour), Reason: "mid"}, 2)
+	if len(items) != 2 {
+		t.Fatalf("len = %d, want 2", len(items))
 	}
 	reasons := map[string]struct{}{}
-	for _, it := range *h {
+	for _, it := range items {
 		reasons[it.Reason] = struct{}{}
 	}
 	if _, ok := reasons["newest"]; !ok {
-		t.Fatalf("missing newest: %#v", *h)
+		t.Fatalf("missing newest: %#v", items)
 	}
 	if _, ok := reasons["mid"]; !ok {
-		t.Fatalf("missing mid: %#v", *h)
+		t.Fatalf("missing mid: %#v", items)
 	}
 }
 
 func TestRestartMinHeapKeepsBestBySortOrder(t *testing.T) {
 	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
-	h := &restartMinHeap{}
-	items := []restartOverviewItem{
+	items := make([]restartOverviewItem, 0, 2)
+	candidates := []restartOverviewItem{
 		{Pod: "a", When: now.Add(-time.Hour), Restarts: 1},
 		{Pod: "b", When: now, Restarts: 9},
 		{Pod: "c", When: now, Restarts: 3},
 		{Pod: "d", When: now.Add(time.Minute), Restarts: 1},
 	}
-	for _, it := range items {
-		keepRestartCandidate(h, it, 2)
+	for _, it := range candidates {
+		items = keepRestartCandidate(items, it, 2)
 	}
-	if h.Len() != 2 {
-		t.Fatalf("heap len = %d, want 2", h.Len())
+	if len(items) != 2 {
+		t.Fatalf("len = %d, want 2", len(items))
 	}
-	// Expect "b" (same time as c, higher restarts) and "d" (newest time).
 	pods := map[string]struct{}{}
-	for _, it := range *h {
+	for _, it := range items {
 		pods[it.Pod] = struct{}{}
 	}
 	if _, ok := pods["b"]; !ok {
-		t.Fatalf("missing b: %#v", *h)
+		t.Fatalf("missing b: %#v", items)
 	}
 	if _, ok := pods["d"]; !ok {
-		t.Fatalf("missing d: %#v", *h)
+		t.Fatalf("missing d: %#v", items)
 	}
 }
 

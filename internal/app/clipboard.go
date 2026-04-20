@@ -192,12 +192,12 @@ func (a *App) currentResourceColumns() []components.Column {
 func (a *App) selectedResourceCells(index int, count int, now time.Time) [][]string {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return a.deploymentsView.Rows(a.deploymentWindow(index, count, now))
+		return a.deploymentTableRows(a.deploymentWindow(index, count, now), now)
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		return a.servicesView.Rows(a.serviceWindow(index, count, now))
+		return a.serviceTableRows(a.serviceWindow(index, count, now), now)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		return a.nodeTableRows(a.nodeWindow(index, count, now), now)
 	default:
-		return a.genericView.Rows(a.genericResourceWindow(index, count, now), a.activeResource)
+		return a.genericTableRows(index, count, now)
 	}
 }

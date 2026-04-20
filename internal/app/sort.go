@@ -232,8 +232,8 @@ func (a *App) buildSortedGenericResources() (int, int) {
 			continue
 		}
 		if query != "" {
-			if len(a.genericCompiledColumns) != 0 && row.Object != nil && len(row.PrinterValues) == 0 {
-				row.PrinterValues = cluster.EvaluateCompiledPrinterColumns(row.Object, a.genericCompiledColumns)
+			if len(a.activeResource.PrinterColumns) != 0 {
+				row.PrinterValues = a.genericPrinterValues(row)
 			}
 			if !matchesSearch(row.SearchText(), query) {
 				continue
@@ -388,6 +388,10 @@ func (a *App) compareGenericRowCriterion(left cluster.GenericResourceRow, right 
 }
 
 func (a *App) genericCellValueAt(row cluster.GenericResourceRow, columnIndex int) string {
+	return a.genericCellValueAtNow(row, columnIndex, time.Time{})
+}
+
+func (a *App) genericCellValueAtNow(row cluster.GenericResourceRow, columnIndex int, now time.Time) string {
 	idx := columnIndex
 	if idx == 0 {
 		return row.Cluster
@@ -404,15 +408,14 @@ func (a *App) genericCellValueAt(row cluster.GenericResourceRow, columnIndex int
 	}
 	idx--
 	if len(a.activeResource.PrinterColumns) != 0 {
-		printerValues := row.PrinterValues
-		if len(printerValues) == 0 && row.Object != nil {
-			a.ensureGenericCompiledColumns()
-			printerValues = cluster.EvaluateCompiledPrinterColumns(row.Object, a.genericCompiledColumns)
-		}
+		printerValues := a.genericPrinterValues(row)
 		if idx >= 0 && idx < len(printerValues) {
 			return printerValues[idx]
 		}
 		if idx == len(printerValues) {
+			if !now.IsZero() {
+				return row.WithAge(now).Age
+			}
 			return row.Age
 		}
 		return ""
@@ -424,6 +427,9 @@ func (a *App) genericCellValueAt(row cluster.GenericResourceRow, columnIndex int
 		return row.Status
 	}
 	if idx == 2 {
+		if !now.IsZero() {
+			return row.WithAge(now).Age
+		}
 		return row.Age
 	}
 	return ""

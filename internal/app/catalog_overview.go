@@ -1,7 +1,6 @@
 package app
 
 import (
-	"container/heap"
 	"context"
 	"fmt"
 	"sort"
@@ -232,41 +231,38 @@ type eventOverviewItem struct {
 	When    time.Time
 }
 
-// warningMinHeap keeps the newest Warning events by time using a min-heap of size k (oldest of the k at index 0).
-type warningMinHeap []eventOverviewItem
-
-func (h warningMinHeap) Len() int           { return len(h) }
-func (h warningMinHeap) Less(i, j int) bool { return h[i].When.Before(h[j].When) }
-func (h warningMinHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-
-func (h *warningMinHeap) Push(x interface{}) { *h = append(*h, x.(eventOverviewItem)) }
-
-func (h *warningMinHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
+func warningBetter(left eventOverviewItem, right eventOverviewItem) bool {
+	if !left.When.Equal(right.When) {
+		return left.When.After(right.When)
+	}
+	if left.Count != right.Count {
+		return left.Count > right.Count
+	}
+	return left.Reason < right.Reason
 }
 
-func keepWarningCandidate(h *warningMinHeap, item eventOverviewItem, k int) {
+func keepWarningCandidate(items []eventOverviewItem, item eventOverviewItem, k int) []eventOverviewItem {
 	if k <= 0 {
-		return
+		return items[:0]
 	}
-	if h.Len() < k {
-		heap.Push(h, item)
-		return
+	if len(items) < k {
+		return append(items, item)
 	}
-	// Root holds the oldest Warning among the current top-k by time.
-	if item.When.After((*h)[0].When) {
-		heap.Pop(h)
-		heap.Push(h, item)
+	worst := 0
+	for i := 1; i < len(items); i++ {
+		if warningBetter(items[worst], items[i]) {
+			worst = i
+		}
 	}
+	if warningBetter(item, items[worst]) {
+		items[worst] = item
+	}
+	return items
 }
 
 func (a *App) buildRecentWarningLines(ctx context.Context, now time.Time) []overviewLine {
 	const topK = 5
-	h := &warningMinHeap{}
+	items := make([]eventOverviewItem, 0, topK)
 	a.forEachFilteredCatalogRow(ctx, "", "events", func(row cluster.GenericResourceRow) bool {
 		if row.Object == nil {
 			return true
@@ -282,18 +278,11 @@ func (a *App) buildRecentWarningLines(ctx context.Context, now time.Time) []over
 		}
 		when := overviewEventTime(row.Object)
 		item := eventOverviewItem{Cluster: row.Cluster, Reason: firstNonEmptyString(reason, row.Status, row.Name), Count: count, When: when}
-		keepWarningCandidate(h, item, topK)
+		items = keepWarningCandidate(items, item, topK)
 		return true
 	})
-	items := append([]eventOverviewItem(nil), *h...)
 	sort.SliceStable(items, func(i int, j int) bool {
-		if !items[i].When.Equal(items[j].When) {
-			return items[i].When.After(items[j].When)
-		}
-		if items[i].Count != items[j].Count {
-			return items[i].Count > items[j].Count
-		}
-		return items[i].Reason < items[j].Reason
+		return warningBetter(items[i], items[j])
 	})
 	lines := make([]overviewLine, 0, max(1, len(items)))
 	showCluster := a.contextScope == "" && len(a.manager.ConnectedContextNames()) > 1
@@ -321,53 +310,38 @@ type restartOverviewItem struct {
 	When      time.Time
 }
 
-// restartWorse reports whether a should sort after b (lower priority for the overview).
-func restartWorse(a, b restartOverviewItem) bool {
-	if !a.When.Equal(b.When) {
-		return a.When.Before(b.When)
+func restartBetter(left, right restartOverviewItem) bool {
+	if !left.When.Equal(right.When) {
+		return left.When.After(right.When)
 	}
-	if a.Restarts != b.Restarts {
-		return a.Restarts < b.Restarts
+	if left.Restarts != right.Restarts {
+		return left.Restarts > right.Restarts
 	}
-	return a.Pod > b.Pod
+	return left.Pod < right.Pod
 }
 
-// restartMinHeap keeps the best restartOverviewItem rows using a min-heap where the root is the worst among k.
-type restartMinHeap []restartOverviewItem
-
-func (h restartMinHeap) Len() int { return len(h) }
-func (h restartMinHeap) Less(i, j int) bool {
-	return restartWorse(h[i], h[j])
-}
-func (h restartMinHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
-
-func (h *restartMinHeap) Push(x interface{}) { *h = append(*h, x.(restartOverviewItem)) }
-
-func (h *restartMinHeap) Pop() interface{} {
-	old := *h
-	n := len(old)
-	x := old[n-1]
-	*h = old[:n-1]
-	return x
-}
-
-func keepRestartCandidate(h *restartMinHeap, item restartOverviewItem, k int) {
+func keepRestartCandidate(items []restartOverviewItem, item restartOverviewItem, k int) []restartOverviewItem {
 	if k <= 0 {
-		return
+		return items[:0]
 	}
-	if h.Len() < k {
-		heap.Push(h, item)
-		return
+	if len(items) < k {
+		return append(items, item)
 	}
-	if restartWorse((*h)[0], item) {
-		heap.Pop(h)
-		heap.Push(h, item)
+	worst := 0
+	for i := 1; i < len(items); i++ {
+		if restartBetter(items[worst], items[i]) {
+			worst = i
+		}
 	}
+	if restartBetter(item, items[worst]) {
+		items[worst] = item
+	}
+	return items
 }
 
 func (a *App) buildRecentRestartLines(now time.Time) []overviewLine {
 	const topK = 5
-	h := &restartMinHeap{}
+	items := make([]restartOverviewItem, 0, topK)
 	a.store.ForEachPod(func(row state.PodRow) bool {
 		if !a.contextMatches(row.Cluster) {
 			return true
@@ -386,18 +360,11 @@ func (a *App) buildRecentRestartLines(now time.Time) []overviewLine {
 		if !ok {
 			return true
 		}
-		keepRestartCandidate(h, item, topK)
+		items = keepRestartCandidate(items, item, topK)
 		return true
 	})
-	items := append([]restartOverviewItem(nil), *h...)
 	sort.SliceStable(items, func(i int, j int) bool {
-		if !items[i].When.Equal(items[j].When) {
-			return items[i].When.After(items[j].When)
-		}
-		if items[i].Restarts != items[j].Restarts {
-			return items[i].Restarts > items[j].Restarts
-		}
-		return items[i].Pod < items[j].Pod
+		return restartBetter(items[i], items[j])
 	})
 	lines := make([]overviewLine, 0, max(1, len(items)))
 	showCluster := a.contextScope == "" && len(a.manager.ConnectedContextNames()) > 1
