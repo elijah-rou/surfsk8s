@@ -100,7 +100,7 @@ func (a *App) selectedRowPipe(now time.Time) (string, error) {
 		if index < 0 {
 			return "", fmt.Errorf("no pod selected")
 		}
-		return pipeTableFromCells(a.podsView.Rows(a.podWindow(index, 1, now)))
+		return pipeTableFromCells(a.podTableRows(a.podWindow(index, 1, now), now))
 	case screenResourceList:
 		index := a.resourceTable.SelectedIndex()
 		if index < 0 {
@@ -115,7 +115,7 @@ func (a *App) selectedRowPipe(now time.Time) (string, error) {
 func (a *App) filteredTablePipe(now time.Time) (string, error) {
 	switch a.screen {
 	case screenPods:
-		rows := a.podsView.Rows(a.podWindow(0, a.visibleRows, now))
+		rows := a.podTableRows(a.podWindow(0, a.visibleRows, now), now)
 		return csvTableWithHeader(a.podsView.Columns(), rows)
 	case screenResourceList:
 		rows := a.selectedResourceCells(0, a.visibleRows, now)
@@ -195,7 +195,7 @@ func (a *App) selectedResourceCells(index int, count int, now time.Time) [][]str
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		return a.servicesView.Rows(a.serviceWindow(index, count, now))
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return a.nodesView.Rows(a.nodeWindow(index, count, now))
+		return a.nodeTableRows(a.nodeWindow(index, count, now), now)
 	default:
 		return a.genericView.Rows(a.genericResourceWindow(index, count, now), a.activeResource)
 	}

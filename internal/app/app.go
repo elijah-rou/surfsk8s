@@ -32,6 +32,28 @@ type connectResultMsg struct {
 	err      error
 }
 
+type podUsageResultMsg struct {
+	key   state.PodKey
+	usage cluster.PodResourceUsage
+}
+
+type nodeUsageResultMsg struct {
+	key   state.NodeKey
+	usage cluster.NodeResourceUsage
+}
+
+type podUsageSnapshotMsg struct {
+	scopeKey     string
+	storeVersion uint64
+	usages       map[string]cluster.PodResourceUsage
+}
+
+type nodeUsageSnapshotMsg struct {
+	scopeKey     string
+	storeVersion uint64
+	usages       map[string]cluster.NodeResourceUsage
+}
+
 type screen int
 
 const (
@@ -137,20 +159,34 @@ type App struct {
 	resourceQuery    string
 	activeResource   cluster.ResourceKind
 
-	namespace            string
-	namespaces           []string
-	podQuery             string
-	resourceQuery2       string
-	activePod            state.PodDetails
-	activeDeployment     state.DeploymentDetails
-	activeService        state.ServiceDetails
-	activeNode           state.NodeDetails
-	activeGenericDetails cluster.GenericResourceDetails
-	lastDataVersion      uint64
-	lastManagerVersion   uint64
-	lastTick             time.Time
-	visibleRows          int
-	totalRows            int
+	namespace              string
+	namespaces             []string
+	podQuery               string
+	resourceQuery2         string
+	activePod              state.PodDetails
+	activeDeployment       state.DeploymentDetails
+	activeService          state.ServiceDetails
+	activeNode             state.NodeDetails
+	activeGenericDetails   cluster.GenericResourceDetails
+	activePodUsage         cluster.PodResourceUsage
+	activeNodeUsage        cluster.NodeResourceUsage
+	podUsageByKey          map[string]cluster.PodResourceUsage
+	nodeUsageByKey         map[string]cluster.NodeResourceUsage
+	podUsageFetchedAt      time.Time
+	nodeUsageFetchedAt     time.Time
+	podUsageListFetchedAt  time.Time
+	nodeUsageListFetchedAt time.Time
+	podUsageListVersion    uint64
+	nodeUsageListVersion   uint64
+	podUsageLoading        bool
+	nodeUsageLoading       bool
+	podUsageListLoading    bool
+	nodeUsageListLoading   bool
+	lastDataVersion        uint64
+	lastManagerVersion     uint64
+	lastTick               time.Time
+	visibleRows            int
+	totalRows              int
 
 	genericRows                   []cluster.GenericResourceRow
 	sortedGenericRows             []cluster.GenericResourceRow
@@ -367,10 +403,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		now := time.Time(typed)
+		var cmd tea.Cmd
 		if a.shouldRefresh(now) {
 			a.refreshCurrentScreen(now)
 		}
-		return a, tickCmd()
+		cmd = a.maybeRefreshResourceUsageCmd(now)
+		return a, tea.Batch(tickCmd(), cmd)
 
 	case connectResultMsg:
 		a.connecting = false
@@ -397,6 +435,62 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.activity = ""
 		a.refreshCurrentScreen(time.Now())
+		return a, nil
+
+	case podUsageResultMsg:
+		a.podUsageLoading = false
+		if a.screen == screenPodDetails && typed.key == a.activePod.Row.Key {
+			a.activePodUsage = typed.usage
+			a.podUsageFetchedAt = time.Now()
+			a.refreshCurrentScreen(time.Now())
+		}
+		return a, nil
+
+	case nodeUsageResultMsg:
+		a.nodeUsageLoading = false
+		if a.screen == screenResourceDetails && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" && typed.key == a.activeNode.Row.Key {
+			a.activeNodeUsage = typed.usage
+			a.nodeUsageFetchedAt = time.Now()
+			a.refreshCurrentScreen(time.Now())
+		}
+		return a, nil
+
+	case podUsageSnapshotMsg:
+		a.podUsageListLoading = false
+		if typed.scopeKey == a.podUsageScopeKey() {
+			a.podUsageByKey = typed.usages
+			stale := typed.storeVersion != a.store.Version()
+			if !stale {
+				a.podUsageListFetchedAt = time.Now()
+			} else {
+				a.podUsageListFetchedAt = time.Time{}
+			}
+			if a.screen == screenPods {
+				a.refreshPods(time.Now())
+			}
+			if stale && a.screen == screenPods {
+				return a, a.maybeRefreshResourceUsageCmd(time.Now())
+			}
+		}
+		return a, nil
+
+	case nodeUsageSnapshotMsg:
+		a.nodeUsageListLoading = false
+		if typed.scopeKey == a.nodeUsageScopeKey() {
+			a.nodeUsageByKey = typed.usages
+			stale := typed.storeVersion != a.store.Version()
+			if !stale {
+				a.nodeUsageListFetchedAt = time.Now()
+			} else {
+				a.nodeUsageListFetchedAt = time.Time{}
+			}
+			if a.screen == screenResourceList && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
+				a.refreshResourceList(time.Now())
+			}
+			if stale && a.screen == screenResourceList && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
+				return a, a.maybeRefreshResourceUsageCmd(time.Now())
+			}
+		}
 		return a, nil
 	}
 
@@ -533,6 +627,9 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		}
 		return nil
 	case "R":
+		if a.screen == screenResourceList && a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps" {
+			break
+		}
 		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager && a.screen != screenTableSortColumnPicker && a.screen != screenTableSortDirectionPicker && a.screen != screenTableSortManager {
 			return a.openResourceFinder()
 		}
@@ -773,10 +870,14 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 		a.activePod = details
+		a.activePodUsage = a.podUsageByKey[details.Row.Key.String()]
+		a.podUsageFetchedAt = time.Time{}
+		a.podUsageLoading = false
 		a.lastDataVersion = a.store.Version()
 		a.lastTick = time.Now()
 		a.screen = screenPodDetails
 		a.resetTextViewport()
+		return a.maybeRefreshResourceUsageCmd(time.Now())
 	case "esc", "backspace":
 		if a.podQuery != "" {
 			a.podQuery = ""
@@ -845,10 +946,36 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.openTableSortColumnPicker()
 	case "O", "shift+o":
 		return a.openTableSortManager()
+	case "P":
+		if a.activeResource.Resource == "services" && a.activeResource.APIGroup == "" {
+			if !a.selectCurrentResourceActionTarget(time.Now()) {
+				a.statusMessage = "resource vanished during refresh"
+				return nil
+			}
+			return a.runPortForwardResource()
+		}
+	case "S":
+		if a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps" {
+			if !a.selectCurrentResourceActionTarget(time.Now()) {
+				a.statusMessage = "resource vanished during refresh"
+				return nil
+			}
+			return a.openScalePrompt()
+		}
+	case "R":
+		if a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps" {
+			if !a.selectCurrentResourceActionTarget(time.Now()) {
+				a.statusMessage = "resource vanished during refresh"
+				return nil
+			}
+			return a.runRestartResource()
+		}
 	case "enter":
 		if !a.openCurrentResourceSelection(a.resourceTable.SelectedIndex(), time.Now()) {
 			a.statusMessage = "resource vanished during refresh"
+			return nil
 		}
+		return a.maybeRefreshResourceUsageCmd(time.Now())
 	case "esc", "backspace":
 		if a.resourceQuery2 != "" {
 			a.resourceQuery2 = ""
@@ -1166,7 +1293,9 @@ func (a *App) refreshPods(now time.Time) {
 		})
 	}
 
-	a.lastDataVersion = a.store.Version()
+	storeVersion := a.store.Version()
+	a.refreshPodUsageSnapshot(now, storeVersion, filtered)
+	a.lastDataVersion = storeVersion
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
 	a.namespaces = namespaces
@@ -1174,7 +1303,7 @@ func (a *App) refreshPods(now time.Time) {
 	a.totalRows = total
 	a.podTable.SetEmptyMessage(a.emptyMessageFor("pods"))
 	a.podTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
-		return a.podsView.Rows(a.podWindow(start, end-start, time.Now()))
+		return a.podTableRows(a.podWindow(start, end-start, time.Now()), time.Now())
 	})
 }
 
@@ -1227,12 +1356,13 @@ func (a *App) refreshResourceList(now time.Time) {
 			a.sortedNodes = a.sortedNodes[:0]
 			total, filtered = a.countNodes()
 		}
+		a.refreshNodeUsageSnapshot(now, a.store.Version(), filtered)
 		a.visibleRows = filtered
 		a.totalRows = total
 		a.resourceTable.SetColumns(a.nodesView.Columns())
 		a.resourceTable.SetEmptyMessage(a.emptyMessageFor("nodes"))
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
-			return a.nodesView.Rows(a.nodeWindow(start, end-start, time.Now()))
+			return a.nodeTableRows(a.nodeWindow(start, end-start, time.Now()), time.Now())
 		})
 	default:
 		a.refreshGenericResourceList(now)
@@ -1259,6 +1389,9 @@ func (a *App) refreshActivePodDetails(now time.Time) {
 	resourceVersion, ok := a.store.PodResourceVersionByKey(a.activePod.Row.Key)
 	if !ok {
 		a.activePod = state.PodDetails{}
+		a.activePodUsage = cluster.PodResourceUsage{}
+		a.podUsageFetchedAt = time.Time{}
+		a.podUsageLoading = false
 		a.lastDataVersion = storeVersion
 		a.lastManagerVersion = a.manager.Version()
 		a.lastTick = now
@@ -1317,6 +1450,9 @@ func (a *App) refreshCurrentDetail(now time.Time) bool {
 	case "nodes":
 		row, ok := a.store.NodeDetailsByKey(a.activeNode.Row.Key, now)
 		if !ok {
+			a.activeNodeUsage = cluster.NodeResourceUsage{}
+			a.nodeUsageFetchedAt = time.Time{}
+			a.nodeUsageLoading = false
 			return false
 		}
 		a.activeNode = row
@@ -1369,6 +1505,9 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 			return false
 		}
 		a.activeNode = details
+		a.activeNodeUsage = a.nodeUsageByKey[details.Row.Key.String()]
+		a.nodeUsageFetchedAt = time.Time{}
+		a.nodeUsageLoading = false
 	default:
 		return a.openCurrentGenericResourceSelection(index, now)
 	}
@@ -1418,6 +1557,9 @@ func (a *App) renderPodDetails() string {
 		fmt.Sprintf("Age:       %s", a.activePod.Row.Age),
 	}
 
+	if usage := renderPodUsageSection(a.activePodUsage); usage != "" {
+		sections = append(sections, "", usage)
+	}
 	if len(pod.Spec.Containers) != 0 {
 		sections = append(sections, "", "Containers:")
 		for _, container := range pod.Spec.Containers {
@@ -1441,7 +1583,7 @@ func (a *App) renderResourceDetails() string {
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		return renderServiceDetails(a.activeService)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return renderNodeDetails(a.activeNode)
+		return renderNodeDetails(a.activeNode, a.activeNodeUsage)
 	default:
 		return a.renderGenericResourceDetails()
 	}
@@ -2012,7 +2154,7 @@ func renderServiceDetails(details state.ServiceDetails) string {
 	return strings.Join(sections, "\n")
 }
 
-func renderNodeDetails(details state.NodeDetails) string {
+func renderNodeDetails(details state.NodeDetails, usage cluster.NodeResourceUsage) string {
 	node := details.Node
 	if node == nil {
 		return "node disappeared"
@@ -2027,6 +2169,9 @@ func renderNodeDetails(details state.NodeDetails) string {
 	}
 	if internalIP := nodeAddress(node, corev1.NodeInternalIP); internalIP != "" {
 		sections = append(sections, fmt.Sprintf("Internal IP: %s", internalIP))
+	}
+	if usageSection := renderNodeUsageSection(usage); usageSection != "" {
+		sections = append(sections, "", usageSection)
 	}
 	if len(node.Labels) != 0 {
 		sections = append(sections, "", "Labels:")

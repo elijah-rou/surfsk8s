@@ -324,6 +324,35 @@ func (a *App) runEditResource() tea.Cmd {
 	}
 }
 
+func (a *App) selectCurrentResourceActionTarget(now time.Time) bool {
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return false
+		}
+		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
+		if !ok {
+			return false
+		}
+		a.activeDeployment = details
+		return true
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return false
+		}
+		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
+		if !ok {
+			return false
+		}
+		a.activeService = details
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) runPortForwardResource() tea.Cmd {
 	if a.activeResource.Resource != "services" || a.activeResource.APIGroup != "" {
 		a.statusMessage = "port-forward unsupported for this resource"

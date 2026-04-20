@@ -334,10 +334,6 @@ func matchesColumnFilters(cells []string, filters []tableColumnFilter) bool {
 	return true
 }
 
-func podCells(row state.PodRow) []string {
-	return []string{row.Cluster, row.Namespace, row.Name, row.Ready, row.Status, strconv.Itoa(row.Restarts), row.Age, row.Node}
-}
-
 func deploymentCells(row state.DeploymentRow) []string {
 	return []string{row.Cluster, row.Namespace, row.Name, row.Ready, strconv.Itoa(int(row.UpToDate)), strconv.Itoa(int(row.Available)), row.Age}
 }
@@ -346,12 +342,8 @@ func serviceCells(row state.ServiceRow) []string {
 	return []string{row.Cluster, row.Namespace, row.Name, row.Type, row.ClusterIP, row.Ports, row.Age}
 }
 
-func nodeCells(row state.NodeRow) []string {
-	return []string{row.Cluster, row.Name, row.Status, row.Roles, row.Version, row.Age}
-}
-
 func (a *App) matchesPodColumnFilters(row state.PodRow, now time.Time) bool {
-	return matchesColumnFilters(podCells(row.WithAge(now)), a.podColumnFilters)
+	return matchesColumnFilters(a.podCells(row.WithAge(now)), a.podColumnFilters)
 }
 
 func (a *App) matchesDeploymentColumnFilters(row state.DeploymentRow, now time.Time) bool {
@@ -363,7 +355,7 @@ func (a *App) matchesServiceColumnFilters(row state.ServiceRow, now time.Time) b
 }
 
 func (a *App) matchesNodeColumnFilters(row state.NodeRow, now time.Time) bool {
-	return matchesColumnFilters(nodeCells(row.WithAge(now)), a.currentTableFilters())
+	return matchesColumnFilters(a.nodeCells(row.WithAge(now)), a.currentTableFilters())
 }
 
 func (a *App) matchesGenericColumnFilters(row cluster.GenericResourceRow, now time.Time) bool {

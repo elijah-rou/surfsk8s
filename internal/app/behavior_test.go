@@ -469,7 +469,7 @@ func TestPodTableYanksFullFilteredTableWithCapitalY(t *testing.T) {
 	defer func() { writeClipboard = previousClipboard }()
 
 	app.updatePodKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'Y'}})
-	if !strings.Contains(captured, "CONTEXT,NAMESPACE,NAME,READY,STATUS,RESTARTS,AGE,NODE") {
+	if !strings.Contains(captured, "CONTEXT,NAMESPACE,NAME,READY,STATUS,CPU,MEMORY,EPHEMERAL,GPU,RESTARTS,AGE,NODE") {
 		t.Fatalf("missing header in captured table: %q", captured)
 	}
 	if !strings.Contains(captured, "toolbox") || !strings.Contains(captured, "api") {

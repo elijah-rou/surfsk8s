@@ -6,6 +6,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
 )
@@ -89,7 +91,7 @@ func (a *App) buildSortedPods() (int, int) {
 	})
 	sorts := a.enabledTableSorts()
 	sort.SliceStable(a.sortedPods, func(i int, j int) bool {
-		return comparePodRows(a.sortedPods[i], a.sortedPods[j], sorts)
+		return a.comparePodRows(a.sortedPods[i], a.sortedPods[j], sorts) < 0
 	})
 	return total, len(a.sortedPods)
 }
@@ -170,13 +172,28 @@ func (a *App) buildSortedNodes() (int, int) {
 	})
 	sorts := a.enabledTableSorts()
 	sort.SliceStable(a.sortedNodes, func(i int, j int) bool {
-		return compareNodeRows(a.sortedNodes[i], a.sortedNodes[j], sorts)
+		return a.compareNodeRows(a.sortedNodes[i], a.sortedNodes[j], sorts) < 0
 	})
 	return total, len(a.sortedNodes)
 }
 
-func comparePodRows(left state.PodRow, right state.PodRow, sorts []tableSortCriterion) bool {
-	return comparePodRowStack(left, right, sorts) < 0
+func (a *App) comparePodRows(left state.PodRow, right state.PodRow, sorts []tableSortCriterion) int {
+	for _, criterion := range sorts {
+		cmp := a.comparePodRowCriterion(left, right, criterion)
+		if criterion.Desc {
+			cmp = -cmp
+		}
+		if cmp != 0 {
+			return cmp
+		}
+	}
+	if cmp := cmpStringCI(left.Namespace, right.Namespace); cmp != 0 {
+		return cmp
+	}
+	if cmp := cmpStringCI(left.Name, right.Name); cmp != 0 {
+		return cmp
+	}
+	return cmpStringCI(left.Cluster, right.Cluster)
 }
 
 func compareDeploymentRows(left state.DeploymentRow, right state.DeploymentRow, sorts []tableSortCriterion) bool {
@@ -187,8 +204,20 @@ func compareServiceRows(left state.ServiceRow, right state.ServiceRow, sorts []t
 	return compareServiceRowStack(left, right, sorts) < 0
 }
 
-func compareNodeRows(left state.NodeRow, right state.NodeRow, sorts []tableSortCriterion) bool {
-	return compareNodeRowStack(left, right, sorts) < 0
+func (a *App) compareNodeRows(left state.NodeRow, right state.NodeRow, sorts []tableSortCriterion) int {
+	for _, criterion := range sorts {
+		cmp := a.compareNodeRowCriterion(left, right, criterion)
+		if criterion.Desc {
+			cmp = -cmp
+		}
+		if cmp != 0 {
+			return cmp
+		}
+	}
+	if cmp := cmpStringCI(left.Name, right.Name); cmp != 0 {
+		return cmp
+	}
+	return cmpStringCI(left.Cluster, right.Cluster)
 }
 
 func (a *App) buildSortedGenericResources() (int, int) {
@@ -220,25 +249,6 @@ func (a *App) buildSortedGenericResources() (int, int) {
 		return a.compareGenericRows(a.sortedGenericRows[i], a.sortedGenericRows[j], sorts) < 0
 	})
 	return len(a.genericRows), len(a.sortedGenericRows)
-}
-
-func comparePodRowStack(left state.PodRow, right state.PodRow, sorts []tableSortCriterion) int {
-	for _, criterion := range sorts {
-		cmp := comparePodRowCriterion(left, right, criterion)
-		if criterion.Desc {
-			cmp = -cmp
-		}
-		if cmp != 0 {
-			return cmp
-		}
-	}
-	if cmp := cmpStringCI(left.Namespace, right.Namespace); cmp != 0 {
-		return cmp
-	}
-	if cmp := cmpStringCI(left.Name, right.Name); cmp != 0 {
-		return cmp
-	}
-	return cmpStringCI(left.Cluster, right.Cluster)
 }
 
 func compareDeploymentRowStack(left state.DeploymentRow, right state.DeploymentRow, sorts []tableSortCriterion) int {
@@ -279,43 +289,15 @@ func compareServiceRowStack(left state.ServiceRow, right state.ServiceRow, sorts
 	return cmpStringCI(left.Cluster, right.Cluster)
 }
 
-func compareNodeRowStack(left state.NodeRow, right state.NodeRow, sorts []tableSortCriterion) int {
-	for _, criterion := range sorts {
-		cmp := compareNodeRowCriterion(left, right, criterion)
-		if criterion.Desc {
-			cmp = -cmp
-		}
-		if cmp != 0 {
-			return cmp
-		}
-	}
-	if cmp := cmpStringCI(left.Name, right.Name); cmp != 0 {
-		return cmp
-	}
-	return cmpStringCI(left.Cluster, right.Cluster)
-}
-
-func comparePodRowCriterion(left state.PodRow, right state.PodRow, criterion tableSortCriterion) int {
-	switch criterion.ColumnIndex {
-	case 0:
-		return cmpStringCI(left.Cluster, right.Cluster)
-	case 1:
-		return cmpStringCI(left.Namespace, right.Namespace)
-	case 2:
-		return cmpStringCI(left.Name, right.Name)
-	case 3:
-		return compareReadyFraction(left.Ready, right.Ready)
-	case 4:
-		return cmpStringCI(left.Status, right.Status)
-	case 5:
-		return cmpInt(left.Restarts, right.Restarts)
-	case 6:
-		return cmpTimeDesc(left.CreatedAt(), right.CreatedAt())
-	case 7:
-		return cmpStringCI(left.Node, right.Node)
-	default:
+func (a *App) comparePodRowCriterion(left state.PodRow, right state.PodRow, criterion tableSortCriterion) int {
+	columns := a.podsView.Columns()
+	if criterion.ColumnIndex < 0 || criterion.ColumnIndex >= len(columns) {
 		return 0
 	}
+	title := columns[criterion.ColumnIndex].Title
+	leftValue := a.podCells(left.WithAge(time.Now()))[criterion.ColumnIndex]
+	rightValue := a.podCells(right.WithAge(time.Now()))[criterion.ColumnIndex]
+	return compareColumnValue(title, leftValue, rightValue, left.CreatedAt(), right.CreatedAt())
 }
 
 func compareDeploymentRowCriterion(left state.DeploymentRow, right state.DeploymentRow, criterion tableSortCriterion) int {
@@ -360,23 +342,15 @@ func compareServiceRowCriterion(left state.ServiceRow, right state.ServiceRow, c
 	}
 }
 
-func compareNodeRowCriterion(left state.NodeRow, right state.NodeRow, criterion tableSortCriterion) int {
-	switch criterion.ColumnIndex {
-	case 0:
-		return cmpStringCI(left.Cluster, right.Cluster)
-	case 1:
-		return cmpStringCI(left.Name, right.Name)
-	case 2:
-		return cmpStringCI(left.Status, right.Status)
-	case 3:
-		return cmpStringCI(left.Roles, right.Roles)
-	case 4:
-		return cmpStringCI(left.Version, right.Version)
-	case 5:
-		return cmpTimeDesc(left.CreatedAt(), right.CreatedAt())
-	default:
+func (a *App) compareNodeRowCriterion(left state.NodeRow, right state.NodeRow, criterion tableSortCriterion) int {
+	columns := a.nodesView.Columns()
+	if criterion.ColumnIndex < 0 || criterion.ColumnIndex >= len(columns) {
 		return 0
 	}
+	title := columns[criterion.ColumnIndex].Title
+	leftValue := a.nodeCells(left.WithAge(time.Now()))[criterion.ColumnIndex]
+	rightValue := a.nodeCells(right.WithAge(time.Now()))[criterion.ColumnIndex]
+	return compareColumnValue(title, leftValue, rightValue, left.CreatedAt(), right.CreatedAt())
 }
 
 func (a *App) compareGenericRows(left cluster.GenericResourceRow, right cluster.GenericResourceRow, sorts []tableSortCriterion) int {
@@ -466,8 +440,48 @@ func compareColumnValue(title string, left string, right string, leftCreated tim
 		if leftOK && rightOK {
 			return cmpInt(leftInt, rightInt)
 		}
+	case normalized == "CPU", normalized == "MEMORY", normalized == "EPHEMERAL":
+		leftValue, leftOK := parseResourcePortion(left)
+		rightValue, rightOK := parseResourcePortion(right)
+		if leftOK && rightOK {
+			return cmpInt64(leftValue, rightValue)
+		}
+	case normalized == "GPU":
+		leftUsed, leftTotal, leftOK := parseFractionOrInt(left)
+		rightUsed, rightTotal, rightOK := parseFractionOrInt(right)
+		if leftOK && rightOK {
+			if cmp := cmpInt(leftUsed, rightUsed); cmp != 0 {
+				return cmp
+			}
+			return cmpInt(leftTotal, rightTotal)
+		}
 	}
 	return cmpStringCI(left, right)
+}
+
+func parseResourcePortion(value string) (int64, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if strings.Contains(value, "/") {
+		value = strings.TrimSpace(strings.SplitN(value, "/", 2)[0])
+	}
+	quantity, err := resource.ParseQuantity(value)
+	if err != nil {
+		return 0, false
+	}
+	return quantity.MilliValue(), true
+}
+
+func parseFractionOrInt(value string) (int, int, bool) {
+	if left, right, ok := parseFraction(value); ok {
+		return left, right, true
+	}
+	if parsed, ok := parseInt(value); ok {
+		return parsed, 0, true
+	}
+	return 0, 0, false
 }
 
 func normalizeSortTitle(title string) string {
@@ -534,6 +548,17 @@ func cmpStringCI(left string, right string) int {
 }
 
 func cmpInt(left int, right int) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func cmpInt64(left int64, right int64) int {
 	switch {
 	case left < right:
 		return -1
