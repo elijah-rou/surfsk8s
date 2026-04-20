@@ -129,11 +129,11 @@ if {$mode == "live"} {
     }
     send -- "g\r"
     expect {
-        -re "surfsk8s . resource details" {}
+        -re "surfsk8s . services . serving.knative.dev" {}
         timeout { exit 17 }
     }
     expect {
-        -re "Plural:      services" {}
+        -re "LATESTCREATED" {}
         timeout { exit 18 }
     }
     send -- "\033"
@@ -278,7 +278,7 @@ if {$mode == "live"} {
             -re "surfsk8s . pod details" {}
             timeout { exit 46 }
         }
-        send -- "e"
+        send -- "x"
         expect {
             -re "surfsk8s . select container" {}
             timeout { exit 47 }

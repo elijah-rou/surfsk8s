@@ -5,17 +5,25 @@ import (
 	"strings"
 )
 
+type PrinterColumn struct {
+	Name     string
+	JSONPath string
+	Type     string
+	Priority int32
+}
+
 type ResourceKind struct {
-	ID         string
-	GroupName  string
-	Display    string
-	Kind       string
-	APIGroup   string
-	Version    string
-	Resource   string
-	Namespaced bool
-	Favorite   bool
-	Custom     bool
+	ID             string
+	GroupName      string
+	Display        string
+	Kind           string
+	APIGroup       string
+	Version        string
+	Resource       string
+	Namespaced     bool
+	Favorite       bool
+	Custom         bool
+	PrinterColumns []PrinterColumn
 }
 
 type ResourceGroup struct {
@@ -24,11 +32,12 @@ type ResourceGroup struct {
 }
 
 type discoveredResource struct {
-	APIGroup   string
-	Version    string
-	Resource   string
-	Kind       string
-	Namespaced bool
+	APIGroup       string
+	Version        string
+	Resource       string
+	Kind           string
+	Namespaced     bool
+	PrinterColumns []PrinterColumn
 }
 
 type resourceTemplate struct {
@@ -85,7 +94,16 @@ func buildCatalog(resources []discoveredResource) []ResourceGroup {
 	groupOrder := []string{"Favourites", "Workloads", "Network", "Config", "Storage", "Access", "Policy", "Cluster", "CRDs"}
 	groups := make(map[string][]ResourceKind, len(groupOrder))
 	knownByKey := make(map[string]resourceTemplate, len(knownResourceTemplates))
+	discoveredByKey := make(map[string]discoveredResource, len(resources))
 	seen := make(map[string]struct{}, len(knownResourceTemplates))
+
+	for _, resource := range resources {
+		key := resourceKey(resource.APIGroup, resource.Resource)
+		if _, ok := discoveredByKey[key]; ok {
+			continue
+		}
+		discoveredByKey[key] = resource
+	}
 
 	for _, template := range knownResourceTemplates {
 		key := resourceKey(template.APIGroup, template.Resource)
@@ -94,7 +112,7 @@ func buildCatalog(resources []discoveredResource) []ResourceGroup {
 		}
 		seen[template.GroupName+"|"+key] = struct{}{}
 		knownByKey[key] = template
-		groups[template.GroupName] = append(groups[template.GroupName], ResourceKind{
+		knownResource := ResourceKind{
 			ID:         key,
 			GroupName:  template.GroupName,
 			Display:    template.Display,
@@ -103,7 +121,15 @@ func buildCatalog(resources []discoveredResource) []ResourceGroup {
 			Resource:   template.Resource,
 			Namespaced: template.Namespaced,
 			Favorite:   template.Favorite,
-		})
+		}
+		if discovered, ok := discoveredByKey[key]; ok {
+			knownResource.Version = discovered.Version
+			if discovered.Kind != "" {
+				knownResource.Kind = discovered.Kind
+			}
+			knownResource.PrinterColumns = append([]PrinterColumn(nil), discovered.PrinterColumns...)
+		}
+		groups[template.GroupName] = append(groups[template.GroupName], knownResource)
 	}
 
 	crdResources := make([]ResourceKind, 0, 16)
@@ -118,15 +144,16 @@ func buildCatalog(resources []discoveredResource) []ResourceGroup {
 		}
 		crdSeen[key] = struct{}{}
 		crdResources = append(crdResources, ResourceKind{
-			ID:         key,
-			GroupName:  "CRDs",
-			Display:    resource.Resource,
-			Kind:       resource.Kind,
-			APIGroup:   resource.APIGroup,
-			Version:    resource.Version,
-			Resource:   resource.Resource,
-			Namespaced: resource.Namespaced,
-			Custom:     true,
+			ID:             key,
+			GroupName:      "CRDs",
+			Display:        resource.Resource,
+			Kind:           resource.Kind,
+			APIGroup:       resource.APIGroup,
+			Version:        resource.Version,
+			Resource:       resource.Resource,
+			Namespaced:     resource.Namespaced,
+			Custom:         true,
+			PrinterColumns: append([]PrinterColumn(nil), resource.PrinterColumns...),
 		})
 	}
 

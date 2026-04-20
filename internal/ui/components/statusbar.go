@@ -19,6 +19,7 @@ type ClusterStatus struct {
 
 type StatusBarState struct {
 	Clusters    []ClusterStatus
+	Context     string
 	Namespace   string
 	InputLabel  string
 	InputValue  string
@@ -43,6 +44,12 @@ func (s StatusBar) View(state StatusBarState) string {
 	if state.Activity != "" {
 		parts = append(parts, theme.StatusWarn.Render("activity:"+state.Activity))
 	}
+
+	contextLabel := "ctx:all"
+	if state.Context != "" {
+		contextLabel = "ctx:" + state.Context
+	}
+	parts = append(parts, theme.ClusterLabel.Render(contextLabel))
 
 	namespace := "ns:all"
 	if state.Namespace != "" {

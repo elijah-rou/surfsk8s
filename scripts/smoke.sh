@@ -154,7 +154,8 @@ if [[ "$mode" == "live" ]]; then
   grep -q "surfsk8s · CRDs" "$sanitized_output"
   grep -q "sort:name" "$sanitized_output"
   grep -q "\*service\*serving.knative.dev\*" "$sanitized_output"
-  grep -q "serving.knative.dev\|Plural:      services" "$sanitized_output"
+  grep -q "surfsk8s · services · serving.knative.dev" "$sanitized_output"
+  grep -q "LATESTCREATED" "$sanitized_output"
   grep -q "surfsk8s · commands" "$sanitized_output"
   if [[ "$apply_fixture" == "true" ]]; then
     grep -q "surfsk8s · select container" "$sanitized_output"

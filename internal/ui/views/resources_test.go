@@ -3,6 +3,7 @@ package views
 import (
 	"testing"
 
+	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
 )
 
@@ -83,5 +84,26 @@ func TestNodesViewRows(t *testing.T) {
 	}
 	if got, want := rows[0][5], "dev"; got != want {
 		t.Fatalf("cluster = %q, want %q", got, want)
+	}
+}
+
+func TestGenericResourcesViewRows(t *testing.T) {
+	view := NewGenericResourcesView()
+	resource := cluster.ResourceKind{Namespaced: true, PrinterColumns: []cluster.PrinterColumn{{Name: "LATESTCREATED", JSONPath: ".status.latestCreatedRevisionName"}}}
+	rows := view.Rows([]cluster.GenericResourceRow{{
+		Namespace:     "serving",
+		Name:          "revision-0001",
+		PrinterValues: []string{"revision-0001"},
+		Age:           "5m",
+		Cluster:       "dev",
+	}}, resource)
+	if got, want := rows[0][1], "revision-0001"; got != want {
+		t.Fatalf("name = %q, want %q", got, want)
+	}
+	if got, want := rows[0][2], "revision-0001"; got != want {
+		t.Fatalf("printer value = %q, want %q", got, want)
+	}
+	if got, want := len(view.Columns(resource)), 5; got != want {
+		t.Fatalf("columns = %d, want %d", got, want)
 	}
 }

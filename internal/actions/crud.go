@@ -2,17 +2,32 @@ package actions
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/yaml"
 
+	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
 )
 
 const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
+
+const manifestEditScript = `set -eu
+file="$1"
+shift
+trap 'rm -f "$file"' EXIT
+editor="${VISUAL:-${EDITOR:-vi}}"
+# shellcheck disable=SC2086
+$editor "$file"
+kubectl "$@" apply -f "$file"
+`
 
 // Executor builds real kubectl operations against specific cluster contexts.
 // Interactive actions like exec, edit, and port-forward are intended to run
@@ -66,12 +81,11 @@ func (e *Executor) EditPod(details state.PodDetails) (*exec.Cmd, string, error) 
 	if details.Pod == nil {
 		return nil, "", fmt.Errorf("pod disappeared")
 	}
-	args, err := e.baseArgs(details.Row.Cluster)
+	object, err := typedManifestObject(details.Pod, "v1", "Pod")
 	if err != nil {
 		return nil, "", err
 	}
-	args = append(args, "edit", "-n", details.Row.Namespace, "pod/"+details.Row.Name)
-	return exec.Command("kubectl", args...), fmt.Sprintf("edit pod/%s", details.Row.Name), nil
+	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit pod/%s manifest", details.Row.Name), object)
 }
 
 func (e *Executor) PortForwardPod(details state.PodDetails) (*exec.Cmd, string, error) {
@@ -140,12 +154,11 @@ func (e *Executor) EditDeployment(details state.DeploymentDetails) (*exec.Cmd, s
 	if details.Deployment == nil {
 		return nil, "", fmt.Errorf("deployment disappeared")
 	}
-	args, err := e.baseArgs(details.Row.Cluster)
+	object, err := typedManifestObject(details.Deployment, "apps/v1", "Deployment")
 	if err != nil {
 		return nil, "", err
 	}
-	args = append(args, "edit", "-n", details.Row.Namespace, "deployment/"+details.Row.Name)
-	return exec.Command("kubectl", args...), fmt.Sprintf("edit deployment/%s", details.Row.Name), nil
+	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit deployment/%s manifest", details.Row.Name), object)
 }
 
 func (e *Executor) PortForwardService(details state.ServiceDetails) (*exec.Cmd, string, error) {
@@ -182,24 +195,76 @@ func (e *Executor) EditService(details state.ServiceDetails) (*exec.Cmd, string,
 	if details.Service == nil {
 		return nil, "", fmt.Errorf("service disappeared")
 	}
-	args, err := e.baseArgs(details.Row.Cluster)
+	object, err := typedManifestObject(details.Service, "v1", "Service")
 	if err != nil {
 		return nil, "", err
 	}
-	args = append(args, "edit", "-n", details.Row.Namespace, "service/"+details.Row.Name)
-	return exec.Command("kubectl", args...), fmt.Sprintf("edit service/%s", details.Row.Name), nil
+	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit service/%s manifest", details.Row.Name), object)
 }
 
 func (e *Executor) EditNode(details state.NodeDetails) (*exec.Cmd, string, error) {
 	if details.Node == nil {
 		return nil, "", fmt.Errorf("node disappeared")
 	}
-	args, err := e.baseArgs(details.Row.Cluster)
+	object, err := typedManifestObject(details.Node, "v1", "Node")
 	if err != nil {
 		return nil, "", err
 	}
-	args = append(args, "edit", "node/"+details.Row.Name)
-	return exec.Command("kubectl", args...), fmt.Sprintf("edit node/%s", details.Row.Name), nil
+	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit node/%s manifest", details.Row.Name), object)
+}
+
+func (e *Executor) EditGenericResource(resource cluster.ResourceKind, details cluster.GenericResourceDetails) (*exec.Cmd, string, error) {
+	if resource.Resource == "" {
+		return nil, "", fmt.Errorf("resource kind disappeared")
+	}
+	if details.Row.Name == "" {
+		return nil, "", fmt.Errorf("resource row disappeared")
+	}
+	if details.Object == nil {
+		return nil, "", fmt.Errorf("resource disappeared")
+	}
+	object := details.Object.DeepCopy()
+	if object.GetAPIVersion() == "" {
+		if resource.APIGroup == "" {
+			object.SetAPIVersion(resource.Version)
+		} else {
+			object.SetAPIVersion(resource.APIGroup + "/" + resource.Version)
+		}
+	}
+	if object.GetKind() == "" && resource.Kind != "" {
+		object.SetKind(resource.Kind)
+	}
+	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit %s/%s manifest", resource.Resource, details.Row.Name), object)
+}
+
+func (e *Executor) editManifest(contextName string, description string, object *unstructured.Unstructured) (*exec.Cmd, string, error) {
+	if object == nil {
+		return nil, "", fmt.Errorf("resource disappeared")
+	}
+	args, err := e.baseArgs(contextName)
+	if err != nil {
+		return nil, "", err
+	}
+	manifest := scrubManifestObject(object)
+	content, err := yaml.Marshal(manifest.Object)
+	if err != nil {
+		return nil, "", fmt.Errorf("marshal manifest: %w", err)
+	}
+	file, err := os.CreateTemp("", "surfsk8s-edit-*.yaml")
+	if err != nil {
+		return nil, "", fmt.Errorf("create temp manifest: %w", err)
+	}
+	if _, err := file.Write(content); err != nil {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+		return nil, "", fmt.Errorf("write temp manifest: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(file.Name())
+		return nil, "", fmt.Errorf("close temp manifest: %w", err)
+	}
+	argv := append([]string{"-c", manifestEditScript, "sh", file.Name()}, args...)
+	return exec.Command("sh", argv...), description, nil
 }
 
 func (e *Executor) baseArgs(contextName string) ([]string, error) {
@@ -213,6 +278,40 @@ func (e *Executor) baseArgs(contextName string) ([]string, error) {
 	}
 	args = append(args, "--context", contextName)
 	return args, nil
+}
+
+func typedManifestObject(object interface{}, apiVersion string, kind string) (*unstructured.Unstructured, error) {
+	mapped, err := runtime.DefaultUnstructuredConverter.ToUnstructured(object)
+	if err != nil {
+		return nil, fmt.Errorf("convert manifest: %w", err)
+	}
+	manifest := &unstructured.Unstructured{Object: mapped}
+	manifest.SetAPIVersion(apiVersion)
+	manifest.SetKind(kind)
+	return manifest, nil
+}
+
+func scrubManifestObject(object *unstructured.Unstructured) *unstructured.Unstructured {
+	if object == nil {
+		panic("actions.scrubManifestObject: nil object")
+	}
+	manifest := object.DeepCopy()
+	delete(manifest.Object, "status")
+	metadata, ok := manifest.Object["metadata"].(map[string]interface{})
+	if !ok {
+		return manifest
+	}
+	for _, key := range []string{"creationTimestamp", "deletionGracePeriodSeconds", "deletionTimestamp", "generation", "managedFields", "resourceVersion", "selfLink", "uid"} {
+		delete(metadata, key)
+	}
+	annotations, ok := metadata["annotations"].(map[string]interface{})
+	if ok {
+		delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
+		if len(annotations) == 0 {
+			delete(metadata, "annotations")
+		}
+	}
+	return manifest
 }
 
 func PodContainerNames(pod *corev1.Pod) ([]string, error) {

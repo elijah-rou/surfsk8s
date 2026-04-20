@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
@@ -27,7 +29,7 @@ func TestMatchesSearchSupportsWildcardAndExact(t *testing.T) {
 	}
 }
 
-func TestOpenResourceListKeepsCRDServicesInDetailsMode(t *testing.T) {
+func TestOpenResourceListOpensGenericCRDList(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})
 
@@ -35,11 +37,12 @@ func TestOpenResourceListKeepsCRDServicesInDetailsMode(t *testing.T) {
 		Display:    "services",
 		Resource:   "services",
 		APIGroup:   "serving.knative.dev",
+		Version:    "v1",
 		Namespaced: true,
 		Custom:     true,
 	})
 
-	if got, want := app.screen, screenResourceDetails; got != want {
+	if got, want := app.screen, screenResourceList; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
 	}
 }
@@ -319,5 +322,148 @@ func TestRunRestartResourceOpensConfirmation(t *testing.T) {
 	}
 	if got, want := app.screen, screenConfirmAction; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
+	}
+}
+
+func TestResourceDetailsSupportViewportScrolling(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 100
+	app.height = 10
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "revisions", Resource: "revisions", APIGroup: "serving.knative.dev", Version: "v1", Namespaced: true, Custom: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row:    cluster.GenericResourceRow{Name: "api-0001", Namespace: "serving", Cluster: "dev", Ready: "True", Status: "Ready", Age: "5m"},
+		YAML:   strings.Join([]string{"a: 1", "b: 2", "c: 3", "d: 4", "e: 5", "f: 6", "g: 7", "h: 8", "i: 9"}, "\n"),
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "serving.knative.dev/v1"}},
+	}
+
+	_ = app.View()
+	if got, want := app.textViewport.YOffset, 0; got != want {
+		t.Fatalf("initial offset = %d, want %d", got, want)
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if got, want := app.textViewport.YOffset, 1; got != want {
+		t.Fatalf("offset = %d, want %d", got, want)
+	}
+}
+
+func TestConfirmActionSupportsViewportScrolling(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 100
+	app.height = 8
+	app.screen = screenResourceDetails
+	app.openConfirmAction(strings.Join([]string{"line1", "line2", "line3", "line4", "line5", "line6", "line7"}, "\n"), func() tea.Cmd { return nil })
+
+	_ = app.View()
+	app.updateConfirmActionKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if got, want := app.textViewport.YOffset, 1; got != want {
+		t.Fatalf("offset = %d, want %d", got, want)
+	}
+}
+
+func TestMouseWheelScrollsTextViewport(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 100
+	app.height = 8
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "revisions", Resource: "revisions", APIGroup: "serving.knative.dev", Version: "v1", Namespaced: true, Custom: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row:    cluster.GenericResourceRow{Name: "api-0001", Namespace: "serving", Cluster: "dev", Ready: "True", Status: "Ready", Age: "5m"},
+		YAML:   strings.Join([]string{"a: 1", "b: 2", "c: 3", "d: 4", "e: 5", "f: 6", "g: 7", "h: 8", "i: 9"}, "\n"),
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{"apiVersion": "serving.knative.dev/v1"}},
+	}
+
+	_ = app.View()
+	app.updateMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	if got, want := app.textViewport.YOffset, 3; got != want {
+		t.Fatalf("offset = %d, want %d", got, want)
+	}
+}
+
+func TestMouseWheelScrollsResourceTable(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.screen = screenResourceList
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	for idx := 0; idx < 10; idx++ {
+		deployment := &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "frontend-" + strconv.Itoa(idx), Namespace: "default"}}
+		store.UpsertDeployment("dev", deployment)
+	}
+	app.height = 10
+	app.refreshResourceList(time.Now())
+
+	app.updateMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	if got, want := app.resourceTable.SelectedIndex(), 3; got != want {
+		t.Fatalf("selected index = %d, want %d", got, want)
+	}
+}
+
+func TestOpenNamespacePickerUsesCurrentScreenNamespaces(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.screen = screenPods
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "alpha"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "beta"}})
+
+	cmd := app.openNamespacePicker()
+	if cmd != nil {
+		t.Fatalf("expected picker command nil")
+	}
+	if got, want := app.screen, screenScopePicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.visibleScopeOptions[1].Value, "alpha"; got != want {
+		t.Fatalf("scope option = %q, want %q", got, want)
+	}
+}
+
+func TestContextScopeFiltersPodRows(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "default"}})
+	store.UpsertPod("prod", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "default"}})
+	app.contextScope = "dev"
+	app.screen = screenPods
+	app.refreshPods(time.Now())
+
+	if got, want := app.visibleRows, 1; got != want {
+		t.Fatalf("visibleRows = %d, want %d", got, want)
+	}
+	if got, want := app.currentContextLabel(), "dev"; got != want {
+		t.Fatalf("context label = %q, want %q", got, want)
+	}
+}
+
+func TestBuildResourceFinderItemsDeduplicatesResources(t *testing.T) {
+	items := buildResourceFinderItems([]cluster.ResourceGroup{{Name: "Favourites", Resources: []cluster.ResourceKind{{ID: "/pods", Display: "Pods", Resource: "pods", Namespaced: true}}}, {Name: "Workloads", Resources: []cluster.ResourceKind{{ID: "/pods", Display: "Pods", Resource: "pods", Namespaced: true}, {ID: "serving.knative.dev/revisions", Display: "Revisions", Resource: "revisions", APIGroup: "serving.knative.dev", Namespaced: true}}}})
+	if got, want := len(items), 2; got != want {
+		t.Fatalf("items = %d, want %d", got, want)
+	}
+}
+
+func TestOpenSelectedResourceFinderItemOpensResource(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.visibleResourceItems = []resourceFinderItem{{resource: cluster.ResourceKind{Display: "Revisions", Resource: "revisions", APIGroup: "serving.knative.dev", Version: "v1", Namespaced: true, Custom: true}}}
+	app.navTable.SetRows(renderResourceFinderRows(app.visibleResourceItems))
+	app.screen = screenResourceFinder
+	app.inputMode = inputModeResourceFinder
+	app.filter.Activate()
+
+	cmd := app.openSelectedResourceFinderItem()
+	if cmd != nil {
+		t.Fatalf("expected open resource command nil")
+	}
+	if got, want := app.screen, screenResourceList; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.activeResource.Resource, "revisions"; got != want {
+		t.Fatalf("resource = %q, want %q", got, want)
 	}
 }

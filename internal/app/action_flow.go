@@ -93,12 +93,16 @@ func (a *App) openConfirmAction(description string, run func() tea.Cmd) tea.Cmd 
 	a.confirmDescription = description
 	a.confirmRun = run
 	a.screen = screenConfirmAction
+	a.resetTextViewport()
 	a.visibleRows = 0
 	a.totalRows = 0
 	return nil
 }
 
 func (a *App) updateConfirmActionKeys(msg tea.KeyMsg) tea.Cmd {
+	if a.updateTextViewportKeys(msg) {
+		return nil
+	}
 	switch msg.String() {
 	case "esc", "backspace":
 		a.cancelActionFlow()

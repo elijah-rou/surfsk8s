@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -16,8 +17,10 @@ type inputMode uint8
 const (
 	inputModeSearch inputMode = iota
 	inputModeCommand
+	inputModeResourceFinder
 	inputModeScale
 	inputModeLocalPort
+	inputModeScopePicker
 )
 
 type actionResultMsg struct {
@@ -32,14 +35,30 @@ func (a *App) statusInputState() (string, string, bool) {
 			return "cmd", a.filter.Value(), true
 		case inputModeScale:
 			return "replicas", a.filter.Value(), true
+		case inputModeResourceFinder:
+			return "resource", a.filter.Value(), true
 		case inputModeLocalPort:
 			return "local-port", a.filter.Value(), true
+		case inputModeScopePicker:
+			if a.scopePickerKind == scopePickerContext {
+				return "context", a.filter.Value(), true
+			}
+			return "namespace", a.filter.Value(), true
 		default:
 			return "filter", a.filter.Value(), true
 		}
 	}
 	if a.screen == screenCommands {
 		return "cmd", a.commandQuery, false
+	}
+	if a.screen == screenResourceFinder {
+		return "resource", a.resourceFinderQuery, false
+	}
+	if a.screen == screenScopePicker {
+		if a.scopePickerKind == scopePickerContext {
+			return "context", a.scopeQuery, false
+		}
+		return "namespace", a.scopeQuery, false
 	}
 	return "filter", a.currentQuery(), false
 }
@@ -279,8 +298,26 @@ func (a *App) runEditResource() tea.Cmd {
 			return runProcessCommand(cmd, description)
 		})
 	default:
-		a.statusMessage = "edit unsupported for this resource"
-		return nil
+		_, description, err := a.executor.EditGenericResource(a.activeResource, a.activeGenericDetails)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		return a.openConfirmAction(description, func() tea.Cmd {
+			details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, a.activeGenericDetails.Row.Key, time.Now())
+			if err != nil {
+				a.statusMessage = err.Error()
+				a.refreshCurrentScreen(time.Now())
+				return nil
+			}
+			a.activeGenericDetails = details
+			cmd, description, err := a.executor.EditGenericResource(a.activeResource, details)
+			if err != nil {
+				a.statusMessage = err.Error()
+				return nil
+			}
+			return runProcessCommand(cmd, description)
+		})
 	}
 }
 

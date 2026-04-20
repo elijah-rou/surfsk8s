@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
 )
 
@@ -61,13 +62,18 @@ func (a *App) togglePodSortReverse() {
 func (a *App) cycleResourceSort() {
 	state := a.currentResourceSortPointer()
 	keys := []sortKey{sortKeyDefault, sortKeyName, sortKeyAge, sortKeyCluster}
-	switch a.activeResource.Resource {
-	case "deployments":
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		keys = []sortKey{sortKeyDefault, sortKeyName, sortKeyNamespace, sortKeyAvailable, sortKeyAge, sortKeyCluster}
-	case "services":
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		keys = []sortKey{sortKeyDefault, sortKeyName, sortKeyNamespace, sortKeyType, sortKeyAge, sortKeyCluster}
-	case "nodes":
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		keys = []sortKey{sortKeyDefault, sortKeyName, sortKeyStatus, sortKeyAge, sortKeyCluster}
+	default:
+		keys = []sortKey{sortKeyDefault, sortKeyName, sortKeyNamespace, sortKeyStatus, sortKeyAge, sortKeyCluster}
+		if !a.activeResource.Namespaced {
+			keys = []sortKey{sortKeyDefault, sortKeyName, sortKeyStatus, sortKeyAge, sortKeyCluster}
+		}
 	}
 	state.key = nextSortKey(state.key, keys)
 }
@@ -81,15 +87,15 @@ func (a *App) currentResourceSort() listSortState {
 }
 
 func (a *App) currentResourceSortPointer() *listSortState {
-	switch a.activeResource.Resource {
-	case "deployments":
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		return &a.deploymentSort
-	case "services":
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		return &a.serviceSort
-	case "nodes":
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		return &a.nodeSort
 	default:
-		return &a.deploymentSort
+		return &a.genericSort
 	}
 }
 
@@ -121,10 +127,17 @@ func (a *App) nodeNeedsMaterializedSort() bool {
 	return a.nodeSort.key != sortKeyDefault || a.nodeSort.reverse
 }
 
+func (a *App) genericNeedsMaterializedSort() bool {
+	return a.genericSort.key != sortKeyDefault || a.genericSort.reverse
+}
+
 func (a *App) buildSortedPods() (int, int) {
 	a.sortedPods = a.sortedPods[:0]
 	total := 0
 	a.store.ForEachPod(func(row state.PodRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		total++
 		if !a.matchPodRow(row) {
 			return true
@@ -142,6 +155,9 @@ func (a *App) buildSortedDeployments() (int, int) {
 	a.sortedDeployments = a.sortedDeployments[:0]
 	total := 0
 	a.store.ForEachDeployment(func(row state.DeploymentRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		total++
 		if a.namespace != "" && row.Namespace != a.namespace {
 			return true
@@ -162,6 +178,9 @@ func (a *App) buildSortedServices() (int, int) {
 	a.sortedServices = a.sortedServices[:0]
 	total := 0
 	a.store.ForEachService(func(row state.ServiceRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		total++
 		if a.namespace != "" && row.Namespace != a.namespace {
 			return true
@@ -182,6 +201,9 @@ func (a *App) buildSortedNodes() (int, int) {
 	a.sortedNodes = a.sortedNodes[:0]
 	total := 0
 	a.store.ForEachNode(func(row state.NodeRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		total++
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
 			return true
@@ -223,6 +245,40 @@ func compareNodeRows(left state.NodeRow, right state.NodeRow, state listSortStat
 	cmp := compareNodeRowValue(left, right, state.key)
 	if cmp == 0 {
 		cmp = compareNodeRowValue(left, right, sortKeyDefault)
+	}
+	return sortComparison(cmp, state.reverse)
+}
+
+func (a *App) buildSortedGenericResources() (int, int) {
+	a.sortedGenericRows = a.sortedGenericRows[:0]
+	query := strings.TrimSpace(a.resourceQuery2)
+	for _, row := range a.genericRows {
+		if !a.contextMatches(row.Cluster) {
+			continue
+		}
+		if a.activeResource.Namespaced && a.namespace != "" && row.Namespace != a.namespace {
+			continue
+		}
+		if query != "" {
+			if len(a.genericCompiledColumns) != 0 && row.Object != nil && len(row.PrinterValues) == 0 {
+				row.PrinterValues = cluster.EvaluateCompiledPrinterColumns(row.Object, a.genericCompiledColumns)
+			}
+			if !matchesSearch(row.SearchText(), query) {
+				continue
+			}
+		}
+		a.sortedGenericRows = append(a.sortedGenericRows, row)
+	}
+	sort.SliceStable(a.sortedGenericRows, func(i int, j int) bool {
+		return compareGenericRows(a.sortedGenericRows[i], a.sortedGenericRows[j], a.genericSort)
+	})
+	return len(a.genericRows), len(a.sortedGenericRows)
+}
+
+func compareGenericRows(left cluster.GenericResourceRow, right cluster.GenericResourceRow, state listSortState) bool {
+	cmp := compareGenericRowValue(left, right, state.key)
+	if cmp == 0 {
+		cmp = compareGenericRowValue(left, right, sortKeyDefault)
 	}
 	return sortComparison(cmp, state.reverse)
 }
@@ -307,6 +363,29 @@ func compareNodeRowValue(left state.NodeRow, right state.NodeRow, key sortKey) i
 	case sortKeyCluster:
 		return cmpString3(left.Cluster, right.Cluster)
 	default:
+		if cmp := cmpString3(left.Name, right.Name); cmp != 0 {
+			return cmp
+		}
+		return cmpString3(left.Cluster, right.Cluster)
+	}
+}
+
+func compareGenericRowValue(left cluster.GenericResourceRow, right cluster.GenericResourceRow, key sortKey) int {
+	switch key {
+	case sortKeyName:
+		return cmpString3(left.Name, right.Name)
+	case sortKeyNamespace:
+		return cmpString3(left.Namespace, right.Namespace)
+	case sortKeyStatus:
+		return cmpString3(left.Status, right.Status)
+	case sortKeyAge:
+		return cmpTimeDesc(left.CreatedAt(), right.CreatedAt())
+	case sortKeyCluster:
+		return cmpString3(left.Cluster, right.Cluster)
+	default:
+		if cmp := cmpString3(left.Namespace, right.Namespace); cmp != 0 {
+			return cmp
+		}
 		if cmp := cmpString3(left.Name, right.Name); cmp != 0 {
 			return cmp
 		}

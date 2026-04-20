@@ -46,6 +46,7 @@ func Execute() error {
 	program := tea.NewProgram(
 		app.New(store, manager, app.Config{InitialNamespace: *namespace, KubeconfigPath: *kubeconfig}),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 		tea.WithContext(ctx),
 	)
 	if _, err := program.Run(); err != nil {

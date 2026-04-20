@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	corev1 "k8s.io/api/core/v1"
@@ -42,6 +43,8 @@ const (
 	screenPodDetails
 	screenResourceDetails
 	screenCommands
+	screenResourceFinder
+	screenScopePicker
 	screenActionPicker
 	screenConfirmAction
 )
@@ -52,6 +55,18 @@ const (
 	pickerModeEnter pickerMode = iota
 	pickerModeAdd
 )
+
+type scopePickerKind uint8
+
+const (
+	scopePickerNamespace scopePickerKind = iota
+	scopePickerContext
+)
+
+type scopeOption struct {
+	Label string
+	Value string
+}
 
 type commandItem struct {
 	Name        string
@@ -70,12 +85,14 @@ type App struct {
 	deploymentsView views.DeploymentsView
 	servicesView    views.ServicesView
 	nodesView       views.NodesView
+	genericView     views.GenericResourcesView
 
 	navTable      components.Table
 	podTable      components.Table
 	resourceTable components.Table
 	filter        components.Filter
 	statusBar     components.StatusBar
+	textViewport  viewport.Model
 	commands      []commandItem
 	screen        screen
 	prevScreen    screen
@@ -112,22 +129,44 @@ type App struct {
 	resourceQuery    string
 	activeResource   cluster.ResourceKind
 
-	namespace          string
-	namespaces         []string
-	podQuery           string
-	resourceQuery2     string
-	activePod          state.PodDetails
-	activeDeployment   state.DeploymentDetails
-	activeService      state.ServiceDetails
-	activeNode         state.NodeDetails
-	lastDataVersion    uint64
-	lastManagerVersion uint64
-	lastTick           time.Time
-	visibleRows        int
-	totalRows          int
+	namespace            string
+	namespaces           []string
+	podQuery             string
+	resourceQuery2       string
+	activePod            state.PodDetails
+	activeDeployment     state.DeploymentDetails
+	activeService        state.ServiceDetails
+	activeNode           state.NodeDetails
+	activeGenericDetails cluster.GenericResourceDetails
+	lastDataVersion      uint64
+	lastManagerVersion   uint64
+	lastTick             time.Time
+	visibleRows          int
+	totalRows            int
 
-	visibleCommands []commandItem
-	commandQuery    string
+	genericRows                   []cluster.GenericResourceRow
+	sortedGenericRows             []cluster.GenericResourceRow
+	genericNamespaces             []string
+	genericSort                   listSortState
+	genericRowsResourceID         string
+	genericCompiledColumns        []cluster.CompiledPrinterColumn
+	genericCompiledColumnsVersion string
+	genericListCacheKey           string
+	lastGenericFetchAt            time.Time
+	genericDetailFetchedAt        time.Time
+
+	visibleCommands      []commandItem
+	commandQuery         string
+	resourceFinderItems  []resourceFinderItem
+	visibleResourceItems []resourceFinderItem
+	resourceFinderQuery  string
+
+	contextScope        string
+	scopeReturnScreen   screen
+	scopePickerKind     scopePickerKind
+	scopeQuery          string
+	scopeOptions        []scopeOption
+	visibleScopeOptions []scopeOption
 
 	podSort        listSortState
 	deploymentSort listSortState
@@ -152,12 +191,14 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	deploymentsView := views.NewDeploymentsView()
 	servicesView := views.NewServicesView()
 	nodesView := views.NewNodesView()
+	genericView := views.NewGenericResourcesView()
 	navTable := components.NewTable([]components.Column{{Title: "ITEMS", Width: 80}})
 	podTable := components.NewTable(podsView.Columns())
 	podTable.SetEmptyMessage("No pods")
 	resourceTable := components.NewTable(deploymentsView.Columns())
 	filter := components.NewFilter()
 	statusBar := components.NewStatusBar()
+	textViewport := viewport.New(0, 0)
 	contexts := manager.AvailableContexts()
 	selectedContext := make(map[string]bool, len(contexts))
 	for _, context := range contexts {
@@ -175,11 +216,13 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 		deploymentsView: deploymentsView,
 		servicesView:    servicesView,
 		nodesView:       nodesView,
+		genericView:     genericView,
 		navTable:        navTable,
 		podTable:        podTable,
 		resourceTable:   resourceTable,
 		filter:          filter,
 		statusBar:       statusBar,
+		textViewport:    textViewport,
 		screen:          screenContexts,
 		pickerMode:      pickerModeEnter,
 		contexts:        contexts,
@@ -226,6 +269,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		return a, a.updateKey(typed)
 
+	case tea.MouseMsg:
+		return a, a.updateMouse(typed)
+
 	case tickMsg:
 		now := time.Time(typed)
 		if a.shouldRefresh(now) {
@@ -251,6 +297,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			a.statusMessage = typed.description + " complete"
 		}
+		if (a.screen == screenResourceList || a.screen == screenResourceDetails) && !isBuiltInResourceList(a.activeResource) && a.supportsGenericResourceList(a.activeResource) {
+			a.lastManagerVersion = 0
+			a.lastGenericFetchAt = time.Time{}
+		}
 		a.activity = ""
 		a.refreshCurrentScreen(time.Now())
 		return a, nil
@@ -260,10 +310,26 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (a *App) View() string {
-	title, body, footer := a.currentView()
+	title, _, footer := a.currentView()
 	inputLabel, inputValue, inputActive := a.statusInputState()
+
+	sections := []string{theme.HeaderStyle.Render(title)}
+	if a.statusMessage != "" {
+		sections = append(sections, theme.StatusWarn.Render(a.statusMessage))
+	}
+	if a.filter.Active() || strings.TrimSpace(a.currentQuery()) != "" {
+		sections = append(sections, a.filter.View())
+	}
+	a.resizeTablesForBody(len(sections) + 1)
+
+	_, body, footer := a.currentView()
+	if a.usesTextViewport() {
+		body = a.renderTextViewport(body, len(sections))
+	}
+
 	status := a.statusBar.View(components.StatusBarState{
 		Clusters:    a.manager.Statuses(),
+		Context:     a.currentContextLabel(),
 		Namespace:   a.currentNamespaceLabel(),
 		InputLabel:  inputLabel,
 		InputValue:  inputValue,
@@ -273,14 +339,6 @@ func (a *App) View() string {
 		Footer:      footer,
 		Activity:    a.activity,
 	})
-
-	sections := []string{theme.HeaderStyle.Render(title)}
-	if a.statusMessage != "" {
-		sections = append(sections, theme.StatusWarn.Render(a.statusMessage))
-	}
-	if a.filter.Active() || strings.TrimSpace(a.currentQuery()) != "" {
-		sections = append(sections, a.filter.View())
-	}
 	sections = append(sections, body, status)
 	return lipgloss.NewStyle().Padding(0, 1).Render(strings.Join(sections, "\n"))
 }
@@ -289,10 +347,14 @@ func (a *App) updateFilter(msg tea.Msg) tea.Cmd {
 	switch a.inputMode {
 	case inputModeCommand:
 		return a.updateCommandPrompt(msg)
+	case inputModeResourceFinder:
+		return a.updateResourceFinderPrompt(msg)
 	case inputModeScale:
 		return a.updateScalePrompt(msg)
 	case inputModeLocalPort:
 		return a.updateLocalPortPrompt(msg)
+	case inputModeScopePicker:
+		return a.updateScopePickerPrompt(msg)
 	default:
 		return a.updateSearchPrompt(msg)
 	}
@@ -305,13 +367,18 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 	case "ctrl+c", "q":
 		return tea.Quit
 	case ":":
-		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction {
+		if a.screen != screenContexts && a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction {
 			a.openCommands()
 		}
 		return nil
 	case "/":
-		if a.screen != screenActionPicker && a.screen != screenConfirmAction {
+		if a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction {
 			a.openFilter()
+		}
+		return nil
+	case "R":
+		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction {
+			return a.openResourceFinder()
 		}
 		return nil
 	}
@@ -333,6 +400,10 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		return a.updateResourceDetailKeys(msg)
 	case screenCommands:
 		return a.updateCommandKeys(msg)
+	case screenResourceFinder:
+		return a.updateResourceFinderKeys(msg)
+	case screenScopePicker:
+		return a.updateScopePickerKeys(msg)
 	case screenActionPicker:
 		return a.updateActionPickerKeys(msg)
 	case screenConfirmAction:
@@ -402,6 +473,8 @@ func (a *App) updateCatalogKeys(msg tea.KeyMsg) tea.Cmd {
 			a.resourceQuery = ""
 			a.refreshGroupResources()
 		}
+	case "r":
+		return a.openResourceFinder()
 	case "esc", "backspace":
 		if a.catalogQuery != "" {
 			a.catalogQuery = ""
@@ -428,6 +501,8 @@ func (a *App) updateGroupKeys(msg tea.KeyMsg) tea.Cmd {
 		if index >= 0 && index < len(a.visibleResources) {
 			a.openResourceList(a.visibleResources[index])
 		}
+	case "r":
+		return a.openResourceFinder()
 	case "esc", "backspace":
 		if a.resourceQuery != "" {
 			a.resourceQuery = ""
@@ -461,6 +536,12 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 	case "a":
 		a.namespace = ""
 		a.refreshPods(time.Now())
+	case "n":
+		return a.openNamespacePicker()
+	case "c":
+		return a.openContextScopePicker()
+	case "r":
+		return a.openResourceFinder()
 	case "o":
 		a.cyclePodSort()
 		a.refreshPods(time.Now())
@@ -482,6 +563,7 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		a.lastDataVersion = a.store.Version()
 		a.lastTick = time.Now()
 		a.screen = screenPodDetails
+		a.resetTextViewport()
 	case "esc", "backspace":
 		if a.podQuery != "" {
 			a.podQuery = ""
@@ -521,6 +603,12 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 			a.namespace = ""
 			a.refreshResourceList(time.Now())
 		}
+	case "n":
+		return a.openNamespacePicker()
+	case "c":
+		return a.openContextScopePicker()
+	case "r":
+		return a.openResourceFinder()
 	case "o":
 		a.cycleResourceSort()
 		a.refreshResourceList(time.Now())
@@ -544,21 +632,33 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
+	if a.updateTextViewportKeys(msg) {
+		return nil
+	}
 	switch msg.String() {
 	case "esc", "backspace":
 		a.screen = screenPods
 		a.refreshPods(time.Now())
-	case "e":
+	case "x":
 		return a.runExecPod()
+	case "e", "y":
+		return a.runEditPod()
 	case "p":
 		return a.runPortForwardPod()
-	case "y":
-		return a.runEditPod()
+	case "r":
+		return a.openResourceFinder()
+	case "n":
+		return a.openNamespacePicker()
+	case "c":
+		return a.openContextScopePicker()
 	}
 	return nil
 }
 
 func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
+	if a.updateTextViewportKeys(msg) {
+		return nil
+	}
 	switch msg.String() {
 	case "esc", "backspace":
 		if a.isResourceListKindImplemented() {
@@ -570,12 +670,18 @@ func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		a.refreshGroupResources()
 	case "p":
 		return a.runPortForwardResource()
-	case "y":
+	case "e", "y":
 		return a.runEditResource()
 	case "s":
 		return a.openScalePrompt()
+	case "R":
+		return a.openResourceFinder()
 	case "r":
 		return a.runRestartResource()
+	case "n":
+		return a.openNamespacePicker()
+	case "c":
+		return a.openContextScopePicker()
 	}
 	return nil
 }
@@ -621,28 +727,40 @@ func (a *App) currentView() (string, string, string) {
 		}
 		return "surfsk8s · " + mode, a.navTable.View(), "space toggle  / filter  esc clear-find  enter connect  q quit"
 	case screenCatalog:
-		return "surfsk8s · resource catalog", a.navTable.View(), "enter open group  : commands  / filter  esc clear/back"
+		return "surfsk8s · resource catalog", a.navTable.View(), "r resource-find  enter open group  : commands  / filter  esc clear/back"
 	case screenGroupResources:
-		return "surfsk8s · " + a.activeGroup.Name, a.navTable.View(), "enter open resource  : commands  / filter  esc clear/back"
+		return "surfsk8s · " + a.activeGroup.Name, a.navTable.View(), "r resource-find  enter open resource  : commands  / filter  esc clear/back"
 	case screenPods:
-		footer := a.podTable.Footer() + "  sort:" + a.podSort.Label() + "  o next-sort  O reverse  / filter  tab ns  a all  enter details  esc clear/back"
+		footer := a.podTable.Footer() + "  sort:" + a.podSort.Label() + "  o next-sort  O reverse  r resource-find  / filter  n ns-find  c ctx-find  tab ns  a all  enter details  esc clear/back"
 		return "surfsk8s · pods", a.podTable.View(), footer
 	case screenResourceList:
-		footer := a.resourceTable.Footer() + "  sort:" + a.currentResourceSort().Label() + "  o next-sort  O reverse  / filter  enter details  esc clear/back"
+		footer := a.resourceTable.Footer() + "  sort:" + a.currentResourceSort().Label() + "  o next-sort  O reverse  r resource-find  / filter  c ctx-find  enter details  esc clear/back"
 		if a.activeResource.Namespaced {
-			footer += "  tab ns  a all"
+			footer += "  n ns-find  tab ns  a all"
 		}
-		return "surfsk8s · " + strings.ToLower(a.activeResource.Display), a.resourceTable.View(), footer
+		title := strings.ToLower(a.activeResource.Display)
+		if !isBuiltInResourceList(a.activeResource) {
+			title = a.genericResourceTitle()
+		}
+		return "surfsk8s · " + title, a.resourceTable.View(), footer
 	case screenPodDetails:
-		return "surfsk8s · pod details", a.renderPodDetails(), "e exec  y edit  p port-forward  esc back"
+		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  g/G edge  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  esc back"
 	case screenResourceDetails:
 		return "surfsk8s · resource details", a.renderResourceDetails(), a.resourceDetailFooter()
 	case screenCommands:
 		return "surfsk8s · commands", a.navTable.View(), "type to filter  j/k move  g/G edge  enter run  esc clear/close"
+	case screenResourceFinder:
+		return "surfsk8s · resource finder", a.navTable.View(), "type to filter  j/k move  g/G edge  enter open  esc close"
+	case screenScopePicker:
+		title := "namespace scope"
+		if a.scopePickerKind == scopePickerContext {
+			title = "context scope"
+		}
+		return "surfsk8s · " + title, a.navTable.View(), "type to filter  j/k move  g/G edge  enter select  esc cancel"
 	case screenActionPicker:
 		return "surfsk8s · " + a.actionPickerTitle, a.navTable.View(), a.actionPickerFooter
 	case screenConfirmAction:
-		return "surfsk8s · confirm action", a.renderConfirmAction(), "enter confirm  esc cancel"
+		return "surfsk8s · confirm action", a.renderConfirmAction(), "j/k scroll  pgup/pgdn page  g/G edge  enter confirm  esc cancel"
 	default:
 		return "surfsk8s", "", ""
 	}
@@ -701,6 +819,10 @@ func (a *App) openResourceList(resource cluster.ResourceKind) {
 		a.screen = screenResourceList
 		a.resourceQuery2 = ""
 		a.refreshResourceList(time.Now())
+	case a.supportsGenericResourceList(resource):
+		a.screen = screenResourceList
+		a.resourceQuery2 = ""
+		a.refreshResourceList(time.Now())
 	default:
 		a.screen = screenResourceDetails
 	}
@@ -724,6 +846,10 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 		a.refreshActiveResourceDetails(now)
 	case screenCommands:
 		a.refreshCommands()
+	case screenResourceFinder:
+		a.refreshResourceFinder()
+	case screenScopePicker:
+		a.refreshScopePicker()
 	case screenActionPicker:
 		a.refreshActionPicker()
 	case screenConfirmAction:
@@ -765,7 +891,7 @@ func (a *App) refreshGroupResources() {
 func (a *App) refreshPods(now time.Time) {
 	total := 0
 	filtered := 0
-	namespaces := a.store.PodNamespaces()
+	namespaces := a.podNamespacesForScope()
 	if a.podNeedsMaterializedSort() {
 		total, filtered = a.buildSortedPods()
 	} else {
@@ -796,9 +922,9 @@ func (a *App) refreshResourceList(now time.Time) {
 	a.lastDataVersion = a.store.Version()
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
-	switch a.activeResource.Resource {
-	case "deployments":
-		a.namespaces = a.store.DeploymentNamespaces()
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		a.namespaces = a.deploymentNamespacesForScope()
 		total := 0
 		filtered := 0
 		if a.deploymentNeedsMaterializedSort() {
@@ -814,8 +940,8 @@ func (a *App) refreshResourceList(now time.Time) {
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.deploymentsView.Rows(a.deploymentWindow(start, end-start, time.Now()))
 		})
-	case "services":
-		a.namespaces = a.store.ServiceNamespaces()
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		a.namespaces = a.serviceNamespacesForScope()
 		total := 0
 		filtered := 0
 		if a.serviceNeedsMaterializedSort() {
@@ -831,7 +957,7 @@ func (a *App) refreshResourceList(now time.Time) {
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.servicesView.Rows(a.serviceWindow(start, end-start, time.Now()))
 		})
-	case "nodes":
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		a.namespaces = []string{""}
 		total := 0
 		filtered := 0
@@ -849,9 +975,7 @@ func (a *App) refreshResourceList(now time.Time) {
 			return a.nodesView.Rows(a.nodeWindow(start, end-start, time.Now()))
 		})
 	default:
-		a.visibleRows = 0
-		a.totalRows = 0
-		a.resourceTable.SetWindowProvider(0, nil)
+		a.refreshGenericResourceList(now)
 	}
 }
 
@@ -868,6 +992,8 @@ func (a *App) refreshCommands() {
 func (a *App) refreshActivePodDetails(now time.Time) {
 	storeVersion := a.store.Version()
 	if storeVersion == a.lastDataVersion {
+		a.activePod.Row = a.activePod.Row.WithAge(now)
+		a.lastTick = now
 		return
 	}
 	resourceVersion, ok := a.store.PodResourceVersionByKey(a.activePod.Row.Key)
@@ -875,6 +1001,7 @@ func (a *App) refreshActivePodDetails(now time.Time) {
 		a.activePod = state.PodDetails{}
 		a.lastDataVersion = storeVersion
 		a.lastManagerVersion = a.manager.Version()
+		a.lastTick = now
 		return
 	}
 	if resourceVersion != a.activePod.Row.ResourceVersion {
@@ -882,6 +1009,8 @@ func (a *App) refreshActivePodDetails(now time.Time) {
 		if ok {
 			a.activePod = updated
 		}
+	} else {
+		a.activePod.Row = a.activePod.Row.WithAge(now)
 	}
 	a.lastDataVersion = storeVersion
 	a.lastManagerVersion = a.manager.Version()
@@ -889,19 +1018,24 @@ func (a *App) refreshActivePodDetails(now time.Time) {
 }
 
 func (a *App) refreshActiveResourceDetails(now time.Time) {
-	if !a.isResourceListKindImplemented() {
+	if isBuiltInResourceList(a.activeResource) {
+		storeVersion := a.store.Version()
+		if storeVersion == a.lastDataVersion {
+			a.refreshCurrentDetailAge(now)
+			a.lastTick = now
+			return
+		}
+		if !a.refreshCurrentDetail(now) {
+			a.statusMessage = "resource vanished during refresh"
+		}
+		a.lastDataVersion = storeVersion
+		a.lastManagerVersion = a.manager.Version()
+		a.lastTick = now
 		return
 	}
-	storeVersion := a.store.Version()
-	if storeVersion == a.lastDataVersion {
-		return
+	if a.supportsGenericResourceList(a.activeResource) {
+		a.refreshGenericResourceDetails(now)
 	}
-	if !a.refreshCurrentDetail(now) {
-		a.statusMessage = "resource vanished during refresh"
-	}
-	a.lastDataVersion = storeVersion
-	a.lastManagerVersion = a.manager.Version()
-	a.lastTick = now
 }
 
 func (a *App) refreshCurrentDetail(now time.Time) bool {
@@ -932,9 +1066,20 @@ func (a *App) refreshCurrentDetail(now time.Time) bool {
 	}
 }
 
+func (a *App) refreshCurrentDetailAge(now time.Time) {
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		a.activeDeployment.Row = a.activeDeployment.Row.WithAge(now)
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		a.activeService.Row = a.activeService.Row.WithAge(now)
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		a.activeNode.Row = a.activeNode.Row.WithAge(now)
+	}
+}
+
 func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
-	switch a.activeResource.Resource {
-	case "deployments":
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		row, ok := a.deploymentRowAt(index, now)
 		if !ok {
 			return false
@@ -944,7 +1089,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 			return false
 		}
 		a.activeDeployment = details
-	case "services":
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		row, ok := a.serviceRowAt(index, now)
 		if !ok {
 			return false
@@ -954,7 +1099,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 			return false
 		}
 		a.activeService = details
-	case "nodes":
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		row, ok := a.nodeRowAt(index, now)
 		if !ok {
 			return false
@@ -965,11 +1110,12 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 		}
 		a.activeNode = details
 	default:
-		return false
+		return a.openCurrentGenericResourceSelection(index, now)
 	}
 	a.screen = screenResourceDetails
 	a.lastDataVersion = a.store.Version()
 	a.lastTick = now
+	a.resetTextViewport()
 	return true
 }
 
@@ -980,10 +1126,19 @@ func (a *App) setNavTable(title string, rows [][]string) {
 	a.navTable.SetSize(width, max(4, a.height-2))
 }
 
+func (a *App) bodyHeight(topRows int) int {
+	return max(4, a.height-topRows)
+}
+
+func (a *App) resizeTablesForBody(topRows int) {
+	bodyHeight := a.bodyHeight(topRows)
+	a.navTable.SetSize(max(24, a.width-4), bodyHeight)
+	a.podTable.SetSize(a.width, bodyHeight)
+	a.resourceTable.SetSize(a.width, bodyHeight)
+}
+
 func (a *App) resizeTables() {
-	a.navTable.SetSize(max(24, a.width-4), max(4, a.height-2))
-	a.podTable.SetSize(a.width, max(6, a.height-2))
-	a.resourceTable.SetSize(a.width, max(6, a.height-2))
+	a.resizeTablesForBody(2)
 }
 
 func (a *App) renderPodDetails() string {
@@ -1028,35 +1183,24 @@ func (a *App) renderResourceDetails() string {
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		return renderNodeDetails(a.activeNode)
 	default:
-		resource := a.activeResource
-		sections := []string{
-			fmt.Sprintf("Resource:    %s", resource.Display),
-			fmt.Sprintf("Kind:        %s", resource.Kind),
-			fmt.Sprintf("API group:   %s", defaultString(resource.APIGroup, "core")),
-			fmt.Sprintf("API version: %s", defaultString(resource.Version, "server-default")),
-			fmt.Sprintf("Plural:      %s", resource.Resource),
-			fmt.Sprintf("Scope:       %s", scopeLabel(resource.Namespaced)),
-			"",
-			"Informer-backed listing not implemented yet for this kind.",
-			"Pod, deployment, service, node browsing are implemented.",
-		}
-		if resource.Custom {
-			sections = append(sections, "", "Discovered from CRD API discovery.")
-		}
-		return strings.Join(sections, "\n")
+		return a.renderGenericResourceDetails()
 	}
 }
 
 func (a *App) resourceDetailFooter() string {
+	prefix := "j/k scroll  pgup/pgdn page  g/G edge  R resource-find  c ctx-find  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return "s scale  r restart  y edit  esc back"
+		return prefix + "n ns-find  s scale  r restart  e edit  esc back"
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		return "p port-forward  y edit  esc back"
+		return prefix + "n ns-find  p port-forward  e edit  esc back"
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return "y edit  esc back"
+		return prefix + "e edit  esc back"
 	default:
-		return "esc back"
+		if a.activeResource.Namespaced {
+			return prefix + "n ns-find  e edit  esc back"
+		}
+		return prefix + "e edit  esc back"
 	}
 }
 
@@ -1066,14 +1210,30 @@ func (a *App) shouldRefresh(now time.Time) bool {
 	}
 
 	switch a.screen {
-	case screenPods, screenResourceList:
+	case screenPods:
 		if a.store.Version() != a.lastDataVersion {
 			return true
 		}
 		return now.Sub(a.lastTick) >= time.Second
-	case screenPodDetails, screenResourceDetails:
-		return a.store.Version() != a.lastDataVersion
-	case screenCatalog, screenGroupResources, screenContexts, screenCommands:
+	case screenResourceList:
+		if isBuiltInResourceList(a.activeResource) {
+			if a.store.Version() != a.lastDataVersion {
+				return true
+			}
+			return now.Sub(a.lastTick) >= time.Second
+		}
+		if a.manager.Version() != a.lastManagerVersion {
+			return true
+		}
+		return now.Sub(a.lastTick) >= time.Second
+	case screenPodDetails:
+		return a.store.Version() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
+	case screenResourceDetails:
+		if isBuiltInResourceList(a.activeResource) {
+			return a.store.Version() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
+		}
+		return a.manager.Version() != a.lastManagerVersion || now.Sub(a.lastTick) >= time.Second
+	case screenCatalog, screenGroupResources, screenContexts, screenCommands, screenResourceFinder, screenScopePicker:
 		return now.Sub(a.lastTick) >= time.Second
 	default:
 		return false
@@ -1138,6 +1298,10 @@ func (a *App) currentQuery() string {
 		return a.resourceQuery2
 	case screenCommands:
 		return a.commandQuery
+	case screenResourceFinder:
+		return a.resourceFinderQuery
+	case screenScopePicker:
+		return a.scopeQuery
 	default:
 		return ""
 	}
@@ -1157,18 +1321,94 @@ func (a *App) setCurrentQuery(value string) {
 		a.resourceQuery2 = value
 	case screenCommands:
 		a.commandQuery = value
+	case screenResourceFinder:
+		a.resourceFinderQuery = value
+	case screenScopePicker:
+		a.scopeQuery = value
 	}
 }
 
+func (a *App) currentContextLabel() string {
+	if a.contextScope != "" {
+		return a.contextScope
+	}
+	connected := a.manager.ConnectedContextNames()
+	if len(connected) == 0 {
+		return "all"
+	}
+	return fmt.Sprintf("all(%d)", len(connected))
+}
+
 func (a *App) currentNamespaceLabel() string {
-	if !a.activeResource.Namespaced && (a.screen == screenResourceList || a.screen == screenResourceDetails) {
+	if (a.screen == screenResourceList || a.screen == screenResourceDetails) && !a.activeResource.Namespaced {
 		return "cluster"
 	}
 	return a.namespace
 }
 
+func (a *App) contextMatches(clusterName string) bool {
+	if a.contextScope == "" {
+		return true
+	}
+	return clusterName == a.contextScope
+}
+
+func collectNamespaces[T any](appendRows func(func(string) bool)) []string {
+	seen := make(map[string]struct{}, 16)
+	namespaces := make([]string, 0, 16)
+	appendRows(func(namespace string) bool {
+		if namespace == "" {
+			return true
+		}
+		if _, ok := seen[namespace]; ok {
+			return true
+		}
+		seen[namespace] = struct{}{}
+		namespaces = append(namespaces, namespace)
+		return true
+	})
+	sort.Strings(namespaces)
+	if len(namespaces) == 0 {
+		return []string{""}
+	}
+	return namespaces
+}
+
+func (a *App) podNamespacesForScope() []string {
+	return collectNamespaces[struct{}](func(appendNamespace func(string) bool) {
+		a.store.ForEachPod(func(row state.PodRow) bool {
+			if !a.contextMatches(row.Cluster) {
+				return true
+			}
+			return appendNamespace(row.Namespace)
+		})
+	})
+}
+
+func (a *App) deploymentNamespacesForScope() []string {
+	return collectNamespaces[struct{}](func(appendNamespace func(string) bool) {
+		a.store.ForEachDeployment(func(row state.DeploymentRow) bool {
+			if !a.contextMatches(row.Cluster) {
+				return true
+			}
+			return appendNamespace(row.Namespace)
+		})
+	})
+}
+
+func (a *App) serviceNamespacesForScope() []string {
+	return collectNamespaces[struct{}](func(appendNamespace func(string) bool) {
+		a.store.ForEachService(func(row state.ServiceRow) bool {
+			if !a.contextMatches(row.Cluster) {
+				return true
+			}
+			return appendNamespace(row.Namespace)
+		})
+	})
+}
+
 func (a *App) isResourceListKindImplemented() bool {
-	return isBuiltInResourceList(a.activeResource)
+	return isBuiltInResourceList(a.activeResource) || a.supportsGenericResourceList(a.activeResource)
 }
 
 func tickCmd() tea.Cmd {
@@ -1477,6 +1717,9 @@ func (a *App) listPageSize() int {
 }
 
 func (a *App) matchPodRow(row state.PodRow) bool {
+	if !a.contextMatches(row.Cluster) {
+		return false
+	}
 	if a.namespace != "" && row.Namespace != a.namespace {
 		return false
 	}
@@ -1522,6 +1765,9 @@ func (a *App) countDeployments() (int, int) {
 	total := 0
 	filtered := 0
 	a.store.ForEachDeployment(func(row state.DeploymentRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		total++
 		if a.namespace != "" && row.Namespace != a.namespace {
 			return true
@@ -1545,6 +1791,9 @@ func (a *App) deploymentWindow(start int, limit int, now time.Time) []state.Depl
 	rows := make([]state.DeploymentRow, 0, limit)
 	matched := 0
 	a.store.ForEachDeployment(func(row state.DeploymentRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		if a.namespace != "" && row.Namespace != a.namespace {
 			return true
 		}
@@ -1577,6 +1826,9 @@ func (a *App) countServices() (int, int) {
 	total := 0
 	filtered := 0
 	a.store.ForEachService(func(row state.ServiceRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		total++
 		if a.namespace != "" && row.Namespace != a.namespace {
 			return true
@@ -1600,6 +1852,9 @@ func (a *App) serviceWindow(start int, limit int, now time.Time) []state.Service
 	rows := make([]state.ServiceRow, 0, limit)
 	matched := 0
 	a.store.ForEachService(func(row state.ServiceRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		if a.namespace != "" && row.Namespace != a.namespace {
 			return true
 		}
@@ -1632,6 +1887,9 @@ func (a *App) countNodes() (int, int) {
 	total := 0
 	filtered := 0
 	a.store.ForEachNode(func(row state.NodeRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		total++
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
 			return true
@@ -1652,6 +1910,9 @@ func (a *App) nodeWindow(start int, limit int, now time.Time) []state.NodeRow {
 	rows := make([]state.NodeRow, 0, limit)
 	matched := 0
 	a.store.ForEachNode(func(row state.NodeRow) bool {
+		if !a.contextMatches(row.Cluster) {
+			return true
+		}
 		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
 			return true
 		}
