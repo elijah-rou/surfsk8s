@@ -22,6 +22,8 @@ const (
 	inputModeLocalPort
 	inputModeScopePicker
 	inputModeTableFilterValue
+	inputModeLogExactFilter
+	inputModeLogSavePath
 )
 
 type actionResultMsg struct {
@@ -47,6 +49,10 @@ func (a *App) statusInputState() (string, string, bool) {
 			return "namespace", a.filter.Value(), true
 		case inputModeTableFilterValue:
 			return "column-filter", a.filter.Value(), true
+		case inputModeLogExactFilter:
+			return "log-filter", a.filter.Value(), true
+		case inputModeLogSavePath:
+			return "save-path", a.filter.Value(), true
 		default:
 			return "filter", a.filter.Value(), true
 		}
@@ -63,7 +69,59 @@ func (a *App) statusInputState() (string, string, bool) {
 		}
 		return "namespace", a.scopeQuery, false
 	}
+	if a.screen == screenLogs {
+		return "log-filter", a.currentQuery(), false
+	}
 	return "filter", a.currentQuery(), false
+}
+
+func (a *App) updateLogSavePrompt(msg tea.Msg) tea.Cmd {
+	switch typed := msg.(type) {
+	case tea.KeyMsg:
+		switch typed.String() {
+		case "esc":
+			a.filter.Clear()
+			a.filter.Deactivate()
+			return nil
+		case "enter":
+			path := strings.TrimSpace(a.filter.Value())
+			a.filter.Deactivate()
+			if path == "" {
+				a.statusMessage = "save path required"
+				return nil
+			}
+			return a.saveLogsToPath(path)
+		}
+	}
+	return a.filter.Update(msg)
+}
+
+func (a *App) updateLogExactFilterPrompt(msg tea.Msg) tea.Cmd {
+	switch typed := msg.(type) {
+	case tea.KeyMsg:
+		switch typed.String() {
+		case "esc":
+			a.filter.Clear()
+			a.filter.Deactivate()
+			a.logFilterQuery = ""
+			return nil
+		case "enter":
+			value := strings.TrimSpace(a.filter.Value())
+			a.filter.Deactivate()
+			if value == "" {
+				a.logFilterQuery = ""
+				return nil
+			}
+			a.logFilterQuery = "=" + value
+			return nil
+		}
+	}
+	cmd := a.filter.Update(msg)
+	a.logFilterQuery = "=" + strings.TrimSpace(a.filter.Value())
+	if strings.TrimSpace(a.filter.Value()) == "" {
+		a.logFilterQuery = ""
+	}
+	return cmd
 }
 
 func (a *App) updateSearchPrompt(msg tea.Msg) tea.Cmd {

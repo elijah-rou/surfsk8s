@@ -14,7 +14,7 @@ Working, daily-usable build. Current scope includes:
 - fuzzy, wildcard, exact, and structured per-column filtering
 - stacked multi-column sorting
 - quick resource finder, namespace picker, context scope picker
-- resource details, manifest editing, exec, port-forward, scale, restart
+- resource details, manifest editing, exec, pod/deployment/node logs, port-forward, scale, restart
 - pod/node resource usage in details and tables
 - live smoke coverage against real clusters plus fixture-based smoke tooling
 
@@ -148,6 +148,7 @@ Common list keys:
 
 Pod details:
 - `x` exec shell
+- `l` logs
 - `p` port-forward
 - `e` edit manifest
 
@@ -156,15 +157,20 @@ Service details:
 - `e` edit manifest
 
 Deployment details:
+- `l` logs
 - `s` scale
 - `r` restart
+- `e` edit manifest
+
+Node details:
+- `l` logs
 - `e` edit manifest
 
 Resource list row actions:
 - deployments: `S` scale selected row, `R` restart selected row
 - services: `P` port-forward selected row
 
-Mutating actions use confirmation screens. Multi-container exec and multi-port port-forward use explicit picker flows.
+Mutating actions use confirmation screens. Multi-container exec/log workflows, multi-port port-forward, and node log file selection use explicit picker flows.
 
 ## Resource Coverage
 

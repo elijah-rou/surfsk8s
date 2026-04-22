@@ -51,12 +51,12 @@ if {$mode == "live"} {
         -re "surfsk8s . add sort" {}
         timeout { exit 21 }
     }
-    send -- "jj\r"
+    send -- "\r"
     expect {
         -re "surfsk8s . sort direction" {}
         timeout { exit 22 }
     }
-    send -- "j\r"
+    send -- "d"
     expect {
         -re "sort:.*↓" {}
         timeout { exit 52 }
@@ -71,6 +71,44 @@ if {$mode == "live"} {
         -re "surfsk8s . ns:.* . pods" {}
         timeout { exit 54 }
     }
+    send -- "/"
+    after 300
+    send -- "=kube-system coredns-"
+    after 300
+    send -- "\r"
+    expect {
+        -re "filter:=kube-system coredns-|surfsk8s . pods" {}
+        timeout { exit 55 }
+    }
+    send -- "\r"
+    expect {
+        -re "surfsk8s . pod details" {}
+        timeout { exit 56 }
+    }
+    send -- "l"
+    expect {
+        -re "surfsk8s . pod logs" {}
+        timeout { exit 57 }
+    }
+    expect {
+        -re {202[0-9]-[0-9][0-9]-[0-9][0-9]T} {}
+        timeout { exit 58 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . pod details" {}
+        timeout { exit 59 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . ns:.* . pods" {}
+        timeout { exit 60 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . ns:.* . pods" {}
+        timeout { exit 61 }
+    }
     send -- "\033"
     expect {
         -re "surfsk8s . Favourites" {}
@@ -82,13 +120,55 @@ if {$mode == "live"} {
         -re "surfsk8s . ns:.* . deployments" {}
         timeout { exit 7 }
     }
+    send -- "/"
+    after 300
+    send -- "=kube-system coredns"
+    after 300
+    send -- "\r"
+    expect {
+        -re "filter:=kube-system coredns|surfsk8s . deployments" {}
+        timeout { exit 62 }
+    }
+    send -- "\r"
+    expect {
+        -re "surfsk8s . resource details" {}
+        timeout { exit 63 }
+    }
+    send -- "l"
+    expect {
+        -re "surfsk8s . deployment logs" {}
+        timeout { exit 64 }
+    }
+    expect {
+        -re {202[0-9]-[0-9][0-9]-[0-9][0-9]T|\[coredns-} {}
+        timeout { exit 65 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . resource details" {}
+        timeout { exit 66 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . ns:.* . deployments" {}
+        timeout { exit 67 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . ns:.* . deployments" {}
+        timeout { exit 68 }
+    }
     send -- "\033"
     expect {
         -re "surfsk8s . Favourites" {}
         timeout { exit 8 }
     }
 
-    send -- "j\r"
+    send -- "j"
+    after 150
+    send -- "j"
+    after 150
+    send -- "\r"
     expect {
         -re "surfsk8s . ns:.* . services" {}
         timeout { exit 9 }
@@ -99,10 +179,50 @@ if {$mode == "live"} {
         timeout { exit 10 }
     }
 
-    send -- "j\r"
+    send -- "j"
+    after 150
+    send -- "j"
+    after 150
+    send -- "j"
+    after 150
+    send -- "\r"
     expect {
         -re "surfsk8s . ns:.* . nodes" {}
         timeout { exit 11 }
+    }
+    send -- "\r"
+    expect {
+        -re "surfsk8s . resource details" {}
+        timeout { exit 69 }
+    }
+    send -- "l"
+    expect {
+        -re "surfsk8s . select node log" {}
+        timeout { exit 70 }
+    }
+    send -- "\r"
+    expect {
+        -re "surfsk8s . select node log" {}
+        timeout { exit 71 }
+    }
+    send -- "\r"
+    expect {
+        -re "surfsk8s . node logs" {}
+        timeout { exit 72 }
+    }
+    expect {
+        -re {log|time=|INFO|WARN|ERROR|202[0-9]-} {}
+        timeout { exit 75 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . resource details" {}
+        timeout { exit 73 }
+    }
+    send -- "\033"
+    expect {
+        -re "surfsk8s . ns:.* . nodes" {}
+        timeout { exit 74 }
     }
     send -- "\033"
     expect {

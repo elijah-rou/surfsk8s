@@ -157,6 +157,10 @@ if [[ "$mode" == "live" ]]; then
   grep -q "surfsk8s · ns:all · services · serving.knative.dev" "$sanitized_output"
   grep -q "LATESTCREATED" "$sanitized_output"
   grep -q "surfsk8s · commands" "$sanitized_output"
+  grep -q "surfsk8s · pod logs" "$sanitized_output"
+  grep -q "surfsk8s · deployment logs" "$sanitized_output"
+  grep -q "surfsk8s · select node log" "$sanitized_output"
+  grep -q "surfsk8s · node logs" "$sanitized_output"
   if [[ "$apply_fixture" == "true" ]]; then
     grep -q "surfsk8s · select container" "$sanitized_output"
     grep -q "surfsk8s · select service port" "$sanitized_output"

@@ -17,19 +17,31 @@ const (
 	pendingActionExecPod
 	pendingActionPortForwardPod
 	pendingActionPortForwardService
+	pendingActionPodLogsSources
+	pendingActionDeploymentLogsSources
+	pendingActionNodeLogsPath
+	pendingActionLogRange
 )
 
 type actionOption struct {
 	Label     string
 	Container string
 	Port      int
+	Path      string
+	Directory bool
+	Selected  bool
+	LogRange  logRange
 }
 
 func (a *App) openActionPicker(title string, footer string, action pendingAction, options []actionOption) tea.Cmd {
 	if len(options) == 0 {
 		panic("app.openActionPicker: empty options")
 	}
-	a.actionReturnScreen = a.screen
+	returnScreen := a.screen
+	if a.screen == screenActionPicker {
+		returnScreen = a.actionReturnScreen
+	}
+	a.actionReturnScreen = returnScreen
 	a.pendingAction = action
 	a.actionPickerTitle = title
 	a.actionPickerFooter = footer
@@ -39,14 +51,32 @@ func (a *App) openActionPicker(title string, footer string, action pendingAction
 	return nil
 }
 
+func (a *App) actionPickerIsToggleMode() bool {
+	switch a.pendingAction {
+	case pendingActionPodLogsSources, pendingActionDeploymentLogsSources:
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *App) refreshActionPicker() {
 	rows := make([][]string, 0, len(a.actionPickerOptions))
 	for _, option := range a.actionPickerOptions {
-		rows = append(rows, []string{option.Label})
+		label := option.Label
+		if a.actionPickerIsToggleMode() {
+			state := "[ ] "
+			if option.Selected {
+				state = "[x] "
+			}
+			label = state + label
+		}
+		rows = append(rows, []string{label})
 	}
 	a.visibleRows = len(rows)
 	a.totalRows = len(rows)
 	a.setNavTable(strings.ToUpper(a.actionPickerTitle), rows)
+	a.navTable.MoveTop()
 }
 
 func (a *App) updateActionPickerKeys(msg tea.KeyMsg) tea.Cmd {
@@ -59,9 +89,21 @@ func (a *App) updateActionPickerKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveTop()
 	case "G", "end":
 		a.navTable.MoveBottom()
+	case " ":
+		if a.actionPickerIsToggleMode() {
+			index := a.navTable.SelectedIndex()
+			if index >= 0 && index < len(a.actionPickerOptions) {
+				a.actionPickerOptions[index].Selected = !a.actionPickerOptions[index].Selected
+				a.refreshActionPicker()
+				a.navTable.MoveDown(index)
+			}
+		}
 	case "esc", "backspace":
 		a.cancelActionFlow()
 	case "enter":
+		if a.actionPickerIsToggleMode() {
+			return a.applyToggleActionPicker()
+		}
 		index := a.navTable.SelectedIndex()
 		if index < 0 || index >= len(a.actionPickerOptions) {
 			a.statusMessage = "selection disappeared"
@@ -72,12 +114,62 @@ func (a *App) updateActionPickerKeys(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (a *App) applyToggleActionPicker() tea.Cmd {
+	switch a.pendingAction {
+	case pendingActionPodLogsSources:
+		selected := make(map[string]bool, len(a.actionPickerOptions))
+		for _, option := range a.actionPickerOptions {
+			if option.Selected {
+				selected[option.Container] = true
+			}
+		}
+		if len(selected) == 0 {
+			a.statusMessage = "select at least one container"
+			return nil
+		}
+		a.logSelectedContainers = selected
+		a.screen = a.actionReturnScreen
+		a.resetActionFlowState()
+		return a.startPodLogs()
+	case pendingActionDeploymentLogsSources:
+		selected := make(map[string]bool, len(a.actionPickerOptions))
+		for _, option := range a.actionPickerOptions {
+			if option.Selected {
+				selected[option.Container] = true
+			}
+		}
+		if len(selected) == 0 {
+			a.statusMessage = "select at least one container"
+			return nil
+		}
+		a.logSelectedContainers = selected
+		a.screen = a.actionReturnScreen
+		a.resetActionFlowState()
+		return a.startDeploymentLogs()
+	default:
+		a.statusMessage = "unsupported toggle action"
+		return nil
+	}
+}
+
 func (a *App) handleActionOption(option actionOption) tea.Cmd {
 	switch a.pendingAction {
 	case pendingActionExecPod:
 		return a.runExecPodWithContainer(option.Container)
 	case pendingActionPortForwardPod, pendingActionPortForwardService:
 		return a.openLocalPortPrompt(a.pendingAction, option.Port)
+	case pendingActionNodeLogsPath:
+		a.screen = a.actionReturnScreen
+		a.resetActionFlowState()
+		if option.Directory {
+			return a.openNodeLogPicker(option.Path)
+		}
+		return a.startNodeLogs(option.Path)
+	case pendingActionLogRange:
+		a.screen = a.actionReturnScreen
+		a.resetActionFlowState()
+		a.logRange = option.LogRange
+		return a.openLogsScreen(a.logTitle, true)
 	default:
 		a.statusMessage = "unsupported action selection"
 		a.cancelActionFlow()

@@ -1,4 +1,2 @@
+// Package views defines typed table/view helpers for surfsk8s screens.
 package views
-
-// LogsView streams container logs with follow, timestamps, and search.
-type LogsView struct{}

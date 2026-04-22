@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 
@@ -40,6 +41,7 @@ type ClusterConn struct {
 	Name      string
 	Clientset kubernetes.Interface
 	Dynamic   dynamic.Interface
+	REST      rest.Interface
 	Watcher   *informer.Watcher
 	Cancel    context.CancelFunc
 	Context   context.Context
@@ -193,6 +195,7 @@ func (m *Manager) ConnectContext(ctx context.Context, contextName string) (*Clus
 		Name:           contextName,
 		Clientset:      clientset,
 		Dynamic:        dynamicClient,
+		REST:           clientset.CoreV1().RESTClient(),
 		Watcher:        watcher,
 		Cancel:         cancel,
 		Context:        connCtx,

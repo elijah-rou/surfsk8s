@@ -1,6 +1,7 @@
 package app
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"testing"
@@ -855,5 +856,274 @@ func TestNodeUsageSnapshotRefreshRendersTableGauge(t *testing.T) {
 	_, body, _ := app.currentView()
 	if !strings.Contains(stripUsageANSI(body), "1200m/4") {
 		t.Fatalf("expected usage gauge in body, got:\n%s", stripUsageANSI(body))
+	}
+}
+
+func TestRunOpenPodLogsOpensContainerPickerForMultiContainerPod(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPodDetails
+	app.activePod = state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "toolbox"},
+		Pod: &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}, {Name: "sidecar"}}}},
+	}
+
+	cmd := app.runOpenLogs()
+	if cmd != nil {
+		t.Fatalf("expected picker, not log load command")
+	}
+	if got, want := app.screen, screenActionPicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.pendingAction, pendingActionPodLogsSources; got != want {
+		t.Fatalf("pendingAction = %d, want %d", got, want)
+	}
+}
+
+func TestRunOpenPodLogsStartsLoadingScreenForSingleContainerPod(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPodDetails
+	app.activePod = state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "toolbox"},
+		Pod: &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
+	}
+
+	cmd := app.runOpenLogs()
+	if cmd == nil {
+		t.Fatalf("expected async log load command")
+	}
+	if got, want := app.screen, screenLogs; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if !app.logLoading {
+		t.Fatalf("expected log loading state")
+	}
+	if !strings.Contains(app.logTitle, "pod logs") {
+		t.Fatalf("logTitle = %q", app.logTitle)
+	}
+}
+
+func TestRunOpenDeploymentLogsPromptsForContainerWhenMultiContainer(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	app.activeDeployment = state.DeploymentDetails{
+		Row:        state.DeploymentRow{Cluster: "dev", Namespace: "default", Name: "frontend"},
+		Deployment: &appsv1.Deployment{Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "api"}, {Name: "metrics"}}}}}},
+	}
+
+	cmd := app.runOpenLogs()
+	if cmd != nil {
+		t.Fatalf("expected picker, not log load command")
+	}
+	if got, want := app.screen, screenActionPicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.pendingAction, pendingActionDeploymentLogsSources; got != want {
+		t.Fatalf("pendingAction = %d, want %d", got, want)
+	}
+}
+
+func TestLogsResultMsgReplacesLoadingPlaceholder(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPodDetails
+	app.activePod = state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "toolbox"},
+		Pod: &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
+	}
+	cmd := app.runOpenLogs()
+	if cmd == nil {
+		t.Fatalf("expected async log load command")
+	}
+	token := app.logRequestToken
+
+	app.Update(logsResultMsg{Token: token, Replace: true, Entries: []logEntry{{UniqueKey: "k1", Message: "line1"}, {UniqueKey: "k2", Message: "line2"}}})
+	if app.logLoading {
+		t.Fatalf("expected loading cleared")
+	}
+	if got, want := len(app.logEntries), 2; got != want {
+		t.Fatalf("entry count = %d, want %d", got, want)
+	}
+}
+
+func TestNodeLogPickerResultOpensActionPicker(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	app.activeNode = state.NodeDetails{
+		Row:  state.NodeRow{Key: state.NodeKey{Cluster: "dev", Name: "node-a"}, Cluster: "dev", Name: "node-a"},
+		Node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+	}
+	app.nodeLogPickerToken = 9
+
+	app.Update(nodeLogPickerResultMsg{Token: 9, Key: app.activeNode.Row.Key, Title: "select node log", Entries: []cluster.NodeLogEntry{{Path: "cloud-init.log", Name: "cloud-init.log"}}})
+	if got, want := app.screen, screenActionPicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := len(app.actionPickerOptions), 1; got != want {
+		t.Fatalf("options = %d, want %d", got, want)
+	}
+}
+
+func TestActionPickerRefreshMovesSelectionToTop(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPodDetails
+	app.openActionPicker("select container", "", pendingActionExecPod, []actionOption{{Label: "b"}, {Label: "a"}})
+	app.navTable.MoveDown(1)
+	app.refreshActionPicker()
+	if got, want := app.navTable.SelectedIndex(), 0; got != want {
+		t.Fatalf("selected index = %d, want %d", got, want)
+	}
+}
+
+func TestRenderLogsIncludesSourceLabelAndHonorsTimestampToggle(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 120
+	app.logShowTimestamps = true
+	app.logEntries = []logEntry{{UniqueKey: "1", TimestampText: "2026-04-22T12:00:00Z", HasTimestamp: true, SourceKey: "pod-a/api", SourceLabel: "pod-a/api", Message: "started"}}
+
+	rendered := stripUsageANSI(app.renderLogs())
+	if !strings.Contains(rendered, "2026-04-22T12:00:00Z") || !strings.Contains(rendered, "[pod-a/api]") {
+		t.Fatalf("rendered = %q", rendered)
+	}
+
+	app.logShowTimestamps = false
+	rendered = stripUsageANSI(app.renderLogs())
+	if strings.Contains(rendered, "2026-04-22T12:00:00Z") {
+		t.Fatalf("timestamp still present: %q", rendered)
+	}
+	if !strings.Contains(rendered, "[pod-a/api]") {
+		t.Fatalf("source label missing: %q", rendered)
+	}
+}
+
+func TestRenderLogBodyPrettyPrintsJSONWhenWrapEnabled(t *testing.T) {
+	rendered := stripUsageANSI(renderLogBody(`{"level":"info","msg":"hello","count":2}`, true, 40))
+	for _, fragment := range []string{"\n", `"count"`, `"msg"`, `"hello"`} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in %q", fragment, rendered)
+		}
+	}
+}
+
+func TestFilteredLogEntriesSupportFuzzyAndExact(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.logEntries = []logEntry{{UniqueKey: "1", Message: "frontend started"}, {UniqueKey: "2", Message: "backend started"}}
+
+	app.logFilterQuery = "front"
+	if got, want := len(app.filteredLogEntries()), 1; got != want {
+		t.Fatalf("fuzzy match count = %d, want %d", got, want)
+	}
+
+	app.logFilterQuery = "=backend"
+	if got, want := len(app.filteredLogEntries()), 1; got != want {
+		t.Fatalf("exact match count = %d, want %d", got, want)
+	}
+}
+
+func TestOpenLogExactFilterStoresExactQuery(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenLogs
+	app.openLogExactFilter()
+	app.filter.SetValue("error")
+	app.updateFilter(tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := app.logFilterQuery, "=error"; got != want {
+		t.Fatalf("logFilterQuery = %q, want %q", got, want)
+	}
+}
+
+func TestLogPauseToggleStopsAutoRefreshCmd(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenLogs
+	app.logTarget = logTargetPod
+	app.logRange = logRangeLive
+	app.logFetchedAt = time.Now().Add(-2 * time.Second)
+	if cmd := app.maybeRefreshLogsCmd(time.Now()); cmd == nil {
+		t.Fatalf("expected live refresh cmd")
+	}
+	app.logAutoRefreshPaused = true
+	if cmd := app.maybeRefreshLogsCmd(time.Now()); cmd != nil {
+		t.Fatalf("expected paused live refresh to stop")
+	}
+}
+
+func TestYankLogsCopiesRenderedLogs(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 120
+	app.logEntries = []logEntry{{UniqueKey: "1", Message: "hello world"}}
+	captured := ""
+	previousClipboard := writeClipboard
+	writeClipboard = func(value string) error {
+		captured = value
+		return nil
+	}
+	defer func() { writeClipboard = previousClipboard }()
+
+	app.yankLogs()
+	if got, want := captured, "hello world"; got != want {
+		t.Fatalf("clipboard = %q, want %q", got, want)
+	}
+}
+
+func TestSaveLogsToPathWritesRenderedLogs(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 120
+	app.logEntries = []logEntry{{UniqueKey: "1", Message: "saved line"}}
+	path := t.TempDir() + "/logs.txt"
+	if cmd := app.saveLogsToPath(path); cmd != nil {
+		t.Fatalf("expected nil cmd")
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	if got, want := string(content), "saved line\n"; got != want {
+		t.Fatalf("content = %q, want %q", got, want)
+	}
+}
+
+func TestLogKeysUseSpaceForPauseAndDoNotUseRForRefresh(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenLogs
+	app.logTarget = logTargetPod
+	app.logRange = logRangeLive
+	app.logAutoRefreshPaused = false
+
+	cmd := app.updateLogKeys(tea.KeyMsg{Type: tea.KeySpace})
+	if cmd != nil {
+		t.Fatalf("expected nil cmd toggling pause")
+	}
+	if !app.logAutoRefreshPaused {
+		t.Fatalf("expected paused")
+	}
+
+	cmd = app.updateLogKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	if cmd != nil {
+		t.Fatalf("expected r to be noop on logs screen")
+	}
+}
+
+func TestLogFooterShowsNewKeyHints(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenLogs
+	app.logTarget = logTargetPod
+	footer := app.logFooter()
+	for _, fragment := range []string{"u refresh", "space pause", "y yank", "s save"} {
+		if !strings.Contains(footer, fragment) {
+			t.Fatalf("missing %q in footer %q", fragment, footer)
+		}
 	}
 }

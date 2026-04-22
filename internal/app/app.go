@@ -72,6 +72,7 @@ const (
 	screenResourceList
 	screenPodDetails
 	screenResourceDetails
+	screenLogs
 	screenCommands
 	screenResourceFinder
 	screenScopePicker
@@ -112,7 +113,7 @@ type commandItem struct {
 // App is the top-level Bubbletea model.
 // Orchestrates cluster connections, state, and UI views.
 type App struct {
-	store    *state.Store
+	store            *state.Store
 	manager          *cluster.Manager
 	clusterStatusBuf []components.ClusterStatus
 	executor         *actions.Executor
@@ -151,6 +152,28 @@ type App struct {
 	confirmDescription  string
 	confirmRun          func() tea.Cmd
 
+	logsReturnScreen      screen
+	logTitle              string
+	logLoading            bool
+	logFetchedAt          time.Time
+	logRequestToken       uint64
+	nodeLogPickerToken    uint64
+	nextAsyncToken        uint64
+	logTarget             logTarget
+	logRange              logRange
+	logShowTimestamps     bool
+	logWrap               bool
+	logAutoRefreshPaused  bool
+	logFilterQuery        string
+	logCursor             time.Time
+	logEntries            []logEntry
+	logEntrySeen          map[string]struct{}
+	logSelectedContainers map[string]bool
+	logPod                state.PodDetails
+	logDeployment         state.DeploymentDetails
+	logNode               state.NodeDetails
+	logNodePath           string
+
 	contexts            []cluster.ContextInfo
 	visibleContexts     []cluster.ContextInfo
 	selectedContext     map[string]bool
@@ -173,45 +196,45 @@ type App struct {
 	resourceQuery    string
 	activeResource   cluster.ResourceKind
 
-	namespace              string
-	namespaces             []string
-	podNamespacesCacheKey         string
-	deploymentNamespacesCacheKey  string
-	serviceNamespacesCacheKey     string
-	podQuery               string
-	resourceQuery2         string
-	activePod              state.PodDetails
-	activeDeployment       state.DeploymentDetails
-	activeService          state.ServiceDetails
-	activeNode             state.NodeDetails
-	activeGenericDetails   cluster.GenericResourceDetails
-	activePodUsage         cluster.PodResourceUsage
-	activeNodeUsage        cluster.NodeResourceUsage
-	podUsageByKey          map[string]cluster.PodResourceUsage
-	nodeUsageByKey         map[string]cluster.NodeResourceUsage
-	podUsageCellByKey      map[string]podUsageTableCells
-	nodeUsageCellByKey     map[string]nodeUsageTableCells
-	podTableRowBuf         [][]string
-	deploymentTableRowBuf  [][]string
-	serviceTableRowBuf     [][]string
-	nodeTableRowBuf        [][]string
-	podUsageFetchedAt      time.Time
-	nodeUsageFetchedAt     time.Time
-	podUsageListFetchedAt  time.Time
-	nodeUsageListFetchedAt time.Time
-	podUsageListScopeKey   string
-	nodeUsageListScopeKey  string
-	podUsageListVersion    uint64
-	nodeUsageListVersion   uint64
-	podUsageLoading        bool
-	nodeUsageLoading       bool
-	podUsageListLoading    bool
-	nodeUsageListLoading   bool
-	lastDataVersion        uint64
-	lastManagerVersion     uint64
-	lastTick               time.Time
-	visibleRows            int
-	totalRows              int
+	namespace                    string
+	namespaces                   []string
+	podNamespacesCacheKey        string
+	deploymentNamespacesCacheKey string
+	serviceNamespacesCacheKey    string
+	podQuery                     string
+	resourceQuery2               string
+	activePod                    state.PodDetails
+	activeDeployment             state.DeploymentDetails
+	activeService                state.ServiceDetails
+	activeNode                   state.NodeDetails
+	activeGenericDetails         cluster.GenericResourceDetails
+	activePodUsage               cluster.PodResourceUsage
+	activeNodeUsage              cluster.NodeResourceUsage
+	podUsageByKey                map[string]cluster.PodResourceUsage
+	nodeUsageByKey               map[string]cluster.NodeResourceUsage
+	podUsageCellByKey            map[string]podUsageTableCells
+	nodeUsageCellByKey           map[string]nodeUsageTableCells
+	podTableRowBuf               [][]string
+	deploymentTableRowBuf        [][]string
+	serviceTableRowBuf           [][]string
+	nodeTableRowBuf              [][]string
+	podUsageFetchedAt            time.Time
+	nodeUsageFetchedAt           time.Time
+	podUsageListFetchedAt        time.Time
+	nodeUsageListFetchedAt       time.Time
+	podUsageListScopeKey         string
+	nodeUsageListScopeKey        string
+	podUsageListVersion          uint64
+	nodeUsageListVersion         uint64
+	podUsageLoading              bool
+	nodeUsageLoading             bool
+	podUsageListLoading          bool
+	nodeUsageListLoading         bool
+	lastDataVersion              uint64
+	lastManagerVersion           uint64
+	lastTick                     time.Time
+	visibleRows                  int
+	totalRows                    int
 
 	genericRows                   []cluster.GenericResourceRow
 	sortedGenericRows             []cluster.GenericResourceRow
@@ -321,6 +344,8 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 		favoriteResourceIDs: favoriteResourceIDs,
 		favoriteResources:   favoriteResources,
 		namespaces:          []string{""},
+		logRange:            logRangeLive,
+		logShowTimestamps:   true,
 	}
 	app.commands = []commandItem{
 		{Name: "add-context", Description: "Open context picker, connect more kubeconfig contexts", Run: func(a *App) { a.openContextPicker(pickerModeAdd) }},
@@ -435,7 +460,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.shouldRefresh(now) {
 			a.refreshCurrentScreen(now)
 		}
-		return a, tea.Batch(tickCmd(), a.maybeRefreshCatalogOverviewCmd(now), a.maybeRefreshResourceUsageCmd(now))
+		return a, tea.Batch(tickCmd(), a.maybeRefreshCatalogOverviewCmd(now), a.maybeRefreshResourceUsageCmd(now), a.maybeRefreshLogsCmd(now))
 
 	case connectResultMsg:
 		a.connecting = false
@@ -463,6 +488,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.activity = ""
 		a.refreshCurrentScreen(time.Now())
 		return a, nil
+
+	case logsResultMsg:
+		return a, a.handleLogsResult(typed)
+
+	case nodeLogPickerResultMsg:
+		return a, a.handleNodeLogPickerResult(typed)
 
 	case podUsageResultMsg:
 		a.podUsageLoading = false
@@ -647,6 +678,8 @@ func (a *App) updateFilter(msg tea.Msg) tea.Cmd {
 		return a.updateScopePickerPrompt(msg)
 	case inputModeTableFilterValue:
 		return a.updateTableFilterValuePrompt(msg)
+	case inputModeLogExactFilter:
+		return a.updateLogExactFilterPrompt(msg)
 	default:
 		return a.updateSearchPrompt(msg)
 	}
@@ -659,7 +692,7 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 	case "ctrl+c", "q":
 		return tea.Quit
 	case ":":
-		if a.screen != screenContexts && a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction {
+		if a.screen != screenContexts && a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenLogs {
 			a.openCommands()
 		}
 		return nil
@@ -672,7 +705,7 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		if a.screen == screenResourceList && a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps" {
 			break
 		}
-		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager && a.screen != screenTableSortColumnPicker && a.screen != screenTableSortDirectionPicker && a.screen != screenTableSortManager {
+		if a.screen != screenContexts && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenLogs && a.screen != screenTableFilterColumnPicker && a.screen != screenTableFilterManager && a.screen != screenTableSortColumnPicker && a.screen != screenTableSortDirectionPicker && a.screen != screenTableSortManager {
 			return a.openResourceFinder()
 		}
 		return nil
@@ -693,6 +726,8 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 		return a.updatePodDetailKeys(msg)
 	case screenResourceDetails:
 		return a.updateResourceDetailKeys(msg)
+	case screenLogs:
+		return a.updateLogKeys(msg)
 	case screenCommands:
 		return a.updateCommandKeys(msg)
 	case screenResourceFinder:
@@ -1044,6 +1079,8 @@ func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.runEditPod()
 	case "p":
 		return a.runPortForwardPod()
+	case "l":
+		return a.runOpenLogs()
 	case "r":
 		return a.openResourceFinder()
 	case "n":
@@ -1073,6 +1110,8 @@ func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.runEditResource()
 	case "s":
 		return a.openScalePrompt()
+	case "l":
+		return a.runOpenLogs()
 	case "R":
 		return a.openResourceFinder()
 	case "r":
@@ -1134,9 +1173,11 @@ func (a *App) currentView() (string, string, string) {
 	case screenResourceList:
 		return "", a.resourceTable.View(), a.resourceListFooter()
 	case screenPodDetails:
-		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  g/G edge  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  esc back"
+		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  g/G edge  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  l logs  esc back"
 	case screenResourceDetails:
 		return "surfsk8s · resource details", a.renderResourceDetails(), a.resourceDetailFooter()
+	case screenLogs:
+		return "surfsk8s · " + a.logTitle, a.renderLogs(), a.logFooter()
 	case screenCommands:
 		return "surfsk8s · commands", a.navTable.View(), "type to filter  j/k move  g/G edge  enter run  esc clear/close"
 	case screenResourceFinder:
@@ -1172,6 +1213,15 @@ func (a *App) currentView() (string, string, string) {
 func (a *App) openFilter() {
 	prompt := "/"
 	placeholder := "filter (* ? =exact)"
+	if a.screen == screenLogs {
+		a.inputMode = inputModeSearch
+		a.logFilterQuery = ""
+		a.filter.SetPrompt("/")
+		a.filter.SetPlaceholder("fuzzy log filter")
+		a.filter.SetValue("")
+		a.filter.Activate()
+		return
+	}
 	if a.screen == screenCommands {
 		prompt = ":"
 		placeholder = "command"
@@ -1261,6 +1311,8 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 	case screenActionPicker:
 		a.refreshActionPicker()
 	case screenConfirmAction:
+		return
+	case screenLogs:
 		return
 	case screenTableFilterColumnPicker:
 		a.refreshTableFilterColumnPicker()
@@ -1685,11 +1737,11 @@ func (a *App) resourceDetailFooter() string {
 	prefix := "j/k scroll  pgup/pgdn page  g/G edge  R resource-find  c ctx-find  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return prefix + "n ns-find  s scale  r restart  e edit  esc back"
+		return prefix + "n ns-find  s scale  r restart  e edit  l logs  esc back"
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		return prefix + "n ns-find  p port-forward  e edit  esc back"
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return prefix + "e edit  esc back"
+		return prefix + "e edit  l logs  esc back"
 	default:
 		if a.activeResource.Namespaced {
 			return prefix + "n ns-find  e edit  esc back"
@@ -1892,6 +1944,8 @@ func (a *App) currentQuery() string {
 		return a.tableFilterColumnQuery
 	case screenTableSortColumnPicker:
 		return a.tableSortColumnQuery
+	case screenLogs:
+		return a.logFilterQuery
 	default:
 		return ""
 	}
@@ -1919,6 +1973,8 @@ func (a *App) setCurrentQuery(value string) {
 		a.tableFilterColumnQuery = value
 	case screenTableSortColumnPicker:
 		a.tableSortColumnQuery = value
+	case screenLogs:
+		a.logFilterQuery = value
 	}
 }
 

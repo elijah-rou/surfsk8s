@@ -8,7 +8,7 @@ import (
 
 func (a *App) usesTextViewport() bool {
 	switch a.screen {
-	case screenPodDetails, screenResourceDetails, screenConfirmAction:
+	case screenPodDetails, screenResourceDetails, screenConfirmAction, screenLogs:
 		return true
 	default:
 		return false
