@@ -231,7 +231,8 @@ func BenchmarkHandlePodUsageSnapshot5000LazyCache(b *testing.B) {
 		usages[row.Key.String()] = cluster.PodResourceUsage{Key: row.Key, CPUUsedMilli: 100, CPULimitMilli: 500, HasCPUUsage: true, MemoryUsedBytes: 256 * 1024 * 1024, MemoryLimitBytes: 512 * 1024 * 1024, HasMemoryUsage: true}
 		return true
 	})
-	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), storeVersion: store.Version(), usages: usages}
+	app.podUsageListGeneration = 1
+	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), generation: app.podUsageListGeneration, usages: usages}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

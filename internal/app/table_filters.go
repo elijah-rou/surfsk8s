@@ -82,7 +82,7 @@ func (a *App) currentTableFilterKey() string {
 func (a *App) currentTableColumns() []components.Column {
 	switch a.tableFilterBaseScreen() {
 	case screenPods:
-		return a.podsView.Columns()
+		return a.currentPodColumns()
 	case screenResourceList:
 		return a.currentResourceColumns()
 	default:
@@ -423,7 +423,7 @@ func (a *App) matchesPodColumnFilters(row state.PodRow, now time.Time) bool {
 	if !hasAnyEnabledColumnFilters(a.podColumnFilters) {
 		return true
 	}
-	columns := a.podsView.Columns()
+	columns := a.currentPodColumns()
 	if columnFilterTouchesAge(columns, a.podColumnFilters) {
 		return matchesColumnFilters(a.podCells(row.WithAge(now)), a.podColumnFilters)
 	}
@@ -435,7 +435,7 @@ func (a *App) matchesDeploymentColumnFilters(row state.DeploymentRow, now time.T
 	if !hasAnyEnabledColumnFilters(filters) {
 		return true
 	}
-	columns := a.deploymentsView.Columns()
+	columns := a.currentResourceColumns()
 	if columnFilterTouchesAge(columns, filters) {
 		return matchesColumnFilters(deploymentCells(row.WithAge(now)), filters)
 	}
@@ -447,7 +447,7 @@ func (a *App) matchesServiceColumnFilters(row state.ServiceRow, now time.Time) b
 	if !hasAnyEnabledColumnFilters(filters) {
 		return true
 	}
-	columns := a.servicesView.Columns()
+	columns := a.currentResourceColumns()
 	if columnFilterTouchesAge(columns, filters) {
 		return matchesColumnFilters(serviceCells(row.WithAge(now)), filters)
 	}
@@ -459,7 +459,7 @@ func (a *App) matchesNodeColumnFilters(row state.NodeRow, now time.Time) bool {
 	if !hasAnyEnabledColumnFilters(filters) {
 		return true
 	}
-	columns := a.nodesView.Columns()
+	columns := a.currentResourceColumns()
 	if columnFilterTouchesAge(columns, filters) {
 		return matchesColumnFilters(a.nodeCells(row.WithAge(now)), filters)
 	}

@@ -284,7 +284,7 @@ func (a *App) refreshGenericResourceList(now time.Time) {
 		a.visibleRows = len(a.sortedGenericRows)
 		a.totalRows = len(a.genericRowsByKey)
 	}
-	a.resourceTable.SetColumns(a.genericView.Columns(a.activeResource))
+	a.resourceTable.SetColumns(a.currentResourceColumns())
 	a.resourceTable.SetEmptyMessage(a.emptyMessageFor(a.activeResource.Resource))
 	a.resourceTable.SetWindowProvider(a.visibleRows, func(start int, end int) [][]string {
 		return a.genericTableRows(start, end-start, time.Now())

@@ -30,7 +30,7 @@ func TestRenderPodUsageSectionIncludesGPUAndEphemeral(t *testing.T) {
 		GPUAllocated:        1,
 		HasGPU:              true,
 	})
-	for _, fragment := range []string{"Resource usage:", "CPU", "Memory", "Ephemeral", "GPU", "allocated"} {
+	for _, fragment := range []string{"Resource usage:", "CPU", "Memory", "Ephemeral", "GPU", "requested"} {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("missing %q in\n%s", fragment, rendered)
 		}

@@ -128,6 +128,26 @@ func (a *App) updateSearchPrompt(msg tea.Msg) tea.Cmd {
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
+		case "j", "down":
+			if a.screen == screenContexts {
+				a.navTable.MoveDown(1)
+				return nil
+			}
+		case "J":
+			if a.screen == screenContexts {
+				a.navTable.MoveBottom()
+				return nil
+			}
+		case "k", "up":
+			if a.screen == screenContexts {
+				a.navTable.MoveUp(1)
+				return nil
+			}
+		case "K":
+			if a.screen == screenContexts {
+				a.navTable.MoveTop()
+				return nil
+			}
 		case "esc":
 			a.filter.Clear()
 			a.filter.Deactivate()

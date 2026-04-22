@@ -829,7 +829,8 @@ func TestPodUsageSnapshotRefreshRendersTableGauge(t *testing.T) {
 	app.refreshPods(time.Now())
 
 	key := state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}.String()
-	app.Update(podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), storeVersion: store.Version(), usages: map[string]cluster.PodResourceUsage{
+	app.podUsageListGeneration = 1
+	app.Update(podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), generation: app.podUsageListGeneration, usages: map[string]cluster.PodResourceUsage{
 		key: {Key: state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true},
 	}})
 	_, body, _ := app.currentView()
@@ -851,7 +852,8 @@ func TestNodeUsageSnapshotRefreshRendersTableGauge(t *testing.T) {
 	app.refreshResourceList(time.Now())
 
 	key := state.NodeKey{Cluster: "dev", Name: "node-a"}.String()
-	app.Update(nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), storeVersion: store.NodeVersion(), usages: map[string]cluster.NodeResourceUsage{
+	app.nodeUsageListGeneration = 1
+	app.Update(nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), generation: app.nodeUsageListGeneration, usages: map[string]cluster.NodeResourceUsage{
 		key: {Key: state.NodeKey{Cluster: "dev", Name: "node-a"}, CPUUsedMilli: 1200, CPUAllocatableMilli: 4000, HasCPUUsage: true},
 	}})
 	_, body, _ := app.currentView()
@@ -871,16 +873,13 @@ func TestNodeUsageSnapshotAppliesUnderUnrelatedPodChurn(t *testing.T) {
 	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
 	app.refreshResourceList(time.Now())
 
-	nodeVersion := store.NodeVersion()
 	key := state.NodeKey{Cluster: "dev", Name: "node-a"}.String()
-	msg := nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), storeVersion: nodeVersion, usages: map[string]cluster.NodeResourceUsage{
+	app.nodeUsageListGeneration = 1
+	msg := nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), generation: app.nodeUsageListGeneration, usages: map[string]cluster.NodeResourceUsage{
 		key: {Key: state.NodeKey{Cluster: "dev", Name: "node-a"}, CPUUsedMilli: 1200, CPUAllocatableMilli: 4000, HasCPUUsage: true},
 	}}
 
 	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
-	if got := store.NodeVersion(); got != nodeVersion {
-		t.Fatalf("node version changed under pod churn: got %d want %d", got, nodeVersion)
-	}
 
 	app.Update(msg)
 	if app.nodeUsageListFetchedAt.IsZero() {
@@ -902,16 +901,13 @@ func TestPodUsageSnapshotAppliesUnderUnrelatedNodeChurn(t *testing.T) {
 	app.screen = screenPods
 	app.refreshPods(time.Now())
 
-	podVersion := store.PodVersion()
 	key := state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}.String()
-	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), storeVersion: podVersion, usages: map[string]cluster.PodResourceUsage{
+	app.podUsageListGeneration = 1
+	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), generation: app.podUsageListGeneration, usages: map[string]cluster.PodResourceUsage{
 		key: {Key: state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true},
 	}}
 
 	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
-	if got := store.PodVersion(); got != podVersion {
-		t.Fatalf("pod version changed under node churn: got %d want %d", got, podVersion)
-	}
 
 	app.Update(msg)
 	if app.podUsageListFetchedAt.IsZero() {
@@ -1365,6 +1361,82 @@ func TestMaybeRefreshPodUsageListCmdDelaysInitialFetchAfterPodsRefresh(t *testin
 	}
 }
 
+func TestMaybeRefreshPodUsageListCmdIgnoresPodChurnUntilInterval(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.screen = screenPods
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	app.podUsageListScopeKey = app.podUsageScopeKey()
+	app.podUsageListFetchedAt = time.Now()
+
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", ResourceVersion: "2"}})
+	if cmd := app.maybeRefreshPodUsageListCmd(time.Now().Add(time.Second)); cmd != nil {
+		t.Fatalf("expected nil cmd under pod churn before refresh interval")
+	}
+}
+
+func TestTickRefreshContinuesWhileFilterActive(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.screen = screenPods
+	app.width = 160
+	app.height = 20
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "1"}})
+	app.refreshPods(time.Now())
+	app.filter.Activate()
+
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "worker", Namespace: "default", ResourceVersion: "2"}})
+	app.Update(tickMsg(time.Now().Add(time.Second)))
+	if got, want := app.visibleRows, 2; got != want {
+		t.Fatalf("visibleRows = %d, want %d", got, want)
+	}
+}
+
+func TestPodUsageSnapshotAppliesUnderRelatedPodChurn(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "1"}})
+	app.screen = screenPods
+	app.refreshPods(time.Now())
+
+	key := state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}.String()
+	app.podUsageListGeneration = 1
+	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), generation: app.podUsageListGeneration, usages: map[string]cluster.PodResourceUsage{
+		key: {Key: state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true},
+	}}
+
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "2"}})
+	app.Update(msg)
+	if app.podUsageListFetchedAt.IsZero() {
+		t.Fatalf("expected pod usage snapshot accepted under related pod churn")
+	}
+}
+
+func TestNodeUsageSnapshotAppliesUnderRelatedNodeChurn(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", ResourceVersion: "1"}})
+	app.screen = screenResourceList
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	app.refreshResourceList(time.Now())
+
+	key := state.NodeKey{Cluster: "dev", Name: "node-a"}.String()
+	app.nodeUsageListGeneration = 1
+	msg := nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), generation: app.nodeUsageListGeneration, usages: map[string]cluster.NodeResourceUsage{
+		key: {Key: state.NodeKey{Cluster: "dev", Name: "node-a"}, CPUUsedMilli: 1200, CPUAllocatableMilli: 4000, HasCPUUsage: true},
+	}}
+
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a", ResourceVersion: "2"}})
+	app.Update(msg)
+	if app.nodeUsageListFetchedAt.IsZero() {
+		t.Fatalf("expected node usage snapshot accepted under related node churn")
+	}
+}
+
 func TestPodUsageSnapshotDefersCellCacheUntilVisibleRowsNeedIt(t *testing.T) {
 	manager := newTestManager(t)
 	store := state.NewStore()
@@ -1372,7 +1444,8 @@ func TestPodUsageSnapshotDefersCellCacheUntilVisibleRowsNeedIt(t *testing.T) {
 	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "1"}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
 	app.screen = screenPods
 	app.refreshPods(time.Now())
-	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), storeVersion: store.Version(), usages: map[string]cluster.PodResourceUsage{
+	app.podUsageListGeneration = 1
+	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), generation: app.podUsageListGeneration, usages: map[string]cluster.PodResourceUsage{
 		state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}.String(): {
 			Key:             state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"},
 			CPUUsedMilli:    120,

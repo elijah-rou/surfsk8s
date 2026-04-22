@@ -202,7 +202,7 @@ func BenchmarkRefreshAndViewPods5300WarmUsage4Clusters(b *testing.B) {
 		return true
 	})
 	app.podUsageListScopeKey = app.podUsageScopeKey()
-	app.podUsageListVersion = store.PodVersion()
+	app.podUsageListGeneration = 1
 	app.podUsageListFetchedAt = time.Now()
 	app.podUsageListLoading = true
 	app.resizeTables()

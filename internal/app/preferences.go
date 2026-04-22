@@ -10,10 +10,17 @@ import (
 
 var userConfigDir = os.UserConfigDir
 
+type tableColumnPreference struct {
+	Width         int  `json:"width,omitempty"`
+	Collapsed     bool `json:"collapsed,omitempty"`
+	ExpandedWidth int  `json:"expanded_width,omitempty"`
+}
+
 type preferences struct {
-	SelectedContexts     []string `json:"selected_contexts"`
-	FavoriteResources    []string `json:"favorite_resources,omitempty"`
-	FavoriteResourcesSet bool     `json:"favorite_resources_set,omitempty"`
+	SelectedContexts     []string                                    `json:"selected_contexts"`
+	FavoriteResources    []string                                    `json:"favorite_resources,omitempty"`
+	FavoriteResourcesSet bool                                        `json:"favorite_resources_set,omitempty"`
+	TableColumns         map[string]map[string]tableColumnPreference `json:"table_columns,omitempty"`
 }
 
 func preferencesPath() (string, error) {

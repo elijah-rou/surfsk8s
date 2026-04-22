@@ -98,6 +98,16 @@ func TestTableTruncatesANSIColoredCellsByVisibleWidth(t *testing.T) {
 	}
 }
 
+func TestSelectedRowHighlightsANSIColoredGaugeCells(t *testing.T) {
+	table := NewTable([]Column{{Title: "CPU", Width: 18}})
+	table.SetVariant(TableVariantRich)
+	table.SetRows([][]string{{"\x1b[32m████\x1b[0m 120m/500m"}})
+	view := table.View()
+	if got := strings.Count(view, "48;5;24m"); got < 2 {
+		t.Fatalf("expected selected-row background reapplied across ANSI cell, got %d:\n%q", got, view)
+	}
+}
+
 func TestTableRendersWrappedCenteredHeadersAndDividers(t *testing.T) {
 	table := NewTable([]Column{{Title: "Context", Width: 10}, {Title: "Cluster-IP", Width: 10}, {Title: "Age", Width: 6}})
 	table.SetVariant(TableVariantRich)
@@ -136,6 +146,40 @@ func TestTableHorizontalViewportKeepsSelectedColumnVisible(t *testing.T) {
 	}
 	if strings.Contains(view, "A") && strings.Contains(view, "B") && strings.Contains(view, "C") && strings.Contains(view, "D") {
 		t.Fatalf("expected horizontal viewport, got all columns:\n%s", view)
+	}
+	if got := table.Footer(); !strings.Contains(got, "cols") || !strings.Contains(got, "col D 4/4") {
+		t.Fatalf("footer = %q, want active column + visible column hints", got)
+	}
+}
+
+func TestTableViewPadsRowsToViewportWidthAndHeight(t *testing.T) {
+	table := NewTable([]Column{{Title: "Name", Width: 8}, {Title: "Status", Width: 8}})
+	table.SetVariant(TableVariantRich)
+	table.SetSize(24, 5)
+	table.SetRows([][]string{{"pod-01", "Running"}})
+	view := stripANSI(table.View())
+	lines := strings.Split(view, "\n")
+	if got, want := len(lines), 5; got != want {
+		t.Fatalf("line count = %d, want %d\n%s", got, want, view)
+	}
+	for i, line := range lines {
+		if got := len([]rune(line)); got != 24 {
+			t.Fatalf("line %d width = %d, want 24\n%q", i, got, line)
+		}
+	}
+}
+
+func TestNarrowHeaderUsesSingleLineEllipsis(t *testing.T) {
+	table := NewTable([]Column{{Title: "NAMESPACE", Width: 4}})
+	table.SetVariant(TableVariantRich)
+	table.SetSize(4, 4)
+	table.SetRows([][]string{{"prod"}})
+	view := stripANSI(table.View())
+	if strings.Contains(view, "NAME") {
+		t.Fatalf("expected narrow header truncation, got:\n%s", view)
+	}
+	if !strings.Contains(view, "NAM…") {
+		t.Fatalf("expected ellipsis header, got:\n%s", view)
 	}
 }
 

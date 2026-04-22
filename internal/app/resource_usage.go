@@ -106,18 +106,19 @@ func (a *App) maybeRefreshPodUsageListCmd(now time.Time) tea.Cmd {
 		return nil
 	}
 	scopeKey := a.podUsageScopeKey()
-	storeVersion := a.store.PodVersion()
-	if a.podUsageListScopeKey == scopeKey && a.podUsageListVersion == storeVersion && !a.podUsageListFetchedAt.IsZero() && now.Sub(a.podUsageListFetchedAt) < resourceUsageRefreshInterval {
+	if a.podUsageListScopeKey == scopeKey && !a.podUsageListFetchedAt.IsZero() && now.Sub(a.podUsageListFetchedAt) < resourceUsageRefreshInterval {
 		return nil
 	}
-	if a.podUsageListFetchedAt.IsZero() && !a.lastTick.IsZero() && now.Sub(a.lastTick) < podUsageInitialDelay {
+	if a.podUsageListFetchedAt.IsZero() && a.podUsageListScopeKey == "" && !a.lastTick.IsZero() && now.Sub(a.lastTick) < podUsageInitialDelay {
 		return nil
 	}
 	a.podUsageListLoading = true
+	a.podUsageListGeneration++
+	generation := a.podUsageListGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		return podUsageSnapshotMsg{scopeKey: scopeKey, storeVersion: storeVersion, usages: a.manager.ListPodResourceUsages(ctx, a.contextScope, a.namespace)}
+		return podUsageSnapshotMsg{scopeKey: scopeKey, generation: generation, usages: a.manager.ListPodResourceUsages(ctx, a.contextScope, a.namespace)}
 	}
 }
 
@@ -126,15 +127,16 @@ func (a *App) maybeRefreshNodeUsageListCmd(now time.Time) tea.Cmd {
 		return nil
 	}
 	scopeKey := a.nodeUsageScopeKey()
-	storeVersion := a.store.NodeVersion()
-	if a.nodeUsageListScopeKey == scopeKey && a.nodeUsageListVersion == storeVersion && !a.nodeUsageListFetchedAt.IsZero() && now.Sub(a.nodeUsageListFetchedAt) < resourceUsageRefreshInterval {
+	if a.nodeUsageListScopeKey == scopeKey && !a.nodeUsageListFetchedAt.IsZero() && now.Sub(a.nodeUsageListFetchedAt) < resourceUsageRefreshInterval {
 		return nil
 	}
 	a.nodeUsageListLoading = true
+	a.nodeUsageListGeneration++
+	generation := a.nodeUsageListGeneration
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		return nodeUsageSnapshotMsg{scopeKey: scopeKey, storeVersion: storeVersion, usages: a.manager.ListNodeResourceUsages(ctx, a.contextScope)}
+		return nodeUsageSnapshotMsg{scopeKey: scopeKey, generation: generation, usages: a.manager.ListNodeResourceUsages(ctx, a.contextScope)}
 	}
 }
 
@@ -560,7 +562,7 @@ func renderPodUsageSection(usage cluster.PodResourceUsage) string {
 		lines = append(lines, renderUsageLine("Ephemeral", formatBytes(usage.EphemeralUsedBytes), podUsageReference(formatBytesReference(usage.EphemeralLimitBytes), formatBytesReference(usage.EphemeralRequestBytes)), barRatio(float64(usage.EphemeralUsedBytes), float64(podUsageDenominator(usage.EphemeralLimitBytes, usage.EphemeralRequestBytes)))))
 	}
 	if usage.HasGPU {
-		lines = append(lines, renderUsageLine("GPU", fmt.Sprintf("%d allocated", usage.GPUAllocated), "", -1))
+		lines = append(lines, renderUsageLine("GPU", fmt.Sprintf("%d requested", usage.GPUAllocated), "", -1))
 	}
 	return renderUsageSection("Resource usage:", lines)
 }
@@ -753,8 +755,7 @@ func formatPodTableGPU(usage cluster.PodResourceUsage) string {
 	if !usage.HasGPU {
 		return ""
 	}
-	total := formatCountReference(usage.GPUAllocated)
-	return formatUsageBarCell(fmt.Sprintf("%d", usage.GPUAllocated), total, 1, -1)
+	return fmt.Sprintf("%d", usage.GPUAllocated)
 }
 
 func formatNodeTableCPU(usage cluster.NodeResourceUsage) string {

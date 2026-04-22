@@ -39,9 +39,9 @@ type podUsageResultMsg struct {
 }
 
 type podUsageSnapshotMsg struct {
-	scopeKey     string
-	storeVersion uint64
-	usages       map[string]cluster.PodResourceUsage
+	scopeKey   string
+	generation uint64
+	usages     map[string]cluster.PodResourceUsage
 }
 
 type nodeUsageResultMsg struct {
@@ -50,9 +50,9 @@ type nodeUsageResultMsg struct {
 }
 
 type nodeUsageSnapshotMsg struct {
-	scopeKey     string
-	storeVersion uint64
-	usages       map[string]cluster.NodeResourceUsage
+	scopeKey   string
+	generation uint64
+	usages     map[string]cluster.NodeResourceUsage
 }
 
 type catalogOverviewResultMsg struct {
@@ -118,11 +118,12 @@ type App struct {
 	clusterStatusBuf []components.ClusterStatus
 	executor         *actions.Executor
 
-	podsView        views.PodsView
-	deploymentsView views.DeploymentsView
-	servicesView    views.ServicesView
-	nodesView       views.NodesView
-	genericView     views.GenericResourcesView
+	podsView               views.PodsView
+	deploymentsView        views.DeploymentsView
+	servicesView           views.ServicesView
+	nodesView              views.NodesView
+	genericView            views.GenericResourcesView
+	tableColumnPreferences map[string]map[string]tableColumnPreference
 
 	navTable              components.Table
 	podTable              components.Table
@@ -233,8 +234,8 @@ type App struct {
 	nodeUsageListFetchedAt       time.Time
 	podUsageListScopeKey         string
 	nodeUsageListScopeKey        string
-	podUsageListVersion          uint64
-	nodeUsageListVersion         uint64
+	podUsageListGeneration       uint64
+	nodeUsageListGeneration      uint64
 	podUsageLoading              bool
 	nodeUsageLoading             bool
 	podUsageListLoading          bool
@@ -330,36 +331,38 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	contexts := manager.AvailableContexts()
 	selectedContext := loadSelectedContexts(contexts)
 	favoriteResourceIDs := loadFavoriteResourceIDs(manager.Catalog())
+	tableColumnPreferences := loadTableColumnPreferences()
 	favoriteResources := make(map[string]bool, len(favoriteResourceIDs))
 	for _, id := range favoriteResourceIDs {
 		favoriteResources[id] = true
 	}
 
 	app := &App{
-		namespace:           cfg.InitialNamespace,
-		store:               store,
-		manager:             manager,
-		executor:            actions.NewExecutor(cfg.KubeconfigPath),
-		podsView:            podsView,
-		deploymentsView:     deploymentsView,
-		servicesView:        servicesView,
-		nodesView:           nodesView,
-		genericView:         genericView,
-		navTable:            navTable,
-		podTable:            podTable,
-		resourceTable:       resourceTable,
-		filter:              filter,
-		statusBar:           statusBar,
-		textViewport:        textViewport,
-		screen:              screenContexts,
-		pickerMode:          pickerModeEnter,
-		contexts:            contexts,
-		selectedContext:     selectedContext,
-		favoriteResourceIDs: favoriteResourceIDs,
-		favoriteResources:   favoriteResources,
-		namespaces:          []string{""},
-		logRange:            logRangeLive,
-		logShowTimestamps:   true,
+		namespace:              cfg.InitialNamespace,
+		store:                  store,
+		manager:                manager,
+		executor:               actions.NewExecutor(cfg.KubeconfigPath),
+		podsView:               podsView,
+		deploymentsView:        deploymentsView,
+		servicesView:           servicesView,
+		nodesView:              nodesView,
+		genericView:            genericView,
+		tableColumnPreferences: tableColumnPreferences,
+		navTable:               navTable,
+		podTable:               podTable,
+		resourceTable:          resourceTable,
+		filter:                 filter,
+		statusBar:              statusBar,
+		textViewport:           textViewport,
+		screen:                 screenContexts,
+		pickerMode:             pickerModeEnter,
+		contexts:               contexts,
+		selectedContext:        selectedContext,
+		favoriteResourceIDs:    favoriteResourceIDs,
+		favoriteResources:      favoriteResources,
+		namespaces:             []string{""},
+		logRange:               logRangeLive,
+		logShowTimestamps:      true,
 	}
 	app.commands = []commandItem{
 		{Name: "add-context", Description: "Open context picker, connect more kubeconfig contexts", Run: func(a *App) { a.openContextPicker(pickerModeAdd) }},
@@ -452,7 +455,9 @@ func (a *App) persistFavoriteResources() {
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.filter.Active() {
-		return a, a.updateFilter(msg)
+		if _, ok := msg.(tea.KeyMsg); ok {
+			return a, a.updateFilter(msg)
+		}
 	}
 
 	switch typed := msg.(type) {
@@ -529,11 +534,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case podUsageSnapshotMsg:
 		a.podUsageListLoading = false
-		if typed.scopeKey == a.podUsageScopeKey() && typed.storeVersion == a.store.PodVersion() {
+		if typed.scopeKey == a.podUsageScopeKey() && typed.generation == a.podUsageListGeneration {
 			a.podUsageByKey = typed.usages
 			a.podUsageCellByKey = nil
 			a.podUsageListScopeKey = typed.scopeKey
-			a.podUsageListVersion = typed.storeVersion
 			a.podUsageListFetchedAt = time.Now()
 			if a.screen == screenPods {
 				a.refreshPods(time.Now())
@@ -543,11 +547,10 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case nodeUsageSnapshotMsg:
 		a.nodeUsageListLoading = false
-		if typed.scopeKey == a.nodeUsageScopeKey() && typed.storeVersion == a.store.NodeVersion() {
+		if typed.scopeKey == a.nodeUsageScopeKey() && typed.generation == a.nodeUsageListGeneration {
 			a.nodeUsageByKey = typed.usages
 			a.nodeUsageCellByKey = buildNodeUsageTableCellCache(typed.usages)
 			a.nodeUsageListScopeKey = typed.scopeKey
-			a.nodeUsageListVersion = typed.storeVersion
 			a.nodeUsageListFetchedAt = time.Now()
 			if a.screen == screenResourceList && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
 				a.refreshResourceList(time.Now())
@@ -771,8 +774,12 @@ func (a *App) updateContextKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "j", "down":
 		a.navTable.MoveDown(1)
+	case "J":
+		a.navTable.MoveBottom()
 	case "k", "up":
 		a.navTable.MoveUp(1)
+	case "K":
+		a.navTable.MoveTop()
 	case "g", "home":
 		a.navTable.MoveTop()
 	case "G", "end":
@@ -925,6 +932,12 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		a.podTable.MoveRight(1)
 	case "L", "shift+l":
 		a.podTable.MoveColumnEnd()
+	case "+", "=":
+		a.adjustSelectedTableColumnWidth(1)
+	case "-", "_":
+		a.adjustSelectedTableColumnWidth(-1)
+	case "0":
+		a.toggleSelectedTableColumnCollapse()
 	case "tab":
 		a.advanceNamespace(1)
 	case "shift+tab":
@@ -1007,6 +1020,12 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 		a.resourceTable.MoveRight(1)
 	case "L", "shift+l":
 		a.resourceTable.MoveColumnEnd()
+	case "+", "=":
+		a.adjustSelectedTableColumnWidth(1)
+	case "-", "_":
+		a.adjustSelectedTableColumnWidth(-1)
+	case "0":
+		a.toggleSelectedTableColumnCollapse()
 	case "tab":
 		if a.activeResource.Namespaced {
 			a.advanceNamespace(1)
@@ -1269,6 +1288,9 @@ func (a *App) openCommands() {
 func (a *App) openContextPicker(mode pickerMode) {
 	a.prevScreen = a.screen
 	a.screen = screenContexts
+	a.inputMode = inputModeSearch
+	a.filter.Clear()
+	a.filter.Deactivate()
 	a.pickerMode = mode
 	a.contextQuery = ""
 	if mode == pickerModeAdd {
@@ -1428,6 +1450,7 @@ func (a *App) refreshPods(now time.Time) {
 	a.lastTick = now
 	a.visibleRows = filtered
 	a.totalRows = total
+	a.podTable.SetColumns(a.currentPodColumns())
 	a.podTable.SetEmptyMessage(a.emptyMessageFor("pods"))
 	a.podTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 		return a.podTableRows(a.podWindow(start, end-start, time.Now()), time.Now())
@@ -1456,7 +1479,7 @@ func (a *App) refreshResourceList(now time.Time) {
 		}
 		a.visibleRows = filtered
 		a.totalRows = total
-		a.resourceTable.SetColumns(a.deploymentsView.Columns())
+		a.resourceTable.SetColumns(a.currentResourceColumns())
 		a.resourceTable.SetEmptyMessage(a.emptyMessageFor("deployments"))
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.deploymentTableRows(a.deploymentWindow(start, end-start, time.Now()), time.Now())
@@ -1479,7 +1502,7 @@ func (a *App) refreshResourceList(now time.Time) {
 		}
 		a.visibleRows = filtered
 		a.totalRows = total
-		a.resourceTable.SetColumns(a.servicesView.Columns())
+		a.resourceTable.SetColumns(a.currentResourceColumns())
 		a.resourceTable.SetEmptyMessage(a.emptyMessageFor("services"))
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.serviceTableRows(a.serviceWindow(start, end-start, time.Now()), time.Now())
@@ -1498,7 +1521,7 @@ func (a *App) refreshResourceList(now time.Time) {
 		}
 		a.visibleRows = filtered
 		a.totalRows = total
-		a.resourceTable.SetColumns(a.nodesView.Columns())
+		a.resourceTable.SetColumns(a.currentResourceColumns())
 		a.resourceTable.SetEmptyMessage(a.emptyMessageFor("nodes"))
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.nodeTableRows(a.nodeWindow(start, end-start, time.Now()), time.Now())
@@ -1671,9 +1694,10 @@ func (a *App) bodyHeight(topRows int) int {
 
 func (a *App) resizeTablesForBody(topRows int) {
 	bodyHeight := a.bodyHeight(topRows)
+	contentWidth := max(24, a.width-2)
 	a.navTable.SetSize(max(24, a.width-4), bodyHeight)
-	a.podTable.SetSize(a.width, bodyHeight)
-	a.resourceTable.SetSize(a.width, bodyHeight)
+	a.podTable.SetSize(contentWidth, bodyHeight)
+	a.resourceTable.SetSize(contentWidth, bodyHeight)
 }
 
 func (a *App) resizeTables() {
@@ -1730,11 +1754,11 @@ func (a *App) renderResourceDetails() string {
 }
 
 func (a *App) podListFooter() string {
-	return "hjkl nav  HJKL jump  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  n ns-find  c ctx-find  esc back"
+	return "hjkl nav  HJKL jump  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  n ns-find  c ctx-find  esc back"
 }
 
 func (a *App) resourceListFooter() string {
-	base := "hjkl nav  HJKL jump  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  c ctx-find  "
+	base := "hjkl nav  HJKL jump  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  c ctx-find  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		return base + "n ns-find  S scale  R restart  esc back"

@@ -117,7 +117,7 @@ func (a *App) filteredTablePipe(now time.Time) (string, error) {
 	switch a.screen {
 	case screenPods:
 		rows := a.podTableRows(a.podWindow(0, a.visibleRows, now), now)
-		return csvTableWithHeader(a.podsView.Columns(), rows)
+		return csvTableWithHeader(a.currentPodColumns(), rows)
 	case screenResourceList:
 		rows := a.selectedResourceCells(0, a.visibleRows, now)
 		return csvTableWithHeader(a.currentResourceColumns(), rows)
@@ -177,16 +177,7 @@ func formatPipeTableRow(cells []string) string {
 }
 
 func (a *App) currentResourceColumns() []components.Column {
-	switch {
-	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return a.deploymentsView.Columns()
-	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		return a.servicesView.Columns()
-	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return a.nodesView.Columns()
-	default:
-		return a.genericView.Columns(a.activeResource)
-	}
+	return a.applyTableColumnPreferences(tableColumnKeyForResource(a.activeResource), a.baseResourceColumns())
 }
 
 func (a *App) selectedResourceCells(index int, count int, now time.Time) [][]string {
