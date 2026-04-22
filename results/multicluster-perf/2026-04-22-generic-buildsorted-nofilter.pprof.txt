@@ -1,0 +1,72 @@
+File: app.test
+Type: cpu
+Time: 2026-04-22 14:13:29 EDT
+Duration: 3.57s, Total samples = 3.05s (85.43%)
+Showing nodes accounting for 2.97s, 97.38% of 3.05s total
+Dropped 23 nodes (cum <= 0.02s)
+      flat  flat%   sum%        cum   cum%
+     0.88s 28.85% 28.85%      0.88s 28.85%  strings.ToLower
+     0.63s 20.66% 49.51%      0.63s 20.66%  runtime.memmove
+     0.35s 11.48% 60.98%      1.50s 49.18%  github.com/elijahrou/surfsk8s/internal/app.(*App).buildSortedGenericResources.func1
+     0.22s  7.21% 68.20%      0.85s 27.87%  runtime.typedmemmove
+     0.12s  3.93% 72.13%      0.12s  3.93%  cmpbody
+     0.11s  3.61% 75.74%      0.96s 31.48%  internal/reflectlite.typedmemmove
+     0.10s  3.28% 79.02%      1.11s 36.39%  github.com/elijahrou/surfsk8s/internal/app.cmpStringCI
+     0.09s  2.95% 81.97%      1.06s 34.75%  internal/reflectlite.Swapper.func9
+     0.08s  2.62% 84.59%      0.08s  2.62%  runtime.madvise
+     0.07s  2.30% 86.89%      0.07s  2.30%  runtime.pthread_cond_signal
+     0.06s  1.97% 88.85%      2.22s 72.79%  sort.symMerge_func
+     0.05s  1.64% 90.49%      0.05s  1.64%  runtime.pthread_cond_wait
+     0.04s  1.31% 91.80%      1.15s 37.70%  github.com/elijahrou/surfsk8s/internal/app.(*App).compareGenericRows
+     0.04s  1.31% 93.11%      0.98s 32.13%  sort.rotate_func
+     0.03s  0.98% 94.10%      2.78s 91.15%  github.com/elijahrou/surfsk8s/internal/app.(*App).buildSortedGenericResources
+     0.03s  0.98% 95.08%      0.94s 30.82%  sort.swapRange_func (inline)
+     0.02s  0.66% 95.74%      0.03s  0.98%  github.com/elijahrou/surfsk8s/internal/app.(*App).genericRowMatchesScope
+     0.02s  0.66% 96.39%      0.03s  0.98%  runtime.tryDeferToSpanScan
+     0.02s  0.66% 97.05%      0.02s  0.66%  runtime.usleep
+     0.01s  0.33% 97.38%      0.03s  0.98%  runtime.scanObjectsSmall
+         0     0% 97.38%      0.03s  0.98%  github.com/elijahrou/surfsk8s/internal/app.(*App).rebuildGenericVisibleKeySet (inline)
+         0     0% 97.38%      2.78s 91.15%  github.com/elijahrou/surfsk8s/internal/app.BenchmarkBuildSortedGenericResources8ClustersNoFilter
+         0     0% 97.38%      0.06s  1.97%  github.com/elijahrou/surfsk8s/internal/app.seedBenchmarkGenericObjects
+         0     0% 97.38%      0.06s  1.97%  github.com/elijahrou/surfsk8s/internal/app.setupGenericHotspotApp
+         0     0% 97.38%      0.02s  0.66%  internal/runtime/maps.(*table).reset
+         0     0% 97.38%      0.02s  0.66%  internal/runtime/maps.NewMap
+         0     0% 97.38%      0.02s  0.66%  internal/runtime/maps.newTable
+         0     0% 97.38%      0.85s 27.87%  reflect.typedmemmove (inline)
+         0     0% 97.38%      0.08s  2.62%  runtime.(*mheap).alloc.func1
+         0     0% 97.38%      0.08s  2.62%  runtime.(*mheap).allocSpan
+         0     0% 97.38%      0.08s  2.62%  runtime.findRunnable
+         0     0% 97.38%      0.04s  1.31%  runtime.gcBgMarkWorker
+         0     0% 97.38%      0.04s  1.31%  runtime.gcBgMarkWorker.func2
+         0     0% 97.38%      0.04s  1.31%  runtime.gcDrain
+         0     0% 97.38%      0.04s  1.31%  runtime.gcDrainMarkWorkerIdle (inline)
+         0     0% 97.38%      0.05s  1.64%  runtime.gopreempt_m (inline)
+         0     0% 97.38%      0.06s  1.97%  runtime.goschedImpl
+         0     0% 97.38%      0.02s  0.66%  runtime.lock (inline)
+         0     0% 97.38%      0.02s  0.66%  runtime.lock2
+         0     0% 97.38%      0.02s  0.66%  runtime.lockWithRank (inline)
+         0     0% 97.38%      0.05s  1.64%  runtime.mPark (inline)
+         0     0% 97.38%      0.02s  0.66%  runtime.makemap
+         0     0% 97.38%      0.10s  3.28%  runtime.mcall
+         0     0% 97.38%      0.05s  1.64%  runtime.morestack
+         0     0% 97.38%      0.06s  1.97%  runtime.newstack
+         0     0% 97.38%      0.05s  1.64%  runtime.notesleep
+         0     0% 97.38%      0.07s  2.30%  runtime.notewakeup
+         0     0% 97.38%      0.02s  0.66%  runtime.osyield (inline)
+         0     0% 97.38%      0.09s  2.95%  runtime.park_m
+         0     0% 97.38%      0.03s  0.98%  runtime.scanSpan
+         0     0% 97.38%      0.09s  2.95%  runtime.schedule
+         0     0% 97.38%      0.05s  1.64%  runtime.semasleep
+         0     0% 97.38%      0.07s  2.30%  runtime.semawakeup
+         0     0% 97.38%      0.07s  2.30%  runtime.startm
+         0     0% 97.38%      0.06s  1.97%  runtime.stopm
+         0     0% 97.38%      0.08s  2.62%  runtime.sysUsed (inline)
+         0     0% 97.38%      0.08s  2.62%  runtime.sysUsedOS (inline)
+         0     0% 97.38%      0.12s  3.93%  runtime.systemstack
+         0     0% 97.38%      0.07s  2.30%  runtime.wakep
+         0     0% 97.38%      2.69s 88.20%  sort.SliceStable
+         0     0% 97.38%      0.47s 15.41%  sort.insertionSort_func
+         0     0% 97.38%      2.69s 88.20%  sort.stable_func
+         0     0% 97.38%      2.71s 88.85%  testing.(*B).launch
+         0     0% 97.38%      0.07s  2.30%  testing.(*B).run1.func1
+         0     0% 97.38%      2.78s 91.15%  testing.(*B).runN

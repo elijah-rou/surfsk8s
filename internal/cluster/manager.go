@@ -57,6 +57,16 @@ type ClusterConn struct {
 
 // Manager holds concurrent connections to multiple k8s clusters.
 // Each cluster gets its own clientset and informer factory.
+const genericChangeHistoryLimit = 2048
+
+type GenericResourceChange struct {
+	Version uint64
+	Key     GenericResourceKey
+	Deleted bool
+	Row     GenericResourceRow
+	Known   bool
+}
+
 type Manager struct {
 	mu sync.RWMutex
 	wg sync.WaitGroup
@@ -69,6 +79,10 @@ type Manager struct {
 	resources map[string][]discoveredResource
 	closed    bool
 	version   atomic.Uint64
+
+	genericVersionMu sync.RWMutex
+	genericVersions  map[string]uint64
+	genericChanges   map[string][]GenericResourceChange
 }
 
 func NewManager(store *state.Store, cfg Config) (*Manager, error) {
@@ -82,16 +96,100 @@ func NewManager(store *state.Store, cfg Config) (*Manager, error) {
 	}
 
 	return &Manager{
-		store:     store,
-		rawConfig: rawConfig,
-		contexts:  contexts,
-		conns:     make(map[string]*ClusterConn, max(1, len(contexts))),
-		resources: make(map[string][]discoveredResource, max(1, len(contexts))),
+		store:           store,
+		rawConfig:       rawConfig,
+		contexts:        contexts,
+		conns:           make(map[string]*ClusterConn, max(1, len(contexts))),
+		resources:       make(map[string][]discoveredResource, max(1, len(contexts))),
+		genericVersions: make(map[string]uint64, 8),
+		genericChanges:  make(map[string][]GenericResourceChange, 8),
 	}, nil
 }
 
 func (m *Manager) Version() uint64 {
 	return m.version.Load()
+}
+
+func (m *Manager) GenericResourceVersion(resourceID string) uint64 {
+	if resourceID == "" {
+		return 0
+	}
+	m.genericVersionMu.RLock()
+	defer m.genericVersionMu.RUnlock()
+	return m.genericVersions[resourceID]
+}
+
+func (m *Manager) appendGenericChangeLocked(resourceID string, change GenericResourceChange) {
+	changes := m.genericChanges[resourceID]
+	if len(changes) < genericChangeHistoryLimit {
+		m.genericChanges[resourceID] = append(changes, change)
+		return
+	}
+	copy(changes, changes[1:])
+	changes[len(changes)-1] = change
+	m.genericChanges[resourceID] = changes
+}
+
+func (m *Manager) bumpGenericResourceVersion(resourceID string) {
+	if resourceID == "" {
+		panic("cluster.Manager.bumpGenericResourceVersion: empty resourceID")
+	}
+	m.genericVersionMu.Lock()
+	m.genericVersions[resourceID]++
+	m.genericVersionMu.Unlock()
+}
+
+func (m *Manager) recordGenericResourceUpsert(resourceID string, row GenericResourceRow) {
+	if resourceID == "" {
+		panic("cluster.Manager.recordGenericResourceUpsert: empty resourceID")
+	}
+	m.genericVersionMu.Lock()
+	version := m.genericVersions[resourceID] + 1
+	m.genericVersions[resourceID] = version
+	m.appendGenericChangeLocked(resourceID, GenericResourceChange{Version: version, Key: row.Key, Row: row, Known: true})
+	m.genericVersionMu.Unlock()
+}
+
+func (m *Manager) recordGenericResourceDelete(resourceID string, key GenericResourceKey) {
+	if resourceID == "" {
+		panic("cluster.Manager.recordGenericResourceDelete: empty resourceID")
+	}
+	m.genericVersionMu.Lock()
+	version := m.genericVersions[resourceID] + 1
+	m.genericVersions[resourceID] = version
+	m.appendGenericChangeLocked(resourceID, GenericResourceChange{Version: version, Key: key, Deleted: true, Known: true})
+	m.genericVersionMu.Unlock()
+}
+
+func (m *Manager) GenericResourceDelta(resourceID string, sinceVersion uint64) (uint64, []GenericResourceChange, bool) {
+	if resourceID == "" {
+		return 0, nil, false
+	}
+	m.genericVersionMu.RLock()
+	defer m.genericVersionMu.RUnlock()
+	currentVersion := m.genericVersions[resourceID]
+	if sinceVersion == currentVersion {
+		return currentVersion, nil, true
+	}
+	changes := m.genericChanges[resourceID]
+	if len(changes) == 0 {
+		return currentVersion, nil, false
+	}
+	oldestVersion := changes[0].Version
+	if sinceVersion+1 < oldestVersion {
+		return currentVersion, nil, false
+	}
+	start := 0
+	for start < len(changes) && changes[start].Version <= sinceVersion {
+		start++
+	}
+	for _, change := range changes[start:] {
+		if !change.Known {
+			return currentVersion, nil, false
+		}
+	}
+	result := append([]GenericResourceChange(nil), changes[start:]...)
+	return currentVersion, result, true
 }
 
 func (m *Manager) AvailableContexts() []ContextInfo {
@@ -335,6 +433,9 @@ func (m *Manager) ListGenericResource(ctx context.Context, resource ResourceKind
 	if resource.Resource == "" {
 		panic("cluster.Manager.ListGenericResource: empty resource")
 	}
+	if rows, ok := m.genericFixtureRows(resource.ID); ok {
+		return rows, nil
+	}
 
 	m.mu.RLock()
 	connections := make([]*ClusterConn, 0, len(m.conns))
@@ -396,6 +497,14 @@ func (m *Manager) ForEachGenericResourceRow(ctx context.Context, resource Resour
 	}
 	if resource.Resource == "" {
 		panic("cluster.Manager.ForEachGenericResourceRow: empty resource")
+	}
+	if rows, ok := m.genericFixtureRows(resource.ID); ok {
+		for _, row := range rows {
+			if !visit(row) {
+				return nil
+			}
+		}
+		return nil
 	}
 
 	m.mu.RLock()
@@ -460,6 +569,40 @@ func (m *Manager) ForEachGenericResourceRow(ctx context.Context, resource Resour
 	return nil
 }
 
+func (m *Manager) GenericResourceObjectVersion(resource ResourceKind, key GenericResourceKey) (string, bool) {
+	if resource.Resource == "" {
+		panic("cluster.Manager.GenericResourceObjectVersion: empty resource")
+	}
+	if key.Cluster == "" {
+		panic("cluster.Manager.GenericResourceObjectVersion: empty cluster")
+	}
+	if key.Name == "" {
+		panic("cluster.Manager.GenericResourceObjectVersion: empty name")
+	}
+	if version, ok := m.GenericResourceObjectVersionForTest(resource.ID, key); ok {
+		return version, true
+	}
+
+	m.mu.RLock()
+	conn, ok := m.conns[key.Cluster]
+	if !ok {
+		m.mu.RUnlock()
+		return "", false
+	}
+	resolvedResource, ok := m.resolveResourceLocked(key.Cluster, resource)
+	m.mu.RUnlock()
+	if !ok {
+		return "", false
+	}
+
+	watch := m.ensureGenericResourceWatch(conn, resolvedResource)
+	watch.touch(time.Now())
+	if !watch.synced.Load() {
+		return "", false
+	}
+	return watch.objectResourceVersion(key)
+}
+
 func (m *Manager) GenericResourceDetails(ctx context.Context, resource ResourceKind, key GenericResourceKey, now time.Time) (GenericResourceDetails, error) {
 	if ctx == nil {
 		panic("cluster.Manager.GenericResourceDetails: nil context")
@@ -472,6 +615,9 @@ func (m *Manager) GenericResourceDetails(ctx context.Context, resource ResourceK
 	}
 	if key.Name == "" {
 		panic("cluster.Manager.GenericResourceDetails: empty name")
+	}
+	if details, ok, err := m.GenericResourceDetailsForTest(resource, key, now); ok || err != nil {
+		return details, err
 	}
 
 	m.mu.RLock()

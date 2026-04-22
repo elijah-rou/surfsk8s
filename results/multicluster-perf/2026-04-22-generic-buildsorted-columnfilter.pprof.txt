@@ -1,0 +1,99 @@
+File: app.test
+Type: cpu
+Time: 2026-04-22 14:26:36 EDT
+Duration: 5.19s, Total samples = 5.26s (101.38%)
+Showing nodes accounting for 4.90s, 93.16% of 5.26s total
+Dropped 81 nodes (cum <= 0.03s)
+      flat  flat%   sum%        cum   cum%
+     1.86s 35.36% 35.36%      1.86s 35.36%  path.matchChunk
+     0.38s  7.22% 42.59%      0.87s 16.54%  github.com/charmbracelet/x/ansi.Strip
+     0.34s  6.46% 49.05%      0.34s  6.46%  runtime.pthread_cond_wait
+     0.32s  6.08% 55.13%      0.32s  6.08%  strings.ToLower
+     0.28s  5.32% 60.46%      0.28s  5.32%  runtime.madvise
+     0.15s  2.85% 63.31%      0.36s  6.84%  bytes.(*Buffer).WriteByte
+     0.14s  2.66% 65.97%      0.25s  4.75%  runtime.concatstrings
+     0.13s  2.47% 68.44%      0.16s  3.04%  runtime.tryDeferToSpanScan
+     0.09s  1.71% 70.15%      2.04s 38.78%  path.Match
+     0.09s  1.71% 71.86%      0.09s  1.71%  path.scanChunk (inline)
+     0.09s  1.71% 73.57%      0.09s  1.71%  runtime.pthread_cond_signal
+     0.09s  1.71% 75.29%      0.25s  4.75%  runtime.scanObjectsSmall
+     0.07s  1.33% 76.62%      0.07s  1.33%  bytes.(*Buffer).tryGrowByReslice (inline)
+     0.07s  1.33% 77.95%      0.28s  5.32%  runtime.mallocgc
+     0.06s  1.14% 79.09%      3.99s 75.86%  github.com/elijahrou/surfsk8s/internal/app.(*App).buildSortedGenericResources
+     0.06s  1.14% 80.23%      0.06s  1.14%  runtime.memmove
+     0.05s  0.95% 81.18%      0.05s  0.95%  github.com/charmbracelet/x/ansi/parser.TransitionTable.Transition (inline)
+     0.05s  0.95% 82.13%      0.29s  5.51%  github.com/elijahrou/surfsk8s/internal/app.(*App).genericPrinterValues
+     0.05s  0.95% 83.08%      0.05s  0.95%  runtime.usleep
+     0.04s  0.76% 83.84%      0.33s  6.27%  github.com/elijahrou/surfsk8s/internal/app.(*App).genericCellValueAtNow
+     0.04s  0.76% 84.60%      0.13s  2.47%  runtime.mallocgcSmallNoscan
+     0.04s  0.76% 85.36%      0.04s  0.76%  runtime.pthread_kill
+     0.03s  0.57% 85.93%      0.14s  2.66%  github.com/elijahrou/surfsk8s/internal/app.(*App).currentResourceColumns
+     0.03s  0.57% 86.50%      3.93s 74.71%  github.com/elijahrou/surfsk8s/internal/app.(*App).genericRowMatchesScope
+     0.03s  0.57% 87.07%      0.11s  2.09%  github.com/elijahrou/surfsk8s/internal/ui/views.GenericResourcesView.Columns
+     0.03s  0.57% 87.64%      0.03s  0.57%  runtime.extractHeapBitsSmall
+     0.03s  0.57% 88.21%      0.03s  0.57%  runtime.kevent
+     0.03s  0.57% 88.78%      0.03s  0.57%  runtime.spanClass.sizeclass (inline)
+     0.03s  0.57% 89.35%      0.03s  0.57%  strings.TrimSpace
+     0.02s  0.38% 89.73%      0.14s  2.66%  bytes.(*Buffer).grow
+     0.02s  0.38% 90.11%      3.90s 74.14%  github.com/elijahrou/surfsk8s/internal/app.(*App).matchesGenericColumnFilters
+     0.02s  0.38% 90.49%      0.04s  0.76%  internal/runtime/maps.(*Map).getWithoutKeySmallFastStr
+     0.02s  0.38% 90.87%      0.20s  3.80%  runtime.makeslice
+     0.02s  0.38% 91.25%      0.07s  1.33%  runtime.slicebytetostring
+     0.01s  0.19% 91.44%      0.08s  1.52%  bytes.(*Buffer).String (inline)
+     0.01s  0.19% 91.63%      0.06s  1.14%  github.com/elijahrou/surfsk8s/internal/app.(*App).currentTableFilters (inline)
+     0.01s  0.19% 91.83%      0.18s  3.42%  github.com/elijahrou/surfsk8s/internal/app.genericPrinterCacheKey (inline)
+     0.01s  0.19% 92.02%      2.48s 47.15%  github.com/elijahrou/surfsk8s/internal/app.matchesStructuredFilter
+     0.01s  0.19% 92.21%      0.39s  7.41%  runtime.findRunnable
+     0.01s  0.19% 92.40%      0.08s  1.52%  runtime.mallocgcSmallScanNoHeader
+     0.01s  0.19% 92.59%      0.05s  0.95%  runtime.mapaccess1_faststr
+     0.01s  0.19% 92.78%      0.04s  0.76%  runtime.mapaccess2_faststr
+     0.01s  0.19% 92.97%      0.05s  0.95%  runtime.rawstringtmp
+     0.01s  0.19% 93.16%      0.07s  1.33%  runtime.scanObject
+         0     0% 93.16%      4.01s 76.24%  github.com/elijahrou/surfsk8s/internal/app.BenchmarkBuildSortedGenericResources8ClustersColumnFilter
+         0     0% 93.16%      0.10s  1.90%  runtime.(*gcControllerState).enlistWorker
+         0     0% 93.16%      0.07s  1.33%  runtime.(*mcache).nextFree
+         0     0% 93.16%      0.07s  1.33%  runtime.(*mcache).refill
+         0     0% 93.16%      0.06s  1.14%  runtime.(*mcentral).cacheSpan
+         0     0% 93.16%      0.06s  1.14%  runtime.(*mcentral).grow
+         0     0% 93.16%      0.04s  0.76%  runtime.(*mheap).alloc
+         0     0% 93.16%      0.31s  5.89%  runtime.(*mheap).alloc.func1
+         0     0% 93.16%      0.31s  5.89%  runtime.(*mheap).allocSpan
+         0     0% 93.16%      0.08s  1.52%  runtime.concatstring3
+         0     0% 93.16%      0.37s  7.03%  runtime.gcBgMarkWorker
+         0     0% 93.16%      0.47s  8.94%  runtime.gcBgMarkWorker.func2
+         0     0% 93.16%      0.47s  8.94%  runtime.gcDrain
+         0     0% 93.16%      0.10s  1.90%  runtime.gcDrainMarkWorkerDedicated (inline)
+         0     0% 93.16%      0.37s  7.03%  runtime.gcDrainMarkWorkerIdle (inline)
+         0     0% 93.16%      0.03s  0.57%  runtime.gcStart.func4
+         0     0% 93.16%      0.05s  0.95%  runtime.gopreempt_m (inline)
+         0     0% 93.16%      0.05s  0.95%  runtime.goschedImpl
+         0     0% 93.16%      0.04s  0.76%  runtime.lock (inline)
+         0     0% 93.16%      0.04s  0.76%  runtime.lock2
+         0     0% 93.16%      0.04s  0.76%  runtime.lockWithRank (inline)
+         0     0% 93.16%      0.34s  6.46%  runtime.mPark (inline)
+         0     0% 93.16%      0.40s  7.60%  runtime.mcall
+         0     0% 93.16%      0.05s  0.95%  runtime.morestack
+         0     0% 93.16%      0.03s  0.57%  runtime.netpoll
+         0     0% 93.16%      0.05s  0.95%  runtime.newstack
+         0     0% 93.16%      0.34s  6.46%  runtime.notesleep
+         0     0% 93.16%      0.10s  1.90%  runtime.notewakeup
+         0     0% 93.16%      0.04s  0.76%  runtime.osyield (inline)
+         0     0% 93.16%      0.40s  7.60%  runtime.park_m
+         0     0% 93.16%      0.04s  0.76%  runtime.preemptM
+         0     0% 93.16%      0.04s  0.76%  runtime.preemptone
+         0     0% 93.16%      0.04s  0.76%  runtime.rawstring (inline)
+         0     0% 93.16%      0.28s  5.32%  runtime.scanSpan
+         0     0% 93.16%      0.40s  7.60%  runtime.schedule
+         0     0% 93.16%      0.34s  6.46%  runtime.semasleep
+         0     0% 93.16%      0.10s  1.90%  runtime.semawakeup
+         0     0% 93.16%      0.04s  0.76%  runtime.signalM (inline)
+         0     0% 93.16%      0.03s  0.57%  runtime.startTheWorldWithSema
+         0     0% 93.16%      0.10s  1.90%  runtime.startm
+         0     0% 93.16%      0.34s  6.46%  runtime.stopm
+         0     0% 93.16%      0.27s  5.13%  runtime.sysUsed (inline)
+         0     0% 93.16%      0.27s  5.13%  runtime.sysUsedOS (inline)
+         0     0% 93.16%      0.83s 15.78%  runtime.systemstack
+         0     0% 93.16%      0.10s  1.90%  runtime.wakep
+         0     0% 93.16%      3.99s 75.86%  testing.(*B).launch
+         0     0% 93.16%      0.03s  0.57%  testing.(*B).run1.func1
+         0     0% 93.16%      4.02s 76.43%  testing.(*B).runN

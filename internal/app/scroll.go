@@ -20,14 +20,18 @@ func (a *App) renderTextViewport(content string, topSections int) string {
 	height := max(4, a.height-topSections-1)
 	a.textViewport.Width = width
 	a.textViewport.Height = height
-	a.textViewport.SetContent(content)
-	if a.textViewport.PastBottom() {
-		a.textViewport.GotoBottom()
+	if content != a.textViewportContent {
+		a.textViewport.SetContent(content)
+		a.textViewportContent = content
+		a.textViewportLineCount = 1
+		if content != "" {
+			a.textViewportLineCount = len(strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n"))
+		}
+		if a.textViewport.PastBottom() {
+			a.textViewport.GotoBottom()
+		}
 	}
-	lines := 1
-	if content != "" {
-		lines = len(strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n"))
-	}
+	lines := max(1, a.textViewportLineCount)
 	visible := min(lines, a.textViewport.Height)
 	if lines > a.textViewport.YOffset {
 		visible = min(lines-a.textViewport.YOffset, a.textViewport.Height)

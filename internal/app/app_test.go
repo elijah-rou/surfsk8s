@@ -34,6 +34,23 @@ func TestContextEnterStartsAsyncConnect(t *testing.T) {
 	}
 }
 
+func TestContextToggleKeepsCursorPosition(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.contexts = []cluster.ContextInfo{{Name: "dev", Current: true}, {Name: "stage"}, {Name: "prod"}}
+	app.selectedContext = map[string]bool{"dev": true}
+	app.refreshContextRows()
+	app.navTable.MoveDown(2)
+
+	app.updateContextKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	if got, want := app.navTable.SelectedIndex(), 2; got != want {
+		t.Fatalf("selected index = %d, want %d", got, want)
+	}
+	if !app.selectedContext["prod"] {
+		t.Fatalf("expected prod selected")
+	}
+}
+
 func TestCommandRunMutatesOriginalApp(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})

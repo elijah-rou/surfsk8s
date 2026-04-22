@@ -1,0 +1,111 @@
+File: app.test
+Type: cpu
+Time: 2026-04-22 15:24:38 EDT
+Duration: 3.94s, Total samples = 6.05s (153.44%)
+Showing nodes accounting for 5.49s, 90.74% of 6.05s total
+Dropped 101 nodes (cum <= 0.03s)
+      flat  flat%   sum%        cum   cum%
+     2.05s 33.88% 33.88%      2.05s 33.88%  runtime.kevent
+     0.62s 10.25% 44.13%      0.62s 10.25%  runtime.usleep
+     0.60s  9.92% 54.05%      0.60s  9.92%  runtime.pthread_cond_wait
+     0.23s  3.80% 57.85%      0.23s  3.80%  runtime.memclrNoHeapPointers
+     0.20s  3.31% 61.16%      0.20s  3.31%  runtime.pthread_kill
+     0.18s  2.98% 64.13%      0.26s  4.30%  runtime.concatstrings
+     0.17s  2.81% 66.94%      0.17s  2.81%  runtime.pthread_cond_signal
+     0.14s  2.31% 69.26%      0.14s  2.31%  runtime.memmove
+     0.13s  2.15% 71.40%      0.85s 14.05%  github.com/elijahrou/surfsk8s/internal/cluster.podResourceRequestsAndLimits
+     0.13s  2.15% 73.55%      0.17s  2.81%  runtime.tryDeferToSpanScan
+     0.11s  1.82% 75.37%      0.11s  1.82%  runtime.madvise
+     0.07s  1.16% 76.53%      0.08s  1.32%  runtime.(*mspan).writeHeapBitsSmall
+     0.07s  1.16% 77.69%      0.24s  3.97%  runtime.scanObject
+     0.07s  1.16% 78.84%      0.14s  2.31%  runtime.scanObjectsSmall
+     0.06s  0.99% 79.83%      0.08s  1.32%  k8s.io/apimachinery/pkg/api/resource.(*Quantity).ScaledValue
+     0.06s  0.99% 80.83%      0.09s  1.49%  runtime.mapaccess1_faststr
+     0.05s  0.83% 81.65%      1.49s 24.63%  github.com/elijahrou/surfsk8s/internal/cluster.(*Manager).ListPodResourceUsages.func1
+     0.05s  0.83% 82.48%      0.06s  0.99%  runtime.(*gcControllerState).heapGoalInternal
+     0.04s  0.66% 83.14%      0.04s  0.66%  internal/runtime/atomic.(*UnsafePointer).Load (inline)
+     0.04s  0.66% 83.80%      0.33s  5.45%  runtime.mapassign
+     0.04s  0.66% 84.46%      0.04s  0.66%  runtime.typePointers.nextFast (inline)
+     0.03s   0.5% 84.96%      1.68s 27.77%  github.com/elijahrou/surfsk8s/internal/state.(*Store).ForEachPodObject
+     0.03s   0.5% 85.45%      0.29s  4.79%  github.com/elijahrou/surfsk8s/internal/state.ResourceKey.String (inline)
+     0.03s   0.5% 85.95%      0.10s  1.65%  internal/runtime/maps.(*table).split
+     0.03s   0.5% 86.45%      0.05s  0.83%  runtime.stealWork
+     0.02s  0.33% 86.78%      0.07s  1.16%  internal/runtime/maps.(*table).uncheckedPutSlot
+     0.02s  0.33% 87.11%      0.04s  0.66%  runtime.findObject
+     0.02s  0.33% 87.44%      0.45s  7.44%  runtime.growslice
+     0.02s  0.33% 87.77%      0.57s  9.42%  runtime.mallocgc
+     0.02s  0.33% 88.10%      0.05s  0.83%  runtime.mapIterStart
+     0.02s  0.33% 88.43%      0.05s  0.83%  runtime.typedmemmove
+     0.01s  0.17% 88.60%      0.10s  1.65%  github.com/elijahrou/surfsk8s/internal/cluster.containerGPUAllocation
+     0.01s  0.17% 88.76%      0.12s  1.98%  internal/runtime/maps.newobject
+     0.01s  0.17% 88.93%      0.07s  1.16%  runtime.(*mcache).nextFree
+     0.01s  0.17% 89.09%      0.06s  0.99%  runtime.(*mcentral).cacheSpan
+     0.01s  0.17% 89.26%      0.17s  2.81%  runtime.(*mheap).alloc.func1
+     0.01s  0.17% 89.42%      0.04s  0.66%  runtime.bulkBarrierPreWrite
+     0.01s  0.17% 89.59%      1.05s 17.36%  runtime.findRunnable
+     0.01s  0.17% 89.75%      0.60s  9.92%  runtime.gcDrain
+     0.01s  0.17% 89.92%      0.07s  1.16%  runtime.gcTrigger.test
+     0.01s  0.17% 90.08%      0.09s  1.49%  runtime.heapSetTypeNoHeader (inline)
+     0.01s  0.17% 90.25%      0.64s 10.58%  runtime.lock2
+     0.01s  0.17% 90.41%      0.04s  0.66%  runtime.makemap
+     0.01s  0.17% 90.58%      0.50s  8.26%  runtime.mallocgcSmallScanNoHeader
+     0.01s  0.17% 90.74%      0.09s  1.49%  runtime.typedslicecopy
+         0     0% 90.74%      1.70s 28.10%  github.com/elijahrou/surfsk8s/internal/app.BenchmarkListPodResourceUsages5000
+         0     0% 90.74%      1.68s 27.77%  github.com/elijahrou/surfsk8s/internal/cluster.(*Manager).ListPodResourceUsages
+         0     0% 90.74%      0.05s  0.83%  github.com/elijahrou/surfsk8s/internal/cluster.quantityByteValue (inline)
+         0     0% 90.74%      0.13s  2.15%  internal/runtime/maps.(*table).rehash
+         0     0% 90.74%      0.05s  0.83%  internal/runtime/maps.typedmemmove
+         0     0% 90.74%      0.05s  0.83%  k8s.io/apimachinery/pkg/api/resource.(*Quantity).Value (inline)
+         0     0% 90.74%      0.19s  3.14%  runtime.(*gcControllerState).enlistWorker
+         0     0% 90.74%      0.06s  0.99%  runtime.(*gcControllerState).trigger
+         0     0% 90.74%      0.06s  0.99%  runtime.(*mcache).refill
+         0     0% 90.74%      0.04s  0.66%  runtime.(*mcentral).grow
+         0     0% 90.74%      0.04s  0.66%  runtime.(*mheap).alloc
+         0     0% 90.74%      0.16s  2.64%  runtime.(*mheap).allocSpan
+         0     0% 90.74%      0.10s  1.65%  runtime.(*sweepLocked).sweep.(*mheap).freeSpan.func2
+         0     0% 90.74%      0.26s  4.30%  runtime.concatstring5
+         0     0% 90.74%      0.10s  1.65%  runtime.forEachPInternal
+         0     0% 90.74%      0.42s  6.94%  runtime.gcBgMarkWorker
+         0     0% 90.74%      0.60s  9.92%  runtime.gcBgMarkWorker.func2
+         0     0% 90.74%      0.24s  3.97%  runtime.gcDrainMarkWorkerDedicated (inline)
+         0     0% 90.74%      0.36s  5.95%  runtime.gcDrainMarkWorkerIdle (inline)
+         0     0% 90.74%      0.10s  1.65%  runtime.gcMarkDone.forEachP.func5
+         0     0% 90.74%      2.05s 33.88%  runtime.gcStart.func4
+         0     0% 90.74%      0.21s  3.47%  runtime.gopreempt_m (inline)
+         0     0% 90.74%      0.22s  3.64%  runtime.goschedImpl
+         0     0% 90.74%      0.64s 10.58%  runtime.lock (partial-inline)
+         0     0% 90.74%      0.64s 10.58%  runtime.lockWithRank (inline)
+         0     0% 90.74%      0.60s  9.92%  runtime.mPark (inline)
+         0     0% 90.74%      0.04s  0.66%  runtime.mProf_Malloc
+         0     0% 90.74%      1.11s 18.35%  runtime.mcall
+         0     0% 90.74%      0.21s  3.47%  runtime.morestack
+         0     0% 90.74%      2.05s 33.88%  runtime.netpoll
+         0     0% 90.74%      0.13s  2.15%  runtime.newobject (partial-inline)
+         0     0% 90.74%      0.21s  3.47%  runtime.newstack
+         0     0% 90.74%      0.60s  9.92%  runtime.notesleep
+         0     0% 90.74%      0.17s  2.81%  runtime.notewakeup
+         0     0% 90.74%      0.62s 10.25%  runtime.osyield (inline)
+         0     0% 90.74%      1.10s 18.18%  runtime.park_m
+         0     0% 90.74%      0.20s  3.31%  runtime.preemptM
+         0     0% 90.74%      0.10s  1.65%  runtime.preemptall
+         0     0% 90.74%      0.20s  3.31%  runtime.preemptone
+         0     0% 90.74%      0.04s  0.66%  runtime.profilealloc
+         0     0% 90.74%      0.05s  0.83%  runtime.resetspinning
+         0     0% 90.74%      0.16s  2.64%  runtime.scanSpan
+         0     0% 90.74%      1.11s 18.35%  runtime.schedule
+         0     0% 90.74%      0.61s 10.08%  runtime.semasleep
+         0     0% 90.74%      0.17s  2.81%  runtime.semawakeup
+         0     0% 90.74%      0.20s  3.31%  runtime.signalM (inline)
+         0     0% 90.74%      2.06s 34.05%  runtime.startTheWorldWithSema
+         0     0% 90.74%      0.16s  2.64%  runtime.startm
+         0     0% 90.74%      0.04s  0.66%  runtime.stkbucket
+         0     0% 90.74%      0.68s 11.24%  runtime.stopm
+         0     0% 90.74%      0.11s  1.82%  runtime.sysUsed (inline)
+         0     0% 90.74%      0.11s  1.82%  runtime.sysUsedOS (inline)
+         0     0% 90.74%      3.10s 51.24%  runtime.systemstack
+         0     0% 90.74%      0.16s  2.64%  runtime.wakep
+         0     0% 90.74%      0.04s  0.66%  runtime.wbBufFlush
+         0     0% 90.74%      0.04s  0.66%  runtime.wbBufFlush.func1
+         0     0% 90.74%      0.04s  0.66%  runtime.wbBufFlush1
+         0     0% 90.74%      1.69s 27.93%  testing.(*B).launch
+         0     0% 90.74%      1.70s 28.10%  testing.(*B).runN

@@ -15,7 +15,10 @@ import (
 	"github.com/elijahrou/surfsk8s/internal/ui/theme"
 )
 
-const resourceUsageRefreshInterval = 15 * time.Second
+const (
+	resourceUsageRefreshInterval = 15 * time.Second
+	podUsageInitialDelay         = time.Second
+)
 
 var (
 	usageLoadingCellText     = theme.Muted.Render("loading…")
@@ -103,8 +106,11 @@ func (a *App) maybeRefreshPodUsageListCmd(now time.Time) tea.Cmd {
 		return nil
 	}
 	scopeKey := a.podUsageScopeKey()
-	storeVersion := a.store.Version()
+	storeVersion := a.store.PodVersion()
 	if a.podUsageListScopeKey == scopeKey && a.podUsageListVersion == storeVersion && !a.podUsageListFetchedAt.IsZero() && now.Sub(a.podUsageListFetchedAt) < resourceUsageRefreshInterval {
+		return nil
+	}
+	if a.podUsageListFetchedAt.IsZero() && !a.lastTick.IsZero() && now.Sub(a.lastTick) < podUsageInitialDelay {
 		return nil
 	}
 	a.podUsageListLoading = true
@@ -120,7 +126,7 @@ func (a *App) maybeRefreshNodeUsageListCmd(now time.Time) tea.Cmd {
 		return nil
 	}
 	scopeKey := a.nodeUsageScopeKey()
-	storeVersion := a.store.Version()
+	storeVersion := a.store.NodeVersion()
 	if a.nodeUsageListScopeKey == scopeKey && a.nodeUsageListVersion == storeVersion && !a.nodeUsageListFetchedAt.IsZero() && now.Sub(a.nodeUsageListFetchedAt) < resourceUsageRefreshInterval {
 		return nil
 	}
@@ -321,16 +327,39 @@ func nodeEphemeralCellFromUsage(usage cluster.NodeResourceUsage, ready bool) str
 	return formatNodeTableEphemeral(usage)
 }
 
+func (a *App) podUsageCells(row state.PodRow) podUsageTableCells {
+	if a.podUsageSnapshotReady() {
+		if cached, ok := a.podUsageCellByKey[row.Key.String()]; ok {
+			return cached
+		}
+	}
+	usage := a.podUsageForRow(row)
+	ready := a.podUsageSnapshotReady()
+	cells := podUsageTableCells{
+		CPU:       podCPUCellFromUsage(usage, ready),
+		Memory:    podMemoryCellFromUsage(usage, ready),
+		Ephemeral: podEphemeralCellFromUsage(usage, ready),
+		GPU:       formatPodTableGPU(usage),
+	}
+	if ready {
+		if a.podUsageCellByKey == nil {
+			a.podUsageCellByKey = make(map[string]podUsageTableCells, 64)
+		}
+		a.podUsageCellByKey[row.Key.String()] = cells
+	}
+	return cells
+}
+
 func (a *App) podCPUCell(row state.PodRow) string {
-	return podCPUCellFromUsage(a.podUsageForRow(row), a.podUsageSnapshotReady())
+	return a.podUsageCells(row).CPU
 }
 
 func (a *App) podMemoryCell(row state.PodRow) string {
-	return podMemoryCellFromUsage(a.podUsageForRow(row), a.podUsageSnapshotReady())
+	return a.podUsageCells(row).Memory
 }
 
 func (a *App) podEphemeralCell(row state.PodRow) string {
-	return podEphemeralCellFromUsage(a.podUsageForRow(row), a.podUsageSnapshotReady())
+	return a.podUsageCells(row).Ephemeral
 }
 
 func (a *App) nodeCPUCell(row state.NodeRow) string {
@@ -349,32 +378,16 @@ func (a *App) fillPodCells(dst []string, row state.PodRow) {
 	if len(dst) < 12 {
 		panic("app.fillPodCells: short dst")
 	}
-	ready := a.podUsageSnapshotReady()
+	usageCells := a.podUsageCells(row)
 	dst[0] = row.Cluster
 	dst[1] = row.Namespace
 	dst[2] = row.Name
 	dst[3] = row.Ready
 	dst[4] = row.Status
-	if ready {
-		if cached, ok := a.podUsageCellByKey[row.Key.String()]; ok {
-			dst[5] = cached.CPU
-			dst[6] = cached.Memory
-			dst[7] = cached.Ephemeral
-			dst[8] = cached.GPU
-		} else {
-			usage := a.podUsageForRow(row)
-			dst[5] = podCPUCellFromUsage(usage, true)
-			dst[6] = podMemoryCellFromUsage(usage, true)
-			dst[7] = podEphemeralCellFromUsage(usage, true)
-			dst[8] = formatPodTableGPU(usage)
-		}
-	} else {
-		usage := a.podUsageForRow(row)
-		dst[5] = podCPUCellFromUsage(usage, false)
-		dst[6] = podMemoryCellFromUsage(usage, false)
-		dst[7] = podEphemeralCellFromUsage(usage, false)
-		dst[8] = formatPodTableGPU(usage)
-	}
+	dst[5] = usageCells.CPU
+	dst[6] = usageCells.Memory
+	dst[7] = usageCells.Ephemeral
+	dst[8] = usageCells.GPU
 	dst[9] = strconv.Itoa(row.Restarts)
 	dst[10] = row.Age
 	dst[11] = row.Node
@@ -446,7 +459,7 @@ func (a *App) podCellStringAt(row state.PodRow, columnIndex int, now time.Time) 
 	case 7:
 		return a.podEphemeralCell(row)
 	case 8:
-		return formatPodTableGPU(a.podUsageForRow(row))
+		return a.podUsageCells(row).GPU
 	case 9:
 		return strconv.Itoa(row.Restarts)
 	case 10:

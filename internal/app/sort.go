@@ -222,33 +222,30 @@ func (a *App) compareNodeRows(left state.NodeRow, right state.NodeRow, sorts []t
 
 func (a *App) buildSortedGenericResources() (int, int) {
 	a.sortedGenericRows = a.sortedGenericRows[:0]
-	query := strings.TrimSpace(a.resourceQuery2)
 	now := time.Now()
-	for _, row := range a.genericRows {
-		if !a.contextMatches(row.Cluster) {
-			continue
-		}
-		if a.activeResource.Namespaced && a.namespace != "" && row.Namespace != a.namespace {
-			continue
-		}
-		if query != "" {
-			if len(a.activeResource.PrinterColumns) != 0 {
-				row.PrinterValues = a.genericPrinterValues(row)
-			}
-			if !matchesSearch(row.SearchText(), query) {
+	columns := a.currentResourceColumns()
+	sorts := a.enabledTableSorts()
+	if len(sorts) == 0 {
+		for _, row := range a.genericRows {
+			if !a.genericRowMatchesScopeWithColumns(row, now, columns) {
 				continue
 			}
+			a.sortedGenericRows = append(a.sortedGenericRows, row)
 		}
-		if !a.matchesGenericColumnFilters(row, now) {
+		a.rebuildGenericVisibleKeySet()
+		return len(a.genericRowsByKey), len(a.sortedGenericRows)
+	}
+	for _, row := range a.genericRowsByKey {
+		if !a.genericRowMatchesScopeWithColumns(row, now, columns) {
 			continue
 		}
 		a.sortedGenericRows = append(a.sortedGenericRows, row)
 	}
-	sorts := a.enabledTableSorts()
 	sort.SliceStable(a.sortedGenericRows, func(i int, j int) bool {
 		return a.compareGenericRows(a.sortedGenericRows[i], a.sortedGenericRows[j], sorts) < 0
 	})
-	return len(a.genericRows), len(a.sortedGenericRows)
+	a.rebuildGenericVisibleKeySet()
+	return len(a.genericRowsByKey), len(a.sortedGenericRows)
 }
 
 func compareDeploymentRowStack(left state.DeploymentRow, right state.DeploymentRow, sorts []tableSortCriterion) int {
@@ -355,6 +352,17 @@ func (a *App) compareNodeRowCriterion(left state.NodeRow, right state.NodeRow, c
 	return compareColumnValue(title, leftValue, rightValue, left.CreatedAt(), right.CreatedAt())
 }
 
+func cmpFoldedString(left string, right string) int {
+	switch {
+	case left < right:
+		return -1
+	case left > right:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func (a *App) compareGenericRows(left cluster.GenericResourceRow, right cluster.GenericResourceRow, sorts []tableSortCriterion) int {
 	for _, criterion := range sorts {
 		cmp := a.compareGenericRowCriterion(left, right, criterion)
@@ -366,14 +374,14 @@ func (a *App) compareGenericRows(left cluster.GenericResourceRow, right cluster.
 		}
 	}
 	if a.activeResource.Namespaced {
-		if cmp := cmpStringCI(left.Namespace, right.Namespace); cmp != 0 {
+		if cmp := cmpFoldedString(left.NamespaceFolded(), right.NamespaceFolded()); cmp != 0 {
 			return cmp
 		}
 	}
-	if cmp := cmpStringCI(left.Name, right.Name); cmp != 0 {
+	if cmp := cmpFoldedString(left.NameFolded(), right.NameFolded()); cmp != 0 {
 		return cmp
 	}
-	return cmpStringCI(left.Cluster, right.Cluster)
+	return cmpFoldedString(left.ClusterFolded(), right.ClusterFolded())
 }
 
 func (a *App) compareGenericRowCriterion(left cluster.GenericResourceRow, right cluster.GenericResourceRow, criterion tableSortCriterion) int {
@@ -382,6 +390,14 @@ func (a *App) compareGenericRowCriterion(left cluster.GenericResourceRow, right 
 		return 0
 	}
 	title := columns[criterion.ColumnIndex].Title
+	switch normalizeSortTitle(title) {
+	case "CONTEXT":
+		return cmpFoldedString(left.ClusterFolded(), right.ClusterFolded())
+	case "NAMESPACE":
+		return cmpFoldedString(left.NamespaceFolded(), right.NamespaceFolded())
+	case "NAME":
+		return cmpFoldedString(left.NameFolded(), right.NameFolded())
+	}
 	leftValue := a.genericCellValueAt(left, criterion.ColumnIndex)
 	rightValue := a.genericCellValueAt(right, criterion.ColumnIndex)
 	return compareColumnValue(title, leftValue, rightValue, left.CreatedAt(), right.CreatedAt())

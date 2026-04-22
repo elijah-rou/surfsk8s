@@ -1,0 +1,24 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/elijahrou/surfsk8s/internal/app
+cpu: Apple M1
+BenchmarkTickDeployments8ClustersUnderPodChurn-8       	    5494	    219410 ns/op	    3919 B/op	      37 allocs/op
+BenchmarkTickDeployments8ClustersUnderPodChurn-8       	    5484	    219458 ns/op	    3920 B/op	      37 allocs/op
+BenchmarkTickDeployments8ClustersUnderPodChurn-8       	    5454	    219422 ns/op	    3919 B/op	      37 allocs/op
+BenchmarkTickServices8ClustersUnderPodChurn-8          	    5395	    220682 ns/op	    3983 B/op	      39 allocs/op
+BenchmarkTickServices8ClustersUnderPodChurn-8          	    5383	    221223 ns/op	    3983 B/op	      39 allocs/op
+BenchmarkTickServices8ClustersUnderPodChurn-8          	    5394	    221159 ns/op	    3983 B/op	      39 allocs/op
+BenchmarkTickNodes8ClustersUnderPodChurn-8             	   43936	     27141 ns/op	    2688 B/op	      35 allocs/op
+BenchmarkTickNodes8ClustersUnderPodChurn-8             	   44154	     27120 ns/op	    2688 B/op	      35 allocs/op
+BenchmarkTickNodes8ClustersUnderPodChurn-8             	   44251	     27288 ns/op	    2688 B/op	      35 allocs/op
+BenchmarkTickPodDetails8ClustersOtherPodChurn-8        	  797266	      1324 ns/op	    2343 B/op	      15 allocs/op
+BenchmarkTickPodDetails8ClustersOtherPodChurn-8        	  785978	      1333 ns/op	    2343 B/op	      15 allocs/op
+BenchmarkTickPodDetails8ClustersOtherPodChurn-8        	  830148	      1329 ns/op	    2343 B/op	      15 allocs/op
+BenchmarkTickDeploymentDetails8ClustersPodChurn-8      	  632898	      1765 ns/op	    3720 B/op	      19 allocs/op
+BenchmarkTickDeploymentDetails8ClustersPodChurn-8      	  637478	      1761 ns/op	    3720 B/op	      19 allocs/op
+BenchmarkTickDeploymentDetails8ClustersPodChurn-8      	  637279	      1743 ns/op	    3720 B/op	      19 allocs/op
+BenchmarkShouldRefreshDeployments8ClustersPodChurn-8   	 1222472	       993.7 ns/op	    2063 B/op	       9 allocs/op
+BenchmarkShouldRefreshDeployments8ClustersPodChurn-8   	 1205198	       992.1 ns/op	    2063 B/op	       9 allocs/op
+BenchmarkShouldRefreshDeployments8ClustersPodChurn-8   	 1200476	      1001 ns/op	    2063 B/op	       9 allocs/op
+PASS
+ok  	github.com/elijahrou/surfsk8s/internal/app	27.980s

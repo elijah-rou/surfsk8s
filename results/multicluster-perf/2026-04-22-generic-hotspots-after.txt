@@ -1,0 +1,27 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/elijahrou/surfsk8s/internal/app
+cpu: Apple M1
+BenchmarkBuildSortedGenericResources8ClustersNoFilter-8       	     856	   1369890 ns/op	 1385776 B/op	   16066 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersNoFilter-8       	     859	   1371778 ns/op	 1385776 B/op	   16066 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersNoFilter-8       	     848	   1365445 ns/op	 1385776 B/op	   16066 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersFuzzyQuery-8     	     166	   6283982 ns/op	 5791631 B/op	   36050 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersFuzzyQuery-8     	     170	   6217979 ns/op	 5787876 B/op	   35955 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersFuzzyQuery-8     	     169	   6251955 ns/op	 5788796 B/op	   35978 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersColumnFilter-8   	      84	  13753585 ns/op	 5590161 B/op	   70859 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersColumnFilter-8   	      82	  13738653 ns/op	 5595384 B/op	   71027 allocs/op
+BenchmarkBuildSortedGenericResources8ClustersColumnFilter-8   	      82	  13731476 ns/op	 5595403 B/op	   71027 allocs/op
+BenchmarkGenericRowMatchesScope8ClustersColumnFilter-8        	 1496826	       799.5 ns/op	     336 B/op	       4 allocs/op
+BenchmarkGenericRowMatchesScope8ClustersColumnFilter-8        	 1494838	       803.7 ns/op	     336 B/op	       4 allocs/op
+BenchmarkGenericRowMatchesScope8ClustersColumnFilter-8        	 1501161	       800.4 ns/op	     336 B/op	       4 allocs/op
+BenchmarkGenericPrinterValuesWide-8                           	  829480	      1381 ns/op	    1024 B/op	      38 allocs/op
+BenchmarkGenericPrinterValuesWide-8                           	  850068	      1381 ns/op	    1024 B/op	      38 allocs/op
+BenchmarkGenericPrinterValuesWide-8                           	  840381	      1382 ns/op	    1024 B/op	      38 allocs/op
+BenchmarkGenericTableRowsWindow200-8                          	   26361	     44857 ns/op	   51402 B/op	     801 allocs/op
+BenchmarkGenericTableRowsWindow200-8                          	   26602	     44712 ns/op	   51402 B/op	     801 allocs/op
+BenchmarkGenericTableRowsWindow200-8                          	   26446	     45152 ns/op	   51402 B/op	     801 allocs/op
+BenchmarkViewGenericResourceList8ClustersWarm-8               	   10000	    111224 ns/op	   30949 B/op	     645 allocs/op
+BenchmarkViewGenericResourceList8ClustersWarm-8               	   10000	    110930 ns/op	   30949 B/op	     645 allocs/op
+BenchmarkViewGenericResourceList8ClustersWarm-8               	   10000	    110961 ns/op	   30949 B/op	     645 allocs/op
+PASS
+ok  	github.com/elijahrou/surfsk8s/internal/app	33.106s

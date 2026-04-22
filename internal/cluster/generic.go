@@ -17,6 +17,10 @@ type GenericResourceKey struct {
 	Name      string
 }
 
+func (k GenericResourceKey) String() string {
+	return k.Cluster + "\x00" + k.Namespace + "\x00" + k.Name
+}
+
 type GenericResourceRow struct {
 	Key             GenericResourceKey
 	Cluster         string
@@ -29,7 +33,10 @@ type GenericResourceRow struct {
 	Age             string
 	ResourceVersion string
 
-	createdAt time.Time
+	createdAt       time.Time
+	clusterFolded   string
+	namespaceFolded string
+	nameFolded      string
 }
 
 func (r GenericResourceRow) WithAge(now time.Time) GenericResourceRow {
@@ -39,6 +46,27 @@ func (r GenericResourceRow) WithAge(now time.Time) GenericResourceRow {
 
 func (r GenericResourceRow) SearchText() string {
 	return buildGenericSearchText(r.Cluster, r.Namespace, r.Name, r.Ready, r.Status, r.PrinterValues)
+}
+
+func (r GenericResourceRow) ClusterFolded() string {
+	if r.clusterFolded != "" || r.Cluster == "" {
+		return r.clusterFolded
+	}
+	return strings.ToLower(r.Cluster)
+}
+
+func (r GenericResourceRow) NamespaceFolded() string {
+	if r.namespaceFolded != "" || r.Namespace == "" {
+		return r.namespaceFolded
+	}
+	return strings.ToLower(r.Namespace)
+}
+
+func (r GenericResourceRow) NameFolded() string {
+	if r.nameFolded != "" || r.Name == "" {
+		return r.nameFolded
+	}
+	return strings.ToLower(r.Name)
 }
 
 func (r GenericResourceRow) CreatedAt() time.Time {
@@ -86,6 +114,9 @@ func buildGenericResourceRowCompiled(clusterName string, object *unstructured.Un
 		Object:          object,
 		ResourceVersion: object.GetResourceVersion(),
 		createdAt:       object.GetCreationTimestamp().Time,
+		clusterFolded:   strings.ToLower(clusterName),
+		namespaceFolded: strings.ToLower(object.GetNamespace()),
+		nameFolded:      strings.ToLower(object.GetName()),
 	}
 }
 
@@ -141,6 +172,10 @@ func readinessAndStatusFromUnstructured(object *unstructured.Unstructured) (stri
 		}
 	}
 	return "", statusSummaryFromUnstructured(object)
+}
+
+func SortGenericResourceRows(rows []GenericResourceRow) {
+	sortGenericResourceRows(rows)
 }
 
 func buildGenericSearchText(clusterName string, namespace string, name string, ready string, status string, printerValues []string) string {

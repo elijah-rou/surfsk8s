@@ -1,0 +1,21 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/elijahrou/surfsk8s/internal/app
+cpu: Apple M1
+BenchmarkRefreshPods10000CachedUsage-8   	    3777	    273626 ns/op	    3535 B/op	      27 allocs/op
+BenchmarkRefreshPods10000CachedUsage-8   	    3758	    272956 ns/op	    3551 B/op	      27 allocs/op
+BenchmarkRefreshPods10000CachedUsage-8   	    4390	    272618 ns/op	    3105 B/op	      27 allocs/op
+BenchmarkViewPods10000-8                 	    1996	    583106 ns/op	  235272 B/op	    1608 allocs/op
+BenchmarkViewPods10000-8                 	    2409	    491785 ns/op	  234949 B/op	    1608 allocs/op
+BenchmarkViewPods10000-8                 	    2379	    583016 ns/op	  234843 B/op	    1608 allocs/op
+BenchmarkPodsTableView10000-8            	    4992	    241298 ns/op	   63365 B/op	    1066 allocs/op
+BenchmarkPodsTableView10000-8            	    5007	    233565 ns/op	   63365 B/op	    1066 allocs/op
+BenchmarkPodsTableView10000-8            	    5066	    233988 ns/op	   63365 B/op	    1066 allocs/op
+BenchmarkViewPods10000WarmUsage-8        	    2145	    655790 ns/op	  272852 B/op	    1612 allocs/op
+BenchmarkViewPods10000WarmUsage-8        	    2065	    655086 ns/op	  272620 B/op	    1612 allocs/op
+BenchmarkViewPods10000WarmUsage-8        	    1795	    562759 ns/op	  272509 B/op	    1612 allocs/op
+BenchmarkPodsTableView10000WarmUsage-8   	    4106	    266565 ns/op	   63442 B/op	    1065 allocs/op
+BenchmarkPodsTableView10000WarmUsage-8   	    4334	    265929 ns/op	   63441 B/op	    1065 allocs/op
+BenchmarkPodsTableView10000WarmUsage-8   	    4335	    286328 ns/op	   63441 B/op	    1065 allocs/op
+PASS
+ok  	github.com/elijahrou/surfsk8s/internal/app	25.003s

@@ -72,20 +72,22 @@ func (w *genericResourceWatch) lastAccessAt() time.Time {
 	return time.Unix(0, nanos)
 }
 
-func (w *genericResourceWatch) upsertObject(object *unstructured.Unstructured) {
+func (w *genericResourceWatch) upsertObject(object *unstructured.Unstructured) GenericResourceRow {
 	if object == nil {
 		panic("cluster.genericResourceWatch.upsertObject: nil object")
 	}
 	copyObject := object.DeepCopy()
 	key := GenericResourceKey{Cluster: w.clusterName, Namespace: copyObject.GetNamespace(), Name: copyObject.GetName()}
+	row := buildGenericResourceRowCompiled(w.clusterName, copyObject)
 	w.mu.Lock()
 	w.objects[key] = copyObject
-	w.rows[key] = buildGenericResourceRowCompiled(w.clusterName, copyObject)
+	w.rows[key] = row
 	w.sortedDirty = true
 	w.mu.Unlock()
+	return row
 }
 
-func (w *genericResourceWatch) deleteObject(object *unstructured.Unstructured) {
+func (w *genericResourceWatch) deleteObject(object *unstructured.Unstructured) GenericResourceKey {
 	if object == nil {
 		panic("cluster.genericResourceWatch.deleteObject: nil object")
 	}
@@ -95,6 +97,7 @@ func (w *genericResourceWatch) deleteObject(object *unstructured.Unstructured) {
 	delete(w.rows, key)
 	w.sortedDirty = true
 	w.mu.Unlock()
+	return key
 }
 
 func (w *genericResourceWatch) listRows() []GenericResourceRow {
@@ -134,6 +137,16 @@ func (w *genericResourceWatch) forEachRow(visit func(GenericResourceRow) bool) b
 		}
 	}
 	return true
+}
+
+func (w *genericResourceWatch) objectResourceVersion(key GenericResourceKey) (string, bool) {
+	w.mu.RLock()
+	defer w.mu.RUnlock()
+	object, ok := w.objects[key]
+	if !ok || object == nil {
+		return "", false
+	}
+	return object.GetResourceVersion(), true
 }
 
 func (w *genericResourceWatch) details(key GenericResourceKey, now time.Time) (GenericResourceDetails, bool, error) {
@@ -183,31 +196,30 @@ func startGenericResourceWatch(ctx context.Context, manager *Manager, conn *Clus
 			if !ok {
 				return
 			}
-			watch.upsertObject(object)
-			manager.version.Add(1)
+			row := watch.upsertObject(object)
+			manager.recordGenericResourceUpsert(resource.ID, row)
 		},
 		UpdateFunc: func(_, newObj interface{}) {
 			object, ok := genericObjectFromEvent(newObj)
 			if !ok {
 				return
 			}
-			watch.upsertObject(object)
-			manager.version.Add(1)
+			row := watch.upsertObject(object)
+			manager.recordGenericResourceUpsert(resource.ID, row)
 		},
 		DeleteFunc: func(obj interface{}) {
 			object, ok := genericObjectFromEvent(obj)
 			if !ok {
 				return
 			}
-			watch.deleteObject(object)
-			manager.version.Add(1)
+			key := watch.deleteObject(object)
+			manager.recordGenericResourceDelete(resource.ID, key)
 		},
 	})
 	go informer.Run(watchCtx.Done())
 	go func() {
 		if cache.WaitForCacheSync(watchCtx.Done(), informer.HasSynced) {
 			watch.synced.Store(true)
-			manager.version.Add(1)
 		}
 	}()
 	return watch

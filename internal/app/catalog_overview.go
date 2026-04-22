@@ -50,7 +50,10 @@ type catalogOverviewData struct {
 	Restarts   []overviewLine
 }
 
-const catalogOverviewRefreshInterval = 15 * time.Second
+const (
+	catalogOverviewRefreshInterval = 15 * time.Second
+	catalogOverviewTimeout         = 8 * time.Second
+)
 
 func (a *App) maybeRefreshCatalogOverviewCmd(now time.Time) tea.Cmd {
 	if a.screen != screenCatalog {
@@ -67,7 +70,7 @@ func (a *App) maybeRefreshCatalogOverviewCmd(now time.Time) tea.Cmd {
 	}
 	a.catalogOverviewLoading = true
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), catalogOverviewTimeout)
 		defer cancel()
 		return catalogOverviewResultMsg{scopeKey: scopeKey, storeVersion: storeVersion, managerVersion: managerVersion, data: a.buildCatalogOverviewWithContext(ctx, now)}
 	}
@@ -215,6 +218,13 @@ func (a *App) forEachFilteredCatalogRow(ctx context.Context, apiGroup string, re
 func (a *App) catalogResourceKind(apiGroup string, resource string) (cluster.ResourceKind, bool) {
 	id := apiGroup + "/" + resource
 	for _, group := range a.catalog {
+		for _, kind := range group.Resources {
+			if kind.ID == id {
+				return kind, true
+			}
+		}
+	}
+	for _, group := range a.manager.Catalog() {
 		for _, kind := range group.Resources {
 			if kind.ID == id {
 				return kind, true

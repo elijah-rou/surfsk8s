@@ -93,6 +93,7 @@ func TestUsageCellsShowLoadingUntilSnapshotReady(t *testing.T) {
 		t.Fatalf("pod unavailable cell = %q, want n/a", got)
 	}
 	app.podUsageByKey[podRow.Key.String()] = cluster.PodResourceUsage{Key: podRow.Key, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true}
+	app.podUsageCellByKey = nil
 	if got := stripUsageANSI(app.podCPUCell(podRow)); !strings.Contains(got, "120m/") {
 		t.Fatalf("pod ready cell = %q, want rendered usage", got)
 	}

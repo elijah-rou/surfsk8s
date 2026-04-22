@@ -137,3 +137,21 @@ func newTestPod(name string, namespace string, phase corev1.PodPhase, containers
 		},
 	}
 }
+
+func TestStoreKindVersionsAdvanceIndependently(t *testing.T) {
+	store := NewStore()
+	now := time.Date(2026, 4, 19, 12, 0, 0, 0, time.UTC)
+	store.UpsertPod("dev", newTestPod("frontend", "web", corev1.PodRunning, 1, 1, "node-a", now.Add(-time.Minute), "1"))
+	if got, want := store.PodVersion(), uint64(1); got != want {
+		t.Fatalf("podVersion = %d, want %d", got, want)
+	}
+	if got, want := store.DeploymentVersion(), uint64(0); got != want {
+		t.Fatalf("deploymentVersion = %d, want %d", got, want)
+	}
+	if got, want := store.ServiceVersion(), uint64(0); got != want {
+		t.Fatalf("serviceVersion = %d, want %d", got, want)
+	}
+	if got, want := store.NodeVersion(), uint64(0); got != want {
+		t.Fatalf("nodeVersion = %d, want %d", got, want)
+	}
+}

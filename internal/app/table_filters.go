@@ -328,9 +328,11 @@ func (a *App) updateTableFilterValuePrompt(msg tea.Msg) tea.Cmd {
 	return a.filter.Update(msg)
 }
 
-func matchesStructuredFilter(candidate string, query string) bool {
-	candidate = strings.TrimSpace(strings.ToLower(candidate))
-	query = strings.TrimSpace(strings.ToLower(query))
+func normalizeStructuredFilterValue(value string) string {
+	return strings.TrimSpace(strings.ToLower(value))
+}
+
+func matchesStructuredFilterLower(candidate string, query string) bool {
 	if query == "" {
 		return true
 	}
@@ -338,7 +340,7 @@ func matchesStructuredFilter(candidate string, query string) bool {
 		return candidate != strings.TrimSpace(strings.TrimPrefix(query, "!="))
 	}
 	if strings.HasPrefix(query, "!") {
-		return !matchesStructuredFilter(candidate, strings.TrimSpace(strings.TrimPrefix(query, "!")))
+		return !matchesStructuredFilterLower(candidate, strings.TrimSpace(strings.TrimPrefix(query, "!")))
 	}
 	if strings.HasPrefix(query, "=") {
 		return candidate == strings.TrimSpace(strings.TrimPrefix(query, "="))
@@ -364,6 +366,10 @@ func matchesStructuredFilter(candidate string, query string) bool {
 		return err == nil && matched
 	}
 	return strings.Contains(candidate, query)
+}
+
+func matchesStructuredFilter(candidate string, query string) bool {
+	return matchesStructuredFilterLower(normalizeStructuredFilterValue(candidate), normalizeStructuredFilterValue(query))
 }
 
 func hasAnyEnabledColumnFilters(filters []tableColumnFilter) bool {
@@ -460,12 +466,11 @@ func (a *App) matchesNodeColumnFilters(row state.NodeRow, now time.Time) bool {
 	return matchesColumnFilters(a.nodeCells(row), filters)
 }
 
-func (a *App) matchesGenericColumnFilters(row cluster.GenericResourceRow, now time.Time) bool {
+func (a *App) matchesGenericColumnFiltersWithColumns(row cluster.GenericResourceRow, now time.Time, columns []components.Column) bool {
 	filters := a.currentTableFilters()
 	if !hasAnyEnabledColumnFilters(filters) {
 		return true
 	}
-	columns := a.currentResourceColumns()
 	for _, filter := range filters {
 		if !filter.Enabled {
 			continue
@@ -473,12 +478,16 @@ func (a *App) matchesGenericColumnFilters(row cluster.GenericResourceRow, now ti
 		if filter.ColumnIndex < 0 || filter.ColumnIndex >= len(columns) {
 			return false
 		}
-		value := a.genericCellValueAtNow(row, filter.ColumnIndex, now)
-		if !matchesStructuredFilter(ansi.Strip(value), filter.Query) {
+		value := a.genericFilterValue(row, filter.ColumnIndex, now, columns)
+		if !matchesStructuredFilterLower(value, normalizeStructuredFilterValue(filter.Query)) {
 			return false
 		}
 	}
 	return true
+}
+
+func (a *App) matchesGenericColumnFilters(row cluster.GenericResourceRow, now time.Time) bool {
+	return a.matchesGenericColumnFiltersWithColumns(row, now, a.currentResourceColumns())
 }
 
 func (a *App) genericCells(row cluster.GenericResourceRow, now time.Time) []string {

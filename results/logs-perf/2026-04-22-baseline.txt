@@ -1,0 +1,24 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/elijahrou/surfsk8s/internal/app
+cpu: Apple M1
+BenchmarkRenderLogs10000Plain-8                 	      44	  26887743 ns/op	 5774971 B/op	  170002 allocs/op
+BenchmarkRenderLogs10000Plain-8                 	      44	  26999603 ns/op	 5774850 B/op	  170002 allocs/op
+BenchmarkRenderLogs10000Plain-8                 	      43	  26953937 ns/op	 5774853 B/op	  170002 allocs/op
+BenchmarkRenderLogs10000FuzzyFilter-8           	      37	  31717723 ns/op	11779084 B/op	  200003 allocs/op
+BenchmarkRenderLogs10000FuzzyFilter-8           	      36	  31674939 ns/op	11779084 B/op	  200003 allocs/op
+BenchmarkRenderLogs10000FuzzyFilter-8           	      37	  31671653 ns/op	11779078 B/op	  200003 allocs/op
+BenchmarkRenderLogs5000JSONWrap-8               	       8	 134424349 ns/op	21312138 B/op	  584992 allocs/op
+BenchmarkRenderLogs5000JSONWrap-8               	       9	 132606018 ns/op	21312131 B/op	  584992 allocs/op
+BenchmarkRenderLogs5000JSONWrap-8               	       9	 134235421 ns/op	21312128 B/op	  584992 allocs/op
+BenchmarkViewLogs10000Plain-8                   	      39	  29419783 ns/op	 6376318 B/op	  170215 allocs/op
+BenchmarkViewLogs10000Plain-8                   	      39	  29347668 ns/op	 6374560 B/op	  170215 allocs/op
+BenchmarkViewLogs10000Plain-8                   	      39	  29374708 ns/op	 6376232 B/op	  170215 allocs/op
+BenchmarkHandleLogsResultAppend200Into10000-8   	    1506	    697825 ns/op	 2079638 B/op	     881 allocs/op
+BenchmarkHandleLogsResultAppend200Into10000-8   	    1880	    690252 ns/op	 2079563 B/op	     881 allocs/op
+BenchmarkHandleLogsResultAppend200Into10000-8   	    1945	    673379 ns/op	 2079564 B/op	     881 allocs/op
+BenchmarkLogKeyScrollView10000Plain-8           	      38	  29434073 ns/op	 6374218 B/op	  170216 allocs/op
+BenchmarkLogKeyScrollView10000Plain-8           	      40	  29392311 ns/op	 6375188 B/op	  170216 allocs/op
+BenchmarkLogKeyScrollView10000Plain-8           	      40	  29330908 ns/op	 6375025 B/op	  170216 allocs/op
+PASS
+ok  	github.com/elijahrou/surfsk8s/internal/app	25.654s

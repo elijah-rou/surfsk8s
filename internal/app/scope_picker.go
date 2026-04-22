@@ -168,7 +168,7 @@ func (a *App) availableNamespacesForScope() []string {
 				return true
 			})
 		default:
-			for _, row := range a.genericRows {
+			for _, row := range a.genericRowsByKey {
 				if !a.contextMatches(row.Cluster) {
 					continue
 				}

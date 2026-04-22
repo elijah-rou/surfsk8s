@@ -35,8 +35,7 @@ func searchQueryValue(query string) string {
 	return query
 }
 
-func scoreSearchCandidate(candidate string, query string) (int, bool) {
-	candidate = strings.ToLower(candidate)
+func scoreSearchCandidateLower(candidateLower string, query string) (int, bool) {
 	queryValue := searchQueryValue(query)
 	if queryValue == "" {
 		return 0, true
@@ -44,12 +43,12 @@ func scoreSearchCandidate(candidate string, query string) (int, bool) {
 
 	switch detectSearchMode(query) {
 	case searchModeExact:
-		if strings.Contains(candidate, queryValue) {
+		if strings.Contains(candidateLower, queryValue) {
 			return len(queryValue), true
 		}
 		return 0, false
 	case searchModeWildcard:
-		matched, err := path.Match(queryValue, candidate)
+		matched, err := path.Match(queryValue, candidateLower)
 		if err != nil {
 			return 0, false
 		}
@@ -57,23 +56,27 @@ func scoreSearchCandidate(candidate string, query string) (int, bool) {
 			return len(queryValue), true
 		}
 		if !strings.HasPrefix(queryValue, "*") {
-			matched, err = path.Match("*"+queryValue, candidate)
+			matched, err = path.Match("*"+queryValue, candidateLower)
 			if err == nil && matched {
 				return len(queryValue), true
 			}
 		}
 		if !strings.HasSuffix(queryValue, "*") {
-			matched, err = path.Match(queryValue+"*", candidate)
+			matched, err = path.Match(queryValue+"*", candidateLower)
 			if err == nil && matched {
 				return len(queryValue), true
 			}
 		}
-		matched, err = path.Match("*"+queryValue+"*", candidate)
+		matched, err = path.Match("*"+queryValue+"*", candidateLower)
 		if err == nil && matched {
 			return len(queryValue), true
 		}
 		return 0, false
 	default:
-		return components.FuzzyScore(candidate, queryValue)
+		return components.FuzzyScore(candidateLower, queryValue)
 	}
+}
+
+func scoreSearchCandidate(candidate string, query string) (int, bool) {
+	return scoreSearchCandidateLower(strings.ToLower(candidate), query)
 }

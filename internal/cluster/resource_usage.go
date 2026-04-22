@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -133,44 +134,58 @@ func (m *Manager) ListPodResourceUsages(ctx context.Context, clusterScope string
 	if ctx == nil {
 		panic("cluster.Manager.ListPodResourceUsages: nil context")
 	}
-	now := time.Now()
 	result := make(map[string]PodResourceUsage, 256)
-	podsByCluster := make(map[string][]state.PodDetails, 8)
-	m.store.ForEachPod(func(row state.PodRow) bool {
+	podsByCluster := make(map[string][]state.PodKey, 8)
+	m.store.ForEachPodObject(func(row state.PodRow, pod *corev1.Pod) bool {
 		if clusterScope != "" && row.Cluster != clusterScope {
 			return true
 		}
 		if namespace != "" && row.Namespace != namespace {
 			return true
 		}
-		details, ok := m.store.PodDetailsByKey(row.Key, now)
-		if !ok {
-			return true
-		}
+		rowKey := row.Key.String()
 		usage := PodResourceUsage{Key: row.Key}
-		if details.Pod != nil {
-			usage.CPURequestMilli, usage.CPULimitMilli, usage.MemoryRequestBytes, usage.MemoryLimitBytes, usage.EphemeralRequestBytes, usage.EphemeralLimitBytes, usage.GPUAllocated = podResourceRequestsAndLimits(details.Pod)
+		if pod != nil {
+			usage.CPURequestMilli, usage.CPULimitMilli, usage.MemoryRequestBytes, usage.MemoryLimitBytes, usage.EphemeralRequestBytes, usage.EphemeralLimitBytes, usage.GPUAllocated = podResourceRequestsAndLimits(pod)
 			usage.HasGPU = usage.GPUAllocated > 0
 		}
-		result[row.Key.String()] = usage
-		podsByCluster[row.Cluster] = append(podsByCluster[row.Cluster], details)
+		result[rowKey] = usage
+		podsByCluster[row.Cluster] = append(podsByCluster[row.Cluster], row.Key)
 		return true
 	})
-	for clusterName, pods := range podsByCluster {
+
+	type podMetricsResult struct {
+		cluster string
+		metrics map[string]podMetricSample
+	}
+	results := make(chan podMetricsResult, len(podsByCluster))
+	var wg sync.WaitGroup
+	for clusterName := range podsByCluster {
 		conn := m.connectionForCluster(clusterName)
 		if conn == nil {
 			continue
 		}
-		metrics := fetchPodMetricsList(ctx, conn)
-		for _, details := range pods {
-			usage := result[details.Row.Key.String()]
-			if sample, ok := metrics[details.Row.Key.String()]; ok {
+		wg.Add(1)
+		go func(clusterName string, conn *ClusterConn) {
+			defer wg.Done()
+			results <- podMetricsResult{cluster: clusterName, metrics: fetchPodMetricsList(ctx, conn)}
+		}(clusterName, conn)
+	}
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+	for item := range results {
+		for _, key := range podsByCluster[item.cluster] {
+			rowKey := key.String()
+			usage := result[rowKey]
+			if sample, ok := item.metrics[rowKey]; ok {
 				usage.CPUUsedMilli = sample.CPUUsedMilli
 				usage.MemoryUsedBytes = sample.MemoryUsedBytes
 				usage.HasCPUUsage = true
 				usage.HasMemoryUsage = true
 			}
-			result[details.Row.Key.String()] = usage
+			result[rowKey] = usage
 		}
 	}
 	return result
@@ -180,23 +195,22 @@ func (m *Manager) ListNodeResourceUsages(ctx context.Context, clusterScope strin
 	if ctx == nil {
 		panic("cluster.Manager.ListNodeResourceUsages: nil context")
 	}
+	now := time.Now()
 	result := make(map[string]NodeResourceUsage, 64)
 	nodesByCluster := make(map[string][]state.NodeDetails, 8)
-	now := time.Now()
 	gpuByNode := make(map[string]int64, 64)
-	m.store.ForEachPod(func(row state.PodRow) bool {
+	m.store.ForEachPodObject(func(row state.PodRow, pod *corev1.Pod) bool {
 		if clusterScope != "" && row.Cluster != clusterScope {
 			return true
 		}
-		details, ok := m.store.PodDetailsByKey(row.Key, now)
-		if !ok || details.Pod == nil || details.Pod.Spec.NodeName == "" {
+		if pod == nil || pod.Spec.NodeName == "" {
 			return true
 		}
-		if details.Pod.DeletionTimestamp != nil || details.Pod.Status.Phase == corev1.PodSucceeded || details.Pod.Status.Phase == corev1.PodFailed {
+		if pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			return true
 		}
-		_, _, _, _, _, _, gpu := podResourceRequestsAndLimits(details.Pod)
-		gpuByNode[row.Cluster+"/"+details.Pod.Spec.NodeName] += gpu
+		_, _, _, _, _, _, gpu := podResourceRequestsAndLimits(pod)
+		gpuByNode[row.Cluster+"/"+pod.Spec.NodeName] += gpu
 		return true
 	})
 	m.store.ForEachNode(func(row state.NodeRow) bool {

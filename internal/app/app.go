@@ -124,16 +124,18 @@ type App struct {
 	nodesView       views.NodesView
 	genericView     views.GenericResourcesView
 
-	navTable      components.Table
-	podTable      components.Table
-	resourceTable components.Table
-	filter        components.Filter
-	statusBar     components.StatusBar
-	textViewport  viewport.Model
-	commands      []commandItem
-	screen        screen
-	prevScreen    screen
-	pickerMode    pickerMode
+	navTable              components.Table
+	podTable              components.Table
+	resourceTable         components.Table
+	filter                components.Filter
+	statusBar             components.StatusBar
+	textViewport          viewport.Model
+	textViewportContent   string
+	textViewportLineCount int
+	commands              []commandItem
+	screen                screen
+	prevScreen            screen
+	pickerMode            pickerMode
 
 	width  int
 	height int
@@ -173,6 +175,13 @@ type App struct {
 	logDeployment         state.DeploymentDetails
 	logNode               state.NodeDetails
 	logNodePath           string
+	logEntriesVersion     uint64
+	logRenderedVersion    uint64
+	logRenderedFilter     string
+	logRenderedWidth      int
+	logRenderedWrap       bool
+	logRenderedTimestamps bool
+	logRenderedContent    string
 
 	contexts            []cluster.ContextInfo
 	visibleContexts     []cluster.ContextInfo
@@ -237,6 +246,9 @@ type App struct {
 	totalRows                    int
 
 	genericRows                   []cluster.GenericResourceRow
+	genericRowsByKey              map[string]cluster.GenericResourceRow
+	genericVisibleKeySet          map[string]struct{}
+	genericNamespaceCounts        map[string]int
 	sortedGenericRows             []cluster.GenericResourceRow
 	genericNamespaces             []string
 	genericSort                   listSortState
@@ -244,6 +256,8 @@ type App struct {
 	genericCompiledColumns        []cluster.CompiledPrinterColumn
 	genericCompiledColumnsVersion string
 	genericPrinterValueCache      map[string][]string
+	genericSearchTextCache        map[string]string
+	genericFilterValueCache       map[string]map[int]string
 	genericTableRowBuf            [][]string
 	genericListCacheKey           string
 	lastGenericFetchAt            time.Time
@@ -515,9 +529,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case podUsageSnapshotMsg:
 		a.podUsageListLoading = false
-		if typed.scopeKey == a.podUsageScopeKey() && typed.storeVersion == a.store.Version() {
+		if typed.scopeKey == a.podUsageScopeKey() && typed.storeVersion == a.store.PodVersion() {
 			a.podUsageByKey = typed.usages
-			a.podUsageCellByKey = buildPodUsageTableCellCache(typed.usages)
+			a.podUsageCellByKey = nil
 			a.podUsageListScopeKey = typed.scopeKey
 			a.podUsageListVersion = typed.storeVersion
 			a.podUsageListFetchedAt = time.Now()
@@ -529,7 +543,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case nodeUsageSnapshotMsg:
 		a.nodeUsageListLoading = false
-		if typed.scopeKey == a.nodeUsageScopeKey() && typed.storeVersion == a.store.Version() {
+		if typed.scopeKey == a.nodeUsageScopeKey() && typed.storeVersion == a.store.NodeVersion() {
 			a.nodeUsageByKey = typed.usages
 			a.nodeUsageCellByKey = buildNodeUsageTableCellCache(typed.usages)
 			a.nodeUsageListScopeKey = typed.scopeKey
@@ -951,7 +965,7 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		a.activePodUsage = a.podUsageByKey[details.Row.Key.String()]
 		a.podUsageFetchedAt = time.Time{}
 		a.podUsageLoading = false
-		a.lastDataVersion = a.store.Version()
+		a.lastDataVersion = a.store.PodVersion()
 		a.lastTick = time.Now()
 		a.screen = screenPodDetails
 		a.resetTextViewport()
@@ -1335,7 +1349,6 @@ func (a *App) refreshContextRows() {
 	a.visibleRows = len(matches)
 	a.totalRows = len(a.contexts)
 	a.setNavTable("CONTEXTS", renderContextRows(matches, a.selectedContext, a.pickerMode))
-	a.navTable.MoveTop()
 }
 
 func (a *App) refreshCatalog() {
@@ -1390,7 +1403,7 @@ func (a *App) namespaceListCacheKey(storeVersion uint64, listKind string) string
 func (a *App) refreshPods(now time.Time) {
 	total := 0
 	filtered := 0
-	storeVersion := a.store.Version()
+	storeVersion := a.store.PodVersion()
 	nsKey := a.namespaceListCacheKey(storeVersion, "pods")
 	if nsKey != a.podNamespacesCacheKey {
 		a.namespaces = a.podNamespacesForScope()
@@ -1422,12 +1435,12 @@ func (a *App) refreshPods(now time.Time) {
 }
 
 func (a *App) refreshResourceList(now time.Time) {
-	storeVersion := a.store.Version()
-	a.lastDataVersion = storeVersion
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		storeVersion := a.store.DeploymentVersion()
+		a.lastDataVersion = storeVersion
 		nsKey := a.namespaceListCacheKey(storeVersion, "deployments")
 		if nsKey != a.deploymentNamespacesCacheKey {
 			a.namespaces = a.deploymentNamespacesForScope()
@@ -1449,6 +1462,8 @@ func (a *App) refreshResourceList(now time.Time) {
 			return a.deploymentTableRows(a.deploymentWindow(start, end-start, time.Now()), time.Now())
 		})
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		storeVersion := a.store.ServiceVersion()
+		a.lastDataVersion = storeVersion
 		nsKey := a.namespaceListCacheKey(storeVersion, "services")
 		if nsKey != a.serviceNamespacesCacheKey {
 			a.namespaces = a.serviceNamespacesForScope()
@@ -1470,6 +1485,8 @@ func (a *App) refreshResourceList(now time.Time) {
 			return a.serviceTableRows(a.serviceWindow(start, end-start, time.Now()), time.Now())
 		})
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		storeVersion := a.store.NodeVersion()
+		a.lastDataVersion = storeVersion
 		a.namespaces = []string{""}
 		total := 0
 		filtered := 0
@@ -1503,7 +1520,7 @@ func (a *App) refreshCommands() {
 }
 
 func (a *App) refreshActivePodDetails(now time.Time) {
-	storeVersion := a.store.Version()
+	storeVersion := a.store.PodVersion()
 	if storeVersion == a.lastDataVersion {
 		a.activePod.Row = a.activePod.Row.WithAge(now)
 		a.lastTick = now
@@ -1535,7 +1552,7 @@ func (a *App) refreshActivePodDetails(now time.Time) {
 
 func (a *App) refreshActiveResourceDetails(now time.Time) {
 	if isBuiltInResourceList(a.activeResource) {
-		storeVersion := a.store.Version()
+		storeVersion := a.builtInResourceDataVersion()
 		if storeVersion == a.lastDataVersion {
 			a.refreshCurrentDetailAge(now)
 			a.lastTick = now
@@ -1635,7 +1652,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 		return a.openCurrentGenericResourceSelection(index, now)
 	}
 	a.screen = screenResourceDetails
-	a.lastDataVersion = a.store.Version()
+	a.lastDataVersion = a.builtInResourceDataVersion()
 	a.lastTick = now
 	a.resetTextViewport()
 	return true
@@ -1750,28 +1767,37 @@ func (a *App) resourceDetailFooter() string {
 	}
 }
 
-func (a *App) shouldRefresh(now time.Time) bool {
-	if a.manager.Version() != a.lastManagerVersion {
-		return true
+func (a *App) builtInResourceDataVersion() uint64 {
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		return a.store.DeploymentVersion()
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		return a.store.ServiceVersion()
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		return a.store.NodeVersion()
+	default:
+		return a.store.Version()
 	}
+}
 
+func (a *App) shouldRefresh(now time.Time) bool {
 	switch a.screen {
 	case screenCatalog:
-		return a.store.Version() != a.lastDataVersion
+		return a.store.Version() != a.lastDataVersion || a.manager.Version() != a.lastManagerVersion
 	case screenPods:
-		return a.store.Version() != a.lastDataVersion
+		return a.store.PodVersion() != a.lastDataVersion
 	case screenResourceList:
 		if isBuiltInResourceList(a.activeResource) {
-			return a.store.Version() != a.lastDataVersion
+			return a.builtInResourceDataVersion() != a.lastDataVersion
 		}
-		return a.manager.Version() != a.lastManagerVersion
+		return a.genericResourceVersion() != a.lastManagerVersion
 	case screenPodDetails:
-		return a.store.Version() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
+		return a.store.PodVersion() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
 	case screenResourceDetails:
 		if isBuiltInResourceList(a.activeResource) {
-			return a.store.Version() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
+			return a.builtInResourceDataVersion() != a.lastDataVersion || now.Sub(a.lastTick) >= time.Second
 		}
-		return a.manager.Version() != a.lastManagerVersion || now.Sub(a.lastTick) >= time.Second
+		return a.genericResourceVersion() != a.lastManagerVersion || now.Sub(a.lastTick) >= time.Second
 	default:
 		return false
 	}

@@ -1,0 +1,9 @@
+goos: darwin
+goarch: arm64
+pkg: github.com/elijahrou/surfsk8s/internal/app
+cpu: Apple M1
+BenchmarkTickGenericResourceList8ClustersUnderOffScopeSameKindChurn-8   	      13	  83864433 ns/op	38109011 B/op	  288211 allocs/op
+BenchmarkTickGenericResourceList8ClustersUnderOffScopeSameKindChurn-8   	      14	  86677402 ns/op	38108715 B/op	  288210 allocs/op
+BenchmarkTickGenericResourceList8ClustersUnderOffScopeSameKindChurn-8   	      14	  87065491 ns/op	38108684 B/op	  288210 allocs/op
+PASS
+ok  	github.com/elijahrou/surfsk8s/internal/app	6.323s

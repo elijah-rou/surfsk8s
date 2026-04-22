@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,6 +26,8 @@ const (
 	defaultLogTailLines    int64 = 50
 	defaultNodeTailBytes   int64 = 64 * 1024
 	logLiveRefreshInterval       = time.Second
+	maxLiveLogEntries            = 10000
+	logFetchConcurrency          = 4
 )
 
 var writeTextFile = os.WriteFile
@@ -58,6 +61,40 @@ type logEntry struct {
 	SourceLabel   string
 	Message       string
 	Order         int
+}
+
+func logEntryLess(left logEntry, right logEntry) bool {
+	if left.HasTimestamp && right.HasTimestamp && !left.Timestamp.Equal(right.Timestamp) {
+		return left.Timestamp.Before(right.Timestamp)
+	}
+	if left.SourceLabel != right.SourceLabel {
+		return left.SourceLabel < right.SourceLabel
+	}
+	return left.Order < right.Order
+}
+
+func mergeSortedLogEntries(existing []logEntry, incoming []logEntry) []logEntry {
+	if len(existing) == 0 {
+		return append([]logEntry(nil), incoming...)
+	}
+	if len(incoming) == 0 {
+		return existing
+	}
+	merged := make([]logEntry, 0, len(existing)+len(incoming))
+	i := 0
+	j := 0
+	for i < len(existing) && j < len(incoming) {
+		if logEntryLess(existing[i], incoming[j]) {
+			merged = append(merged, existing[i])
+			i++
+			continue
+		}
+		merged = append(merged, incoming[j])
+		j++
+	}
+	merged = append(merged, existing[i:]...)
+	merged = append(merged, incoming[j:]...)
+	return merged
 }
 
 type logFetchSource struct {
@@ -446,6 +483,11 @@ func buildNodeLogPickerOptions(entries []cluster.NodeLogEntry) []actionOption {
 	return options
 }
 
+func (a *App) invalidateLogsRenderCache() {
+	a.logRenderedContent = ""
+	a.logRenderedVersion = 0
+}
+
 func (a *App) openLogsScreen(title string, reset bool) tea.Cmd {
 	returnScreen := a.screen
 	if a.screen == screenActionPicker {
@@ -459,6 +501,8 @@ func (a *App) openLogsScreen(title string, reset bool) tea.Cmd {
 		a.logEntrySeen = nil
 		a.logCursor = time.Time{}
 		a.logFetchedAt = time.Time{}
+		a.logEntriesVersion++
+		a.invalidateLogsRenderCache()
 	}
 	a.resetTextViewport()
 	return a.refreshLogs(true)
@@ -482,6 +526,7 @@ func (a *App) refreshLogs(force bool) tea.Cmd {
 		return nil
 	}
 
+	a.invalidateLogsRenderCache()
 	now := time.Now()
 	token := a.nextAsyncTokenValue()
 	a.logRequestToken = token
@@ -540,64 +585,80 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 		return nil, time.Time{}, err
 	}
 
+	type logFetchResult struct {
+		entries []logEntry
+		cursor  time.Time
+		err     string
+	}
+
+	results := make([]logFetchResult, len(sources))
+	concurrency := min(logFetchConcurrency, len(sources))
+	if concurrency <= 0 {
+		concurrency = 1
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	for idx, source := range sources {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(index int, source logFetchSource) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			var content string
+			var fetchErr error
+			switch {
+			case source.Container != "":
+				content, fetchErr = a.manager.PodLogsWithOptions(ctx, source.Pod, cluster.PodLogsOptions{
+					Container:  source.Container,
+					Timestamps: true,
+					TailLines:  tailLines,
+					SinceTime:  sinceTime,
+				})
+			case source.NodeLogPath != "":
+				options := cluster.NodeLogOptions{Path: source.NodeLogPath, TailBytes: fetchRange.nodeTailBytes()}
+				if fetchRange == logRangeAll {
+					options.All = true
+				}
+				content, fetchErr = a.manager.NodeLogWithOptions(ctx, source.Node, options)
+			default:
+				fetchErr = fmt.Errorf("invalid log source")
+			}
+			if fetchErr != nil {
+				results[index].err = source.Label + ": " + fetchErr.Error()
+				return
+			}
+			results[index].entries, results[index].cursor = parseLogEntries(content, source.Key, source.Label, index<<20)
+		}(idx, source)
+	}
+	wg.Wait()
+
 	entries := make([]logEntry, 0, 256)
 	cursor := time.Time{}
 	errors := make([]string, 0, len(sources))
-	order := 0
-	for _, source := range sources {
-		var content string
-		switch {
-		case source.Container != "":
-			content, err = a.manager.PodLogsWithOptions(ctx, source.Pod, cluster.PodLogsOptions{
-				Container:  source.Container,
-				Timestamps: true,
-				TailLines:  tailLines,
-				SinceTime:  sinceTime,
-			})
-		case source.NodeLogPath != "":
-			options := cluster.NodeLogOptions{Path: source.NodeLogPath, TailBytes: fetchRange.nodeTailBytes()}
-			if fetchRange == logRangeAll {
-				options.All = true
-			}
-			content, err = a.manager.NodeLogWithOptions(ctx, source.Node, options)
-		default:
-			err = fmt.Errorf("invalid log source")
-		}
-		if err != nil {
-			errors = append(errors, source.Label+": "+err.Error())
+	for _, result := range results {
+		if result.err != "" {
+			errors = append(errors, result.err)
 			continue
 		}
-		built, maxTime := parseLogEntries(content, source.Key, source.Label, order)
-		order += len(built)
-		entries = append(entries, built...)
-		if maxTime.After(cursor) {
-			cursor = maxTime
+		entries = append(entries, result.entries...)
+		if result.cursor.After(cursor) {
+			cursor = result.cursor
 		}
 	}
 
-	sort.SliceStable(entries, func(i int, j int) bool {
-		left := entries[i]
-		right := entries[j]
-		if left.HasTimestamp && right.HasTimestamp {
-			if !left.Timestamp.Equal(right.Timestamp) {
-				return left.Timestamp.Before(right.Timestamp)
-			}
-		}
-		if left.SourceLabel != right.SourceLabel {
-			return left.SourceLabel < right.SourceLabel
-		}
-		return left.Order < right.Order
-	})
+	sort.SliceStable(entries, func(i int, j int) bool { return logEntryLess(entries[i], entries[j]) })
 
 	if cursor.IsZero() {
 		cursor = now
 	}
 	if len(errors) != 0 {
+		sort.Strings(errors)
 		joined := strings.Join(errors, "; ")
 		if len(entries) == 0 {
 			return nil, cursor, fmt.Errorf("%s", joined)
 		}
-		entries = append(entries, logEntry{UniqueKey: "__error__|" + joined, Message: "Errors: " + joined, SourceKey: "errors", SourceLabel: "errors", Order: order + 1})
+		entries = append(entries, logEntry{UniqueKey: "__error__|" + joined, Message: "Errors: " + joined, SourceKey: "errors", SourceLabel: "errors", Order: len(entries) + 1})
 	}
 	return entries, cursor, nil
 }
@@ -706,6 +767,19 @@ func splitLogTimestamp(line string) (time.Time, string, string, bool) {
 	return stamp, token, strings.TrimLeft(line[space+1:], " "), true
 }
 
+func (a *App) trimLiveLogEntries() {
+	if a.logRange != logRangeLive || len(a.logEntries) <= maxLiveLogEntries {
+		return
+	}
+	drop := len(a.logEntries) - maxLiveLogEntries
+	copy(a.logEntries, a.logEntries[drop:])
+	a.logEntries = a.logEntries[:maxLiveLogEntries]
+	a.logEntrySeen = make(map[string]struct{}, len(a.logEntries))
+	for _, entry := range a.logEntries {
+		a.logEntrySeen[entry.UniqueKey] = struct{}{}
+	}
+}
+
 func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 	if msg.Token != a.logRequestToken {
 		return nil
@@ -713,6 +787,7 @@ func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 	a.activity = ""
 	a.logLoading = false
 	if msg.Err != nil {
+		a.invalidateLogsRenderCache()
 		a.statusMessage = msg.Err.Error()
 		return nil
 	}
@@ -723,6 +798,7 @@ func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 			a.logEntrySeen[entry.UniqueKey] = struct{}{}
 		}
 	} else {
+		incoming := make([]logEntry, 0, len(msg.Entries))
 		if a.logEntrySeen == nil {
 			a.logEntrySeen = make(map[string]struct{}, len(a.logEntries)+len(msg.Entries))
 			for _, entry := range a.logEntries {
@@ -734,22 +810,13 @@ func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 				continue
 			}
 			a.logEntrySeen[entry.UniqueKey] = struct{}{}
-			a.logEntries = append(a.logEntries, entry)
+			incoming = append(incoming, entry)
 		}
-		sort.SliceStable(a.logEntries, func(i int, j int) bool {
-			left := a.logEntries[i]
-			right := a.logEntries[j]
-			if left.HasTimestamp && right.HasTimestamp {
-				if !left.Timestamp.Equal(right.Timestamp) {
-					return left.Timestamp.Before(right.Timestamp)
-				}
-			}
-			if left.SourceLabel != right.SourceLabel {
-				return left.SourceLabel < right.SourceLabel
-			}
-			return left.Order < right.Order
-		})
+		a.logEntries = mergeSortedLogEntries(a.logEntries, incoming)
 	}
+	a.trimLiveLogEntries()
+	a.logEntriesVersion++
+	a.invalidateLogsRenderCache()
 	if msg.Cursor.After(a.logCursor) {
 		a.logCursor = msg.Cursor
 	}
@@ -788,22 +855,37 @@ func (a *App) filteredLogEntries() []logEntry {
 }
 
 func (a *App) renderLogs() string {
-	entries := a.filteredLogEntries()
-	if len(entries) == 0 {
-		if strings.TrimSpace(a.logFilterQuery) != "" {
-			return "No log lines match filter."
-		}
-		if a.logLoading {
-			return "Loading logs…"
-		}
-		return "No log output."
-	}
 	width := max(24, a.width-4)
-	parts := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		parts = append(parts, a.renderLogEntry(entry, width))
+	if a.logRenderedVersion == a.logEntriesVersion && a.logRenderedFilter == a.logFilterQuery && a.logRenderedWidth == width && a.logRenderedWrap == a.logWrap && a.logRenderedTimestamps == a.logShowTimestamps {
+		return a.logRenderedContent
 	}
-	return strings.Join(parts, "\n")
+
+	entries := a.filteredLogEntries()
+	var content string
+	if len(entries) == 0 {
+		switch {
+		case strings.TrimSpace(a.logFilterQuery) != "":
+			content = "No log lines match filter."
+		case a.logLoading:
+			content = "Loading logs…"
+		default:
+			content = "No log output."
+		}
+	} else {
+		parts := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			parts = append(parts, a.renderLogEntry(entry, width))
+		}
+		content = strings.Join(parts, "\n")
+	}
+
+	a.logRenderedVersion = a.logEntriesVersion
+	a.logRenderedFilter = a.logFilterQuery
+	a.logRenderedWidth = width
+	a.logRenderedWrap = a.logWrap
+	a.logRenderedTimestamps = a.logShowTimestamps
+	a.logRenderedContent = content
+	return content
 }
 
 func (a *App) renderLogEntry(entry logEntry, width int) string {

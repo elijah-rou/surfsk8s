@@ -226,7 +226,11 @@ type Store struct {
 	nodeOrdered []NodeRow
 	nodesDirty  bool
 
-	version uint64
+	version           uint64
+	podVersion        uint64
+	deploymentVersion uint64
+	serviceVersion    uint64
+	nodeVersion       uint64
 }
 
 func NewStore() *Store {
@@ -255,6 +259,30 @@ func (s *Store) Version() uint64 {
 	return s.version
 }
 
+func (s *Store) PodVersion() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.podVersion
+}
+
+func (s *Store) DeploymentVersion() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deploymentVersion
+}
+
+func (s *Store) ServiceVersion() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.serviceVersion
+}
+
+func (s *Store) NodeVersion() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.nodeVersion
+}
+
 func (s *Store) UpsertPod(cluster string, pod *corev1.Pod) {
 	if pod == nil {
 		panic("state.Store.UpsertPod: nil pod")
@@ -281,6 +309,7 @@ func (s *Store) UpsertPod(cluster string, pod *corev1.Pod) {
 	s.podObjects[key] = pod
 	s.podsDirty = true
 	s.version++
+	s.podVersion++
 }
 
 func (s *Store) DeletePod(cluster string, pod *corev1.Pod) {
@@ -315,6 +344,7 @@ func (s *Store) DeletePodByKey(cluster string, namespace string, name string) {
 	delete(s.podObjects, key)
 	s.podsDirty = true
 	s.version++
+	s.podVersion++
 }
 
 func (s *Store) SnapshotPods(query PodQuery, now time.Time) PodSnapshot {
@@ -340,6 +370,19 @@ func (s *Store) ForEachPod(fn func(PodRow) bool) {
 	defer s.mu.RUnlock()
 	for _, row := range s.podOrdered {
 		if !fn(row) {
+			return
+		}
+	}
+}
+
+// ForEachPodObject visits ordered pod rows with their live API objects for read-only use.
+// Callers must not mutate the pod pointer.
+func (s *Store) ForEachPodObject(fn func(PodRow, *corev1.Pod) bool) {
+	s.ensurePodsReady()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, row := range s.podOrdered {
+		if !fn(row, s.podObjects[row.Key.String()]) {
 			return
 		}
 	}
@@ -413,6 +456,7 @@ func (s *Store) UpsertDeployment(cluster string, deployment *appsv1.Deployment) 
 	s.deploymentObjects[key] = deployment
 	s.deploymentsDirty = true
 	s.version++
+	s.deploymentVersion++
 }
 
 func (s *Store) DeleteDeployment(cluster string, deployment *appsv1.Deployment) {
@@ -433,6 +477,7 @@ func (s *Store) DeleteDeployment(cluster string, deployment *appsv1.Deployment) 
 	delete(s.deploymentObjects, key)
 	s.deploymentsDirty = true
 	s.version++
+	s.deploymentVersion++
 }
 
 func (s *Store) SnapshotDeployments(query DeploymentQuery, now time.Time) DeploymentSnapshot {
@@ -502,6 +547,7 @@ func (s *Store) UpsertService(cluster string, service *corev1.Service) {
 	s.serviceObjects[key] = service
 	s.servicesDirty = true
 	s.version++
+	s.serviceVersion++
 }
 
 func (s *Store) DeleteService(cluster string, service *corev1.Service) {
@@ -522,6 +568,7 @@ func (s *Store) DeleteService(cluster string, service *corev1.Service) {
 	delete(s.serviceObjects, key)
 	s.servicesDirty = true
 	s.version++
+	s.serviceVersion++
 }
 
 func (s *Store) SnapshotServices(query ServiceQuery, now time.Time) ServiceSnapshot {
@@ -591,6 +638,7 @@ func (s *Store) UpsertNode(cluster string, node *corev1.Node) {
 	s.nodeObjects[key] = node
 	s.nodesDirty = true
 	s.version++
+	s.nodeVersion++
 }
 
 func (s *Store) DeleteNode(cluster string, node *corev1.Node) {
@@ -611,6 +659,7 @@ func (s *Store) DeleteNode(cluster string, node *corev1.Node) {
 	delete(s.nodeObjects, key)
 	s.nodesDirty = true
 	s.version++
+	s.nodeVersion++
 }
 
 func (s *Store) SnapshotNodes(now time.Time) NodeSnapshot {

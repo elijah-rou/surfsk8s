@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -158,4 +159,38 @@ func TestRestartMinHeapKeepsBestBySortOrder(t *testing.T) {
 	}
 }
 
+func TestBuildGenericWorkloadOverviewCardFallsBackToManagerCatalog(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	resource := cluster.ResourceKind{ID: "apps/deployments", Display: "Deployments", Resource: "deployments", APIGroup: "apps", Version: "v1", Kind: "Deployment", Namespaced: true}
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{resource})
+	manager.SetGenericResourceFixtureForTest(resource.ID, "dev", &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata": map[string]interface{}{
+			"name":              "api",
+			"namespace":         "default",
+			"resourceVersion":   "1",
+			"creationTimestamp": time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+		"status": map[string]interface{}{
+			"readyReplicas": int64(3),
+			"replicas":      int64(3),
+		},
+	}})
 
+	card := app.buildGenericWorkloadOverviewCard(context.Background(), "Deployments", "apps", "deployments")
+	if got, want := card.Title, "Deployments"; got != want {
+		t.Fatalf("title = %q, want %q", got, want)
+	}
+	if len(card.Metrics) != 1 {
+		t.Fatalf("metrics = %d, want 1", len(card.Metrics))
+	}
+	if got, want := card.Metrics[0].Label, "Running"; got != want {
+		t.Fatalf("label = %q, want %q", got, want)
+	}
+	if got, want := card.Metrics[0].Count, 1; got != want {
+		t.Fatalf("count = %d, want %d", got, want)
+	}
+}

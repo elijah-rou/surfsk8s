@@ -177,6 +177,45 @@ func BenchmarkViewPods10000WarmUsage(b *testing.B) {
 	}
 }
 
+func BenchmarkRefreshAndViewPods5300WarmUsage4Clusters(b *testing.B) {
+	manager := newTestManagerForBenchmark(b)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	seedBenchmarkMultiClusterTyped(store, 4, 0, 0, 32, 1325)
+	app.screen = screenPods
+	app.width = 220
+	app.height = 40
+	app.contextScope = ""
+	app.podUsageByKey = make(map[string]cluster.PodResourceUsage, 5300)
+	store.ForEachPod(func(row state.PodRow) bool {
+		app.podUsageByKey[row.Key.String()] = cluster.PodResourceUsage{
+			Key:                row.Key,
+			CPUUsedMilli:       100,
+			CPURequestMilli:    250,
+			CPULimitMilli:      1000,
+			MemoryUsedBytes:    256 * 1024 * 1024,
+			MemoryRequestBytes: 256 * 1024 * 1024,
+			MemoryLimitBytes:   1024 * 1024 * 1024,
+			HasCPUUsage:        true,
+			HasMemoryUsage:     true,
+		}
+		return true
+	})
+	app.podUsageListScopeKey = app.podUsageScopeKey()
+	app.podUsageListVersion = store.PodVersion()
+	app.podUsageListFetchedAt = time.Now()
+	app.podUsageListLoading = true
+	app.resizeTables()
+	app.refreshPods(time.Now())
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		app.podUsageCellByKey = nil
+		app.refreshPods(time.Now())
+		_ = app.View()
+	}
+}
+
 func BenchmarkPodsTableView10000WarmUsage(b *testing.B) {
 	manager := newTestManagerForBenchmark(b)
 	store := state.NewStore()
@@ -255,16 +294,19 @@ func seedBenchmarkGenericRows(app *App, count int) {
 	app.genericCompiledColumns = cluster.CompilePrinterColumns(app.activeResource.PrinterColumns)
 	app.genericCompiledColumnsVersion = app.activeResource.ID
 	app.genericRows = make([]cluster.GenericResourceRow, 0, count)
+	app.genericRowsByKey = make(map[string]cluster.GenericResourceRow, count)
+	app.genericNamespaceCounts = map[string]int{"default": count}
 	app.sortedGenericRows = make([]cluster.GenericResourceRow, 0, count)
 	for i := 0; i < count; i++ {
 		obj := &unstructured.Unstructured{Object: map[string]interface{}{
 			"apiVersion": "serving.knative.dev/v1",
 			"kind":       "Service",
-			"metadata": map[string]interface{}{"name": fmt.Sprintf("svc-%05d", i), "namespace": "default", "resourceVersion": fmt.Sprintf("%d", i+1), "creationTimestamp": now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339)},
-			"status": map[string]interface{}{"url": fmt.Sprintf("https://svc-%05d.example.com", i), "conditions": []interface{}{map[string]interface{}{"type": "Ready", "status": "True"}}},
+			"metadata":   map[string]interface{}{"name": fmt.Sprintf("svc-%05d", i), "namespace": "default", "resourceVersion": fmt.Sprintf("%d", i+1), "creationTimestamp": now.Add(-time.Duration(i) * time.Minute).Format(time.RFC3339)},
+			"status":     map[string]interface{}{"url": fmt.Sprintf("https://svc-%05d.example.com", i), "conditions": []interface{}{map[string]interface{}{"type": "Ready", "status": "True"}}},
 		}}
 		row := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: obj.GetName()}, Cluster: "dev", Namespace: "default", Name: obj.GetName(), Object: obj, ResourceVersion: obj.GetResourceVersion()}.WithAge(now)
 		app.genericRows = append(app.genericRows, row)
+		app.genericRowsByKey[row.Key.String()] = row
 		app.sortedGenericRows = append(app.sortedGenericRows, row)
 	}
 }

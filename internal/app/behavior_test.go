@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"strings"
@@ -850,12 +851,78 @@ func TestNodeUsageSnapshotRefreshRendersTableGauge(t *testing.T) {
 	app.refreshResourceList(time.Now())
 
 	key := state.NodeKey{Cluster: "dev", Name: "node-a"}.String()
-	app.Update(nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), storeVersion: store.Version(), usages: map[string]cluster.NodeResourceUsage{
+	app.Update(nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), storeVersion: store.NodeVersion(), usages: map[string]cluster.NodeResourceUsage{
 		key: {Key: state.NodeKey{Cluster: "dev", Name: "node-a"}, CPUUsedMilli: 1200, CPUAllocatableMilli: 4000, HasCPUUsage: true},
 	}})
 	_, body, _ := app.currentView()
 	if !strings.Contains(stripUsageANSI(body), "1200m/4") {
 		t.Fatalf("expected usage gauge in body, got:\n%s", stripUsageANSI(body))
+	}
+}
+
+func TestNodeUsageSnapshotAppliesUnderUnrelatedPodChurn(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	app.width = 160
+	app.height = 20
+	app.screen = screenResourceList
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	app.refreshResourceList(time.Now())
+
+	nodeVersion := store.NodeVersion()
+	key := state.NodeKey{Cluster: "dev", Name: "node-a"}.String()
+	msg := nodeUsageSnapshotMsg{scopeKey: app.nodeUsageScopeKey(), storeVersion: nodeVersion, usages: map[string]cluster.NodeResourceUsage{
+		key: {Key: state.NodeKey{Cluster: "dev", Name: "node-a"}, CPUUsedMilli: 1200, CPUAllocatableMilli: 4000, HasCPUUsage: true},
+	}}
+
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	if got := store.NodeVersion(); got != nodeVersion {
+		t.Fatalf("node version changed under pod churn: got %d want %d", got, nodeVersion)
+	}
+
+	app.Update(msg)
+	if app.nodeUsageListFetchedAt.IsZero() {
+		t.Fatalf("expected node usage snapshot accepted under unrelated pod churn")
+	}
+	_, body, _ := app.currentView()
+	if !strings.Contains(stripUsageANSI(body), "1200m/4") {
+		t.Fatalf("expected usage gauge in body, got:\n%s", stripUsageANSI(body))
+	}
+}
+
+func TestPodUsageSnapshotAppliesUnderUnrelatedNodeChurn(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	app.width = 160
+	app.height = 20
+	app.screen = screenPods
+	app.refreshPods(time.Now())
+
+	podVersion := store.PodVersion()
+	key := state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}.String()
+	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), storeVersion: podVersion, usages: map[string]cluster.PodResourceUsage{
+		key: {Key: state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}, CPUUsedMilli: 120, CPULimitMilli: 500, HasCPUUsage: true},
+	}}
+
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	if got := store.PodVersion(); got != podVersion {
+		t.Fatalf("pod version changed under node churn: got %d want %d", got, podVersion)
+	}
+
+	app.Update(msg)
+	if app.podUsageListFetchedAt.IsZero() {
+		t.Fatalf("expected pod usage snapshot accepted under unrelated node churn")
+	}
+	row, ok := app.podRowAt(0, time.Now())
+	if !ok {
+		t.Fatalf("expected pod row")
+	}
+	if got := stripUsageANSI(app.podCPUCell(row)); !strings.Contains(got, "120m/") {
+		t.Fatalf("expected rendered pod cpu cell, got %q", got)
 	}
 }
 
@@ -1125,5 +1192,207 @@ func TestLogFooterShowsNewKeyHints(t *testing.T) {
 		if !strings.Contains(footer, fragment) {
 			t.Fatalf("missing %q in footer %q", fragment, footer)
 		}
+	}
+}
+
+func TestDeploymentListShouldNotRefreshOnUnrelatedPodChurn(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	replicas := int32(3)
+	store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default", ResourceVersion: "1"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas}, Status: appsv1.DeploymentStatus{ReadyReplicas: 3, UpdatedReplicas: 3, AvailableReplicas: 3}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "1"}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	app.screen = screenResourceList
+	app.refreshResourceList(time.Now())
+	if app.shouldRefresh(time.Now()) {
+		t.Fatalf("unexpected immediate refresh")
+	}
+
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "2"}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	if app.shouldRefresh(time.Now()) {
+		t.Fatalf("deployment list should ignore pod-only churn")
+	}
+}
+
+func TestGenericResourceListIgnoresUnrelatedManagerChurn(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.activeResource = cluster.ResourceKind{ID: "serving.knative.dev/services", Display: "Services", Resource: "services", APIGroup: "serving.knative.dev", Version: "v1", Kind: "Service", Namespaced: true, Custom: true}
+	app.screen = screenResourceList
+	app.lastManagerVersion = manager.GenericResourceVersion(app.activeResource.ID)
+	manager.BumpVersionForTest()
+	if app.shouldRefresh(time.Now()) {
+		t.Fatalf("generic list should ignore unrelated manager churn")
+	}
+}
+
+func TestGenericResourceListRefreshesOnMatchingGenericChurn(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.activeResource = cluster.ResourceKind{ID: "serving.knative.dev/services", Display: "Services", Resource: "services", APIGroup: "serving.knative.dev", Version: "v1", Kind: "Service", Namespaced: true, Custom: true}
+	app.screen = screenResourceList
+	app.lastManagerVersion = manager.GenericResourceVersion(app.activeResource.ID)
+	manager.BumpGenericResourceVersionForTest(app.activeResource.ID)
+	if !app.shouldRefresh(time.Now()) {
+		t.Fatalf("generic list should refresh on matching generic resource churn")
+	}
+}
+
+func TestGenericResourceDetailsIgnoreUnrelatedSameKindChurn(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	resource := cluster.ResourceKind{ID: "serving.knative.dev/services", Display: "Services", Resource: "services", APIGroup: "serving.knative.dev", Version: "v1", Kind: "Service", Namespaced: true, Custom: true}
+	key := cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "api"}
+	object := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "serving.knative.dev/v1",
+		"kind":       "Service",
+		"metadata": map[string]interface{}{
+			"name":              key.Name,
+			"namespace":         key.Namespace,
+			"resourceVersion":   "1",
+			"creationTimestamp": time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+		"status": map[string]interface{}{
+			"conditions": []interface{}{map[string]interface{}{"type": "Ready", "status": "True", "reason": "Ready"}},
+		},
+	}}
+	manager.SetGenericResourceFixtureForTest(resource.ID, key.Cluster, object)
+	details, err := manager.GenericResourceDetails(context.Background(), resource, key, time.Now())
+	if err != nil {
+		t.Fatalf("generic details: %v", err)
+	}
+	app.activeResource = resource
+	app.activeGenericDetails = details
+	app.screen = screenResourceDetails
+	app.lastManagerVersion = manager.GenericResourceVersion(resource.ID)
+	app.genericDetailFetchedAt = time.Time{}
+
+	manager.BumpGenericResourceVersionForTest(resource.ID)
+	app.refreshGenericResourceDetails(time.Now())
+	if !app.genericDetailFetchedAt.IsZero() {
+		t.Fatalf("expected detail fetch to be skipped")
+	}
+	if got, want := app.activeGenericDetails.Row.ResourceVersion, "1"; got != want {
+		t.Fatalf("resourceVersion = %q, want %q", got, want)
+	}
+}
+
+func TestGenericResourceListKeepsVisibleCacheOnOffScopeDelta(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	resource := cluster.ResourceKind{
+		ID:             "serving.knative.dev/services",
+		Display:        "Services",
+		Resource:       "services",
+		APIGroup:       "serving.knative.dev",
+		Version:        "v1",
+		Kind:           "Service",
+		Namespaced:     true,
+		Custom:         true,
+		PrinterColumns: []cluster.PrinterColumn{{Name: "URL", JSONPath: ".status.url"}},
+	}
+	app.activeResource = resource
+	app.screen = screenResourceList
+	app.namespace = "default"
+
+	visible := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "serving.knative.dev/v1",
+		"kind":       "Service",
+		"metadata": map[string]interface{}{
+			"name":              "api",
+			"namespace":         "default",
+			"resourceVersion":   "1",
+			"creationTimestamp": time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+		"status": map[string]interface{}{"url": "https://api.example.com"},
+	}}
+	hidden := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "serving.knative.dev/v1",
+		"kind":       "Service",
+		"metadata": map[string]interface{}{
+			"name":              "hidden",
+			"namespace":         "kube-system",
+			"resourceVersion":   "1",
+			"creationTimestamp": time.Now().Add(-time.Hour).Format(time.RFC3339),
+		},
+		"status": map[string]interface{}{"url": "https://hidden.example.com"},
+	}}
+	manager.SetGenericResourceFixtureForTest(resource.ID, "dev", visible)
+	manager.SetGenericResourceFixtureForTest(resource.ID, "dev", hidden)
+	app.refreshGenericResourceList(time.Now())
+
+	row, ok := app.genericResourceRowAt(0, time.Now())
+	if !ok {
+		t.Fatalf("expected visible generic row")
+	}
+	cached := app.genericPrinterValues(row)
+	if len(cached) != 1 {
+		t.Fatalf("expected printer cache entry")
+	}
+	cacheKey := genericPrinterCacheKey(row)
+	if _, ok := app.genericPrinterValueCache[cacheKey]; !ok {
+		t.Fatalf("expected printer cache populated")
+	}
+
+	hidden.Object["metadata"].(map[string]interface{})["resourceVersion"] = "2"
+	manager.SetGenericResourceFixtureForTest(resource.ID, "dev", hidden)
+	app.refreshGenericResourceList(time.Now())
+
+	if _, ok := app.genericPrinterValueCache[cacheKey]; !ok {
+		t.Fatalf("expected visible printer cache preserved for off-scope delta")
+	}
+	if got, want := len(app.sortedGenericRows), 1; got != want {
+		t.Fatalf("sorted rows = %d, want %d", got, want)
+	}
+	if got, want := app.genericRowsByKey[cluster.GenericResourceKey{Cluster: "dev", Namespace: "kube-system", Name: "hidden"}.String()].ResourceVersion, "2"; got != want {
+		t.Fatalf("hidden resourceVersion = %q, want %q", got, want)
+	}
+}
+
+func TestMaybeRefreshPodUsageListCmdDelaysInitialFetchAfterPodsRefresh(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPods
+	openedAt := time.Now()
+	app.lastTick = openedAt
+	if cmd := app.maybeRefreshPodUsageListCmd(openedAt.Add(500 * time.Millisecond)); cmd != nil {
+		t.Fatalf("expected nil cmd during initial pod usage delay")
+	}
+	if cmd := app.maybeRefreshPodUsageListCmd(openedAt.Add(podUsageInitialDelay + 100*time.Millisecond)); cmd == nil {
+		t.Fatalf("expected pod usage cmd after initial delay")
+	}
+}
+
+func TestPodUsageSnapshotDefersCellCacheUntilVisibleRowsNeedIt(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", ResourceVersion: "1"}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "main"}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.screen = screenPods
+	app.refreshPods(time.Now())
+	msg := podUsageSnapshotMsg{scopeKey: app.podUsageScopeKey(), storeVersion: store.Version(), usages: map[string]cluster.PodResourceUsage{
+		state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"}.String(): {
+			Key:             state.PodKey{Cluster: "dev", Namespace: "default", Name: "api"},
+			CPUUsedMilli:    120,
+			HasCPUUsage:     true,
+			MemoryUsedBytes: 256 * 1024 * 1024,
+			HasMemoryUsage:  true,
+		},
+	}}
+	app.Update(msg)
+	if app.podUsageCellByKey != nil {
+		t.Fatalf("expected lazy pod usage cache")
+	}
+	row, ok := app.podRowAt(0, time.Now())
+	if !ok {
+		t.Fatalf("expected pod row")
+	}
+	if got := stripUsageANSI(app.podCPUCell(row)); !strings.Contains(got, "120m") {
+		t.Fatalf("cpu cell = %q", got)
+	}
+	if len(app.podUsageCellByKey) != 1 {
+		t.Fatalf("expected one cached visible row, got %d", len(app.podUsageCellByKey))
 	}
 }
