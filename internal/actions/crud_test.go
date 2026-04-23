@@ -84,6 +84,24 @@ func TestPortForwardServiceWithPortsBuildsKubectlCommand(t *testing.T) {
 	}
 }
 
+func TestExecNodeShellBuildsKubectlDebugCommand(t *testing.T) {
+	executor := NewExecutor("/tmp/config")
+	cmd, desc, err := executor.ExecNodeShell(state.NodeDetails{
+		Row:  state.NodeRow{Cluster: "dev", Name: "ip-10-0-0-1"},
+		Node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "ip-10-0-0-1"}},
+	})
+	if err != nil {
+		t.Fatalf("ExecNodeShell error: %v", err)
+	}
+	if got, want := desc, "debug node/ip-10-0-0-1"; got != want {
+		t.Fatalf("desc = %q, want %q", got, want)
+	}
+	wantArgs := []string{"kubectl", "--kubeconfig", "/tmp/config", "--context", "dev", "debug", "node/ip-10-0-0-1", "-it", "--profile=sysadmin", "--image=ubuntu:24.04", "--", "sh", "-lc", "chroot /host /bin/bash || chroot /host /bin/sh || exec bash || exec sh"}
+	if !reflect.DeepEqual(cmd.Args, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", cmd.Args, wantArgs)
+	}
+}
+
 func TestExecPodShellReturnsErrorForEmptyContext(t *testing.T) {
 	executor := NewExecutor("")
 	_, _, err := executor.ExecPodShellInContainer(state.PodDetails{
@@ -93,6 +111,20 @@ func TestExecPodShellReturnsErrorForEmptyContext(t *testing.T) {
 			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "api"}}},
 		},
 	}, "api")
+	if err == nil {
+		t.Fatalf("expected missing context error")
+	}
+	if got, want := err.Error(), "missing cluster context"; got != want {
+		t.Fatalf("err = %q, want %q", got, want)
+	}
+}
+
+func TestExecNodeShellReturnsErrorForEmptyContext(t *testing.T) {
+	executor := NewExecutor("")
+	_, _, err := executor.ExecNodeShell(state.NodeDetails{
+		Row:  state.NodeRow{Cluster: "", Name: "ip-10-0-0-1"},
+		Node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "ip-10-0-0-1"}},
+	})
 	if err == nil {
 		t.Fatalf("expected missing context error")
 	}

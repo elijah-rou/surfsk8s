@@ -18,6 +18,7 @@ import (
 )
 
 const defaultContainerAnnotation = "kubectl.kubernetes.io/default-container"
+const defaultNodeDebugImage = "ubuntu:24.04"
 
 const manifestEditScript = `set -eu
 file="$1"
@@ -75,6 +76,25 @@ func (e *Executor) ExecPodShellInContainer(details state.PodDetails, container s
 		"--", "sh",
 	)
 	return exec.Command("kubectl", args...), fmt.Sprintf("exec pod/%s", details.Row.Name), nil
+}
+
+func (e *Executor) ExecNodeShell(details state.NodeDetails) (*exec.Cmd, string, error) {
+	if details.Node == nil {
+		return nil, "", fmt.Errorf("node disappeared")
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	args = append(args,
+		"debug", "node/"+details.Row.Name,
+		"-it",
+		"--profile=sysadmin",
+		"--image="+defaultNodeDebugImage,
+		"--",
+		"sh", "-lc", "chroot /host /bin/bash || chroot /host /bin/sh || exec bash || exec sh",
+	)
+	return exec.Command("kubectl", args...), fmt.Sprintf("debug node/%s", details.Row.Name), nil
 }
 
 func (e *Executor) EditPod(details state.PodDetails) (*exec.Cmd, string, error) {

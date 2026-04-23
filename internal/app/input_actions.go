@@ -298,6 +298,19 @@ func (a *App) runExecPod() tea.Cmd {
 	return a.openPodContainerPicker(containers)
 }
 
+func (a *App) runExecResource() tea.Cmd {
+	if a.activeResource.Resource != "nodes" || a.activeResource.APIGroup != "" {
+		a.statusMessage = "exec unsupported for this resource"
+		return nil
+	}
+	cmd, description, err := a.executor.ExecNodeShell(a.activeNode)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return nil
+	}
+	return runProcessCommand(cmd, description)
+}
+
 func (a *App) runEditPod() tea.Cmd {
 	_, description, err := a.executor.EditPod(a.activePod)
 	if err != nil {

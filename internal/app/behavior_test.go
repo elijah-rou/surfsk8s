@@ -408,6 +408,25 @@ func TestRunExecPodReturnsStatusForMissingContext(t *testing.T) {
 	}
 }
 
+func TestRunExecResourceReturnsStatusForMissingNodeContext(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	app.activeNode = state.NodeDetails{
+		Row:  state.NodeRow{Cluster: "", Name: "node-a"},
+		Node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+	}
+
+	cmd := app.runExecResource()
+	if cmd != nil {
+		t.Fatalf("expected status error, not exec command")
+	}
+	if got, want := app.statusMessage, "missing cluster context"; got != want {
+		t.Fatalf("status = %q, want %q", got, want)
+	}
+}
+
 func TestRunPortForwardPodOpensPortPickerForMultiPortPod(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})

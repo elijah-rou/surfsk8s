@@ -1181,6 +1181,8 @@ func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		a.screen = screenGroupResources
 		a.refreshGroupResources()
+	case "x":
+		return a.runExecResource()
 	case "p":
 		return a.runPortForwardResource()
 	case "e":
@@ -1940,7 +1942,7 @@ func (a *App) resourceDetailFooter() string {
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		return prefix + podTableHints + "n ns-find  p port-forward  e edit  esc back"
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return prefix + podTableHints + "e edit  l logs  esc back"
+		return prefix + podTableHints + "x shell  e edit  l logs  esc back"
 	default:
 		if a.activeResource.Namespaced {
 			return prefix + "n ns-find  e edit  esc back"
