@@ -345,6 +345,9 @@ func (a *App) renderGenericResourceDetails() string {
 	if details.Object == nil {
 		return "resource disappeared"
 	}
+	if a.activeResource.Custom {
+		return renderCustomResourceDetails(max(20, a.width-2), a.activeResource, details)
+	}
 	sections := []string{
 		renderDetailFieldSection("Resource", []detailField{
 			{Label: "Name", Value: details.Row.Name},

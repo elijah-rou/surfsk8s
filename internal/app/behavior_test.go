@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -696,7 +697,7 @@ func TestRenderDeploymentDetailsShowsStrategyContainersAndPods(t *testing.T) {
 	app.refreshAssociatedPods(time.Now())
 
 	rendered := stripUsageANSI(app.renderDeploymentDetails())
-	for _, fragment := range []string{"Strategy:", "RollingUpdate", "maxUnavailable=25%", "Rollout", "Conditions", "MinimumReplicasAvailable", "Template resources", "Runtime usage", "Containers", "nginx:1.27", "requests=cpu=250m"} {
+	for _, fragment := range []string{"Strategy:", "RollingUpdate", "maxUnavailable=25%", "Rollout", "Conditions", "MinimumReplicasAvailable", "Template resources", "Runtime usage", "Containers", "web", "nginx:1.27", "Requests:", "cpu=250m", "Pod spec"} {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("missing %q in\n%s", fragment, rendered)
 		}
@@ -737,7 +738,152 @@ func TestRenderServiceDetailsShowsPoliciesPortsAndPods(t *testing.T) {
 	app.refreshAssociatedPods(time.Now())
 
 	rendered := stripUsageANSI(app.renderServiceDetails())
-	for _, fragment := range []string{"Type:", "LoadBalancer", "Cluster IP:", "10.96.0.10", "External IPs:", "34.1.2.3", "Traffic policy:", "external=Local", "internal=Local", "Ports", "http  80/TCP  target=8080  app=http"} {
+	for _, fragment := range []string{"Overview", "Service", "Traffic", "Type:", "LoadBalancer", "Cluster IP:", "10.96.0.10", "External IPs:", "34.1.2.3", "Traffic policy:", "external=Local", "internal=Local", "Ports", "http", "Port:  80/TCP", "Target:  8080", "App:  http"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestRenderDeploymentDetailsUseResponsiveGrid(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 160
+	replicas := int32(3)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default", Labels: map[string]string{"app": "frontend"}},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frontend"}},
+			Template: corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "frontend"}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "nginx:1.27"}}}},
+		},
+		Status: appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 2, ReadyReplicas: 2, Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue, Reason: "MinimumReplicasAvailable"}}},
+	}
+	store.UpsertDeployment("dev", deployment)
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default", Labels: map[string]string{"app": "frontend"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	details, ok := store.DeploymentDetailsByKey(state.DeploymentKey{Cluster: "dev", Namespace: "default", Name: "frontend"}, time.Now())
+	if !ok {
+		t.Fatalf("expected deployment details")
+	}
+	app.activeDeployment = details
+	app.refreshAssociatedPods(time.Now())
+
+	rendered := stripUsageANSI(app.renderDeploymentDetails())
+	foundTopRow := false
+	foundContainerSection := strings.Contains(rendered, "Containers")
+	foundDenseSummaryRow := false
+	for _, line := range strings.Split(rendered, "\n") {
+		if strings.Contains(line, "Rollout") && strings.Contains(line, "Template resources") && strings.Contains(line, "Runtime usage") {
+			foundTopRow = true
+		}
+		if strings.Contains(line, "Name:") && strings.Contains(line, "Namespace:") {
+			foundDenseSummaryRow = true
+		}
+	}
+	if !foundTopRow {
+		t.Fatalf("expected deployment glance cards to share top row:\n%s", rendered)
+	}
+	if !foundContainerSection {
+		t.Fatalf("expected deployment container section:\n%s", rendered)
+	}
+	if !foundDenseSummaryRow {
+		t.Fatalf("expected dense deployment summary row in wide layout:\n%s", rendered)
+	}
+}
+
+func TestRenderDeploymentDetailsFitAvailableWidth(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	replicas := int32(3)
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default", Labels: map[string]string{"app": "frontend"}},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frontend"}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "frontend"}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name:  "web",
+					Image: "nginx:1.27",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				}}},
+			},
+		},
+		Status: appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 2, ReadyReplicas: 2, Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue, Reason: "MinimumReplicasAvailable"}}},
+	}
+	store.UpsertDeployment("dev", deployment)
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	details, ok := store.DeploymentDetailsByKey(state.DeploymentKey{Cluster: "dev", Namespace: "default", Name: "frontend"}, time.Now())
+	if !ok {
+		t.Fatalf("expected deployment details")
+	}
+	app.activeDeployment = details
+
+	rendered := stripUsageANSI(app.renderDeploymentDetails())
+	if got, want := maxRenderedLineWidth(rendered), app.resourceDetailContentWidth(); got > want {
+		t.Fatalf("deployment layout width = %d, want <= %d\n%s", got, want, rendered)
+	}
+}
+
+func TestCustomResourceDetailsFitAvailableWidth(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 120
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Widgets", Kind: "Widget", Resource: "widgets", APIGroup: "apps.example.com", Version: "v1", Namespaced: true, Custom: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "blue-widget", Namespace: "default", Cluster: "dev", Ready: "True", Status: "Ready", Age: "8m"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "apps.example.com/v1",
+			"kind":       "Widget",
+			"metadata": map[string]interface{}{
+				"name":        "blue-widget",
+				"namespace":   "default",
+				"generation":  int64(7),
+				"annotations": map[string]interface{}{"owner": "team-a"},
+				"labels":      map[string]interface{}{"app": "widget"},
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(3),
+				"image":    "ghcr.io/acme/widget:v1",
+			},
+			"status": map[string]interface{}{
+				"phase":              "Ready",
+				"url":                "https://widget.dev",
+				"observedGeneration": int64(7),
+				"conditions": []interface{}{
+					map[string]interface{}{"type": "Ready", "status": "True", "reason": "Healthy"},
+				},
+			},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	if got, want := maxRenderedLineWidth(rendered), app.resourceDetailContentWidth(); got > want {
+		t.Fatalf("custom resource layout width = %d, want <= %d\n%s", got, want, rendered)
+	}
+}
+
+func TestRenderServiceDetailsSplitPortsLabelsAnnotationsColumns(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 180
+	app.activeResource = cluster.ResourceKind{Display: "Services", Resource: "services", Namespaced: true}
+	app.activeService = state.ServiceDetails{
+		Row:     state.ServiceRow{Cluster: "dev", Namespace: "argocd", Name: "metrics", Age: "91d"},
+		Service: &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "metrics", Namespace: "argocd", Labels: map[string]string{"app": "metrics"}, Annotations: map[string]string{"meta.helm.sh/release-name": "argocd", "argocd.argoproj.io/tracking-id": "argocd:/Service:argocd/metrics"}}, Spec: corev1.ServiceSpec{Type: corev1.ServiceTypeClusterIP, Selector: map[string]string{"app": "metrics"}, Ports: []corev1.ServicePort{{Name: "http", Port: 8080, Protocol: corev1.ProtocolTCP}, {Name: "https", Port: 8443, Protocol: corev1.ProtocolTCP}}}},
+	}
+
+	rendered := stripUsageANSI(app.renderServiceDetails())
+	for _, fragment := range []string{"Overview", "Service", "Traffic", "Selector", "Labels", "Annotations", "Ports", "http", "https"} {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("missing %q in\n%s", fragment, rendered)
 		}
@@ -764,22 +910,52 @@ func TestRenderNodeDetailsShowsSystemInfoAndScheduledPods(t *testing.T) {
 		},
 	}
 	store.UpsertNode("dev", node)
-	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "web", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("256Mi")}, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")}}}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
 	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
 	details, ok := store.NodeDetailsByKey(state.NodeKey{Cluster: "dev", Name: "node-a"}, time.Now())
 	if !ok {
 		t.Fatalf("expected node details")
 	}
 	app.activeNode = details
-	app.activeNodeUsage = cluster.NodeResourceUsage{CPUUsedMilli: 1200, CPUAllocatableMilli: 3900, HasCPUUsage: true}
+	app.activeNodeUsage = cluster.NodeResourceUsage{CPUUsedMilli: 1200, CPUAllocatableMilli: 3900, HasCPUUsage: true, MemoryUsedBytes: 2 * 1024 * 1024 * 1024, MemoryAllocatable: 15 * 1024 * 1024 * 1024, HasMemoryUsage: true}
 	app.nodeUsageFetchedAt = time.Now()
 	app.refreshAssociatedPods(time.Now())
 
 	rendered := stripUsageANSI(app.renderNodeDetails())
-	for _, fragment := range []string{"OS image:", "Ubuntu 24.04", "Kernel:", "6.8.0", "Kubelet:", "v1.31.0", "Resource usage", "Taints", "dedicated=gpu:NoSchedule", "Conditions", "Ready=True", "Capacity", "cpu=4"} {
+	for _, fragment := range []string{"OS image:", "Ubuntu 24.04", "Kernel:", "6.8.0", "Kubelet:", "v1.31.0", "Utilization", "CPU", "Memory", "Requests:", "250m / 3900m", "1.0Gi / 15Gi", "Taints", "dedicated=gpu:NoSchedule", "Conditions", "Ready=True"} {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("missing %q in\n%s", fragment, rendered)
 		}
+	}
+}
+
+func TestResourceDetailPodPaneCappedToBottomThird(t *testing.T) {
+	tableHeight := resourceDetailPodTableHeight(26, 30, 40, 4)
+	if got, wantMax := tableHeight, 7; got > wantMax {
+		t.Fatalf("table height = %d, want <= %d", got, wantMax)
+	}
+}
+
+func TestResourceDetailsLazyRefreshesDeploymentPodPane(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	app.height = 24
+	replicas := int32(1)
+	store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frontend"}}}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default", Labels: map[string]string{"app": "frontend"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	details, ok := store.DeploymentDetailsByKey(state.DeploymentKey{Cluster: "dev", Namespace: "default", Name: "frontend"}, time.Now())
+	if !ok {
+		t.Fatalf("expected deployment details")
+	}
+	app.activeDeployment = details
+	app.screen = screenResourceDetails
+
+	view := stripUsageANSI(app.View())
+	if !strings.Contains(view, "Pods pane (1)") {
+		t.Fatalf("expected lazy deployment pod pane refresh in\n%s", view)
 	}
 }
 
@@ -844,6 +1020,12 @@ func TestResourceDetailsViewShowsEmbeddedPodTableFocusState(t *testing.T) {
 	}
 	if !strings.Contains(view, "active pane: details") {
 		t.Fatalf("expected active pane in title:\n%s", view)
+	}
+	if !strings.Contains(view, "j/k scroll") || !strings.Contains(view, "enter open-pod") {
+		t.Fatalf("expected per-pane key hints in\n%s", view)
+	}
+	if !strings.Contains(view, "Focus: details") || !strings.Contains(view, "Pods: 1") {
+		t.Fatalf("expected pane status row in\n%s", view)
 	}
 	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	view = stripUsageANSI(app.View())
@@ -949,6 +1131,48 @@ func TestResourceDetailPodsPaneNavigationWorks(t *testing.T) {
 	}
 }
 
+func TestResourceDetailPaneSwitchPreservesPaneState(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	app.height = 16
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	for idx := 0; idx < 3; idx++ {
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("frontend-%d", idx), Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	}
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	details, ok := store.NodeDetailsByKey(state.NodeKey{Cluster: "dev", Name: "node-a"}, time.Now())
+	if !ok {
+		t.Fatalf("expected node details")
+	}
+	app.activeNode = details
+	app.activeNodePods = app.nodeAssociatedPods(time.Now())
+	app.screen = screenResourceDetails
+	_ = app.View()
+
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if got, want := app.textViewport.YOffset, 1; got != want {
+		t.Fatalf("details offset = %d, want %d", got, want)
+	}
+
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if got, want := app.detailPodTable.SelectedIndex(), 1; got != want {
+		t.Fatalf("pod index = %d, want %d", got, want)
+	}
+
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	if got, want := app.textViewport.YOffset, 1; got != want {
+		t.Fatalf("details offset after pane switch = %d, want %d", got, want)
+	}
+
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	if got, want := app.detailPodTable.SelectedIndex(), 1; got != want {
+		t.Fatalf("pod index after pane switch = %d, want %d", got, want)
+	}
+}
+
 func TestTypedGenericDaemonSetDetailsRender(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})
@@ -981,6 +1205,270 @@ func TestTypedGenericDaemonSetDetailsRender(t *testing.T) {
 		if !strings.Contains(rendered, fragment) {
 			t.Fatalf("missing %q in\n%s", fragment, rendered)
 		}
+	}
+}
+
+func TestTypedGenericConfigMapDetailsRender(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "ConfigMaps", Kind: "ConfigMap", Resource: "configmaps", Version: "v1", Namespaced: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "app-config", Namespace: "default", Cluster: "dev", Status: "Active", Age: "5m"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]interface{}{
+				"name":      "app-config",
+				"namespace": "default",
+				"labels":    map[string]interface{}{"app": "web"},
+			},
+			"immutable": true,
+			"data": map[string]interface{}{
+				"app.yaml": "port: 8080\nmode: prod\n",
+				"feature":  "enabled",
+			},
+			"binaryData": map[string]interface{}{
+				"ca.crt": "YWJjZA==",
+			},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	for _, fragment := range []string{"ConfigMap", "Immutable:", "true", "Data", "app.yaml", "Binary data", "ca.crt", "Resource context"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestTypedGenericHorizontalPodAutoscalerDetailsRender(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "HorizontalPodAutoscalers", Kind: "HorizontalPodAutoscaler", Resource: "horizontalpodautoscalers", APIGroup: "autoscaling", Version: "v2", Namespaced: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "web", Namespace: "default", Cluster: "dev", Status: "ScalingActive", Age: "12m"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "autoscaling/v2",
+			"kind":       "HorizontalPodAutoscaler",
+			"metadata": map[string]interface{}{
+				"name":      "web",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"scaleTargetRef": map[string]interface{}{"apiVersion": "apps/v1", "kind": "Deployment", "name": "web"},
+				"minReplicas":    int64(2),
+				"maxReplicas":    int64(6),
+				"metrics": []interface{}{
+					map[string]interface{}{"type": "Resource", "resource": map[string]interface{}{"name": "cpu", "target": map[string]interface{}{"type": "Utilization", "averageUtilization": int64(70)}}},
+				},
+				"behavior": map[string]interface{}{
+					"scaleUp": map[string]interface{}{"stabilizationWindowSeconds": int64(60), "selectPolicy": "Max", "policies": []interface{}{map[string]interface{}{"type": "Pods", "value": int64(4), "periodSeconds": int64(60)}}},
+				},
+			},
+			"status": map[string]interface{}{
+				"currentReplicas": int64(3),
+				"desiredReplicas": int64(4),
+				"currentMetrics": []interface{}{
+					map[string]interface{}{"type": "Resource", "resource": map[string]interface{}{"name": "cpu", "current": map[string]interface{}{"averageUtilization": int64(55), "averageValue": "220m"}}},
+				},
+				"conditions": []interface{}{
+					map[string]interface{}{"type": "AbleToScale", "status": "True", "reason": "ScaleDownStabilized"},
+				},
+			},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	for _, fragment := range []string{"HorizontalPodAutoscaler", "Scale target:", "Deployment/web", "Metrics", "cpu", "current=", "Behavior", "scaleUp", "Conditions"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestTypedGenericPodDisruptionBudgetDetailsRender(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "PodDisruptionBudgets", Kind: "PodDisruptionBudget", Resource: "poddisruptionbudgets", APIGroup: "policy", Version: "v1", Namespaced: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "web-pdb", Namespace: "default", Cluster: "dev", Status: "Healthy", Age: "20m"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "policy/v1",
+			"kind":       "PodDisruptionBudget",
+			"metadata": map[string]interface{}{
+				"name":      "web-pdb",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"selector":                   map[string]interface{}{"matchLabels": map[string]interface{}{"app": "web"}},
+				"minAvailable":               "80%",
+				"unhealthyPodEvictionPolicy": "AlwaysAllow",
+			},
+			"status": map[string]interface{}{
+				"currentHealthy":     int64(5),
+				"desiredHealthy":     int64(4),
+				"expectedPods":       int64(5),
+				"disruptionsAllowed": int64(1),
+				"disruptedPods":      map[string]interface{}{"web-1": "2026-04-22T10:00:00Z"},
+			},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	for _, fragment := range []string{"PodDisruptionBudget", "Min available:", "80%", "Status", "Disruptions allowed:", "Resource context"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestTypedGenericPersistentVolumeClaimDetailsRender(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "PersistentVolumeClaims", Kind: "PersistentVolumeClaim", Resource: "persistentvolumeclaims", Version: "v1", Namespaced: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "data-web-0", Namespace: "default", Cluster: "dev", Status: "Bound", Age: "1h"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "v1",
+			"kind":       "PersistentVolumeClaim",
+			"metadata": map[string]interface{}{
+				"name":      "data-web-0",
+				"namespace": "default",
+			},
+			"spec": map[string]interface{}{
+				"accessModes":      []interface{}{"ReadWriteOnce"},
+				"storageClassName": "fast-ssd",
+				"volumeMode":       "Filesystem",
+				"volumeName":       "pvc-1234",
+				"resources":        map[string]interface{}{"requests": map[string]interface{}{"storage": "10Gi"}},
+				"selector":         map[string]interface{}{"matchLabels": map[string]interface{}{"app": "db"}},
+				"dataSource":       map[string]interface{}{"apiGroup": "snapshot.storage.k8s.io", "kind": "VolumeSnapshot", "name": "db-snap"},
+			},
+			"status": map[string]interface{}{
+				"phase":    "Bound",
+				"capacity": map[string]interface{}{"storage": "10Gi"},
+				"conditions": []interface{}{
+					map[string]interface{}{"type": "FileSystemResizePending", "status": "True", "reason": "Waiting"},
+				},
+			},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	for _, fragment := range []string{"PersistentVolumeClaim", "Access modes:", "ReadWriteOnce", "Binding/source", "VolumeSnapshot/db-snap", "Conditions", "Resource context"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestCustomResourceDetailsSeparateStatusSpecMetadata(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 140
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Widgets", Kind: "Widget", Resource: "widgets", APIGroup: "apps.example.com", Version: "v1", Namespaced: true, Custom: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "blue-widget", Namespace: "default", Cluster: "dev", Ready: "True", Status: "Ready", Age: "8m"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "apps.example.com/v1",
+			"kind":       "Widget",
+			"metadata": map[string]interface{}{
+				"name":            "blue-widget",
+				"namespace":       "default",
+				"generation":      int64(7),
+				"resourceVersion": "42",
+				"annotations":     map[string]interface{}{"owner": "team-a"},
+				"labels":          map[string]interface{}{"app": "widget"},
+				"managedFields": []interface{}{
+					map[string]interface{}{
+						"manager": "kubectl",
+						"fieldsV1": map[string]interface{}{
+							"f:spec":   map[string]interface{}{},
+							"f:status": map[string]interface{}{},
+						},
+					},
+				},
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(3),
+				"image":    "ghcr.io/acme/widget:v1",
+			},
+			"status": map[string]interface{}{
+				"phase":              "Ready",
+				"url":                "https://widget.dev",
+				"observedGeneration": int64(7),
+				"conditions": []interface{}{
+					map[string]interface{}{"type": "Ready", "status": "True", "reason": "Healthy"},
+				},
+			},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	for _, fragment := range []string{"Status", "Phase:", "Ready", "Url:", "https://widget.dev", "Spec", "replicas: 3", "Metadata", "Generation:", "Resource version:"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+	if strings.Contains(rendered, "managedFields") || strings.Contains(rendered, "fieldsV1") || strings.Contains(rendered, "f:spec") {
+		t.Fatalf("expected managed fields stripped from custom resource details:\n%s", rendered)
+	}
+	statusIndex := strings.Index(rendered, "Status")
+	specIndex := strings.Index(rendered, "Spec")
+	metadataIndex := strings.Index(rendered, "Metadata")
+	if !(statusIndex >= 0 && specIndex > statusIndex && metadataIndex > statusIndex) {
+		t.Fatalf("expected status before spec and metadata in\n%s", rendered)
+	}
+}
+
+func TestCustomResourceDetailsUseResponsiveGrid(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 160
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Widgets", Kind: "Widget", Resource: "widgets", APIGroup: "apps.example.com", Version: "v1", Namespaced: true, Custom: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "blue-widget", Namespace: "default", Cluster: "dev", Ready: "True", Status: "Ready", Age: "8m"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "apps.example.com/v1",
+			"kind":       "Widget",
+			"metadata": map[string]interface{}{
+				"name":        "blue-widget",
+				"namespace":   "default",
+				"generation":  int64(7),
+				"annotations": map[string]interface{}{"owner": "team-a"},
+				"labels":      map[string]interface{}{"app": "widget"},
+			},
+			"spec": map[string]interface{}{
+				"replicas": int64(3),
+				"image":    "ghcr.io/acme/widget:v1",
+			},
+			"status": map[string]interface{}{
+				"phase":              "Ready",
+				"url":                "https://widget.dev",
+				"observedGeneration": int64(7),
+				"conditions": []interface{}{
+					map[string]interface{}{"type": "Ready", "status": "True", "reason": "Healthy"},
+				},
+			},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	for _, fragment := range []string{"Overview", "Runtime", "Status", "Conditions", "Metadata", "Context"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("expected grouped custom resource layout fragment %q:\n%s", fragment, rendered)
+		}
+	}
+	metadataIndex := strings.Index(rendered, "Metadata")
+	specIndex := strings.Index(rendered, "Spec")
+	if !(metadataIndex > 0 && specIndex > metadataIndex) {
+		t.Fatalf("expected full-width metadata section before spec:\n%s", rendered)
 	}
 }
 
@@ -1152,6 +1640,14 @@ func TestSortDirectionPickerAcceptsAAndD(t *testing.T) {
 	if !app.podTableSorts[1].Desc {
 		t.Fatalf("expected descending sort")
 	}
+}
+
+func maxRenderedLineWidth(rendered string) int {
+	width := 0
+	for _, line := range strings.Split(stripUsageANSI(rendered), "\n") {
+		width = max(width, lipgloss.Width(line))
+	}
+	return width
 }
 
 func TestListScreensExposeFooterHints(t *testing.T) {

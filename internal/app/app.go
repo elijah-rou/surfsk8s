@@ -1872,7 +1872,18 @@ func (a *App) resizeTables() {
 }
 
 func (a *App) renderPodDetails() string {
-	return renderPodDetails(a.activePod, a.activePodUsage, formatUsageDetailLabel(time.Now(), a.podUsageFetchedAt, a.podUsageLoading))
+	return renderPodDetails(a.resourceDetailContentWidth(), a.activePod, a.activePodUsage, formatUsageDetailLabel(time.Now(), a.podUsageFetchedAt, a.podUsageLoading))
+}
+
+func (a *App) resourceDetailContentWidth() int {
+	if a.width <= 0 {
+		return 120
+	}
+	if a.screen == screenResourceDetails && a.resourceDetailHasPodTable() {
+		paneOuterWidth := max(24, a.width-2)
+		return max(20, paneOuterWidth-2)
+	}
+	return max(20, a.width-2)
 }
 
 func (a *App) renderResourceDetails() string {
