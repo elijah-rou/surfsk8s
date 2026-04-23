@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
 	"strings"
@@ -11,8 +12,10 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
@@ -610,6 +613,374 @@ func TestResourceDetailsSupportViewportScrolling(t *testing.T) {
 	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
 	if got, want := app.textViewport.YOffset, 1; got != want {
 		t.Fatalf("offset = %d, want %d", got, want)
+	}
+}
+
+func TestRenderPodDetailsShowsRichCoreFields(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	started := metav1.NewTime(time.Date(2026, 4, 22, 12, 0, 0, 0, time.UTC))
+	runtimeClass := "gvisor"
+	app.screen = screenPodDetails
+	app.activePod = state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api", Ready: "1/1", Status: "Running", Restarts: 2, Node: "node-a", Age: "5m"},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default", Labels: map[string]string{"app": "api"}, Annotations: map[string]string{"checksum/config": "123"}},
+			Spec: corev1.PodSpec{
+				ServiceAccountName: "api-sa",
+				NodeName:           "node-a",
+				NodeSelector:       map[string]string{"topology.kubernetes.io/zone": "use1a"},
+				RuntimeClassName:   &runtimeClass,
+				Affinity:           &corev1.Affinity{},
+				Tolerations:        []corev1.Toleration{{Key: "dedicated", Operator: corev1.TolerationOpEqual, Value: "gpu", Effect: corev1.TaintEffectNoSchedule}},
+				Containers: []corev1.Container{{
+					Name:  "main",
+					Image: "ghcr.io/acme/api:1.2.3",
+					Ports: []corev1.ContainerPort{{ContainerPort: 8080, Protocol: corev1.ProtocolTCP}},
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")},
+					},
+				}},
+			},
+			Status: corev1.PodStatus{
+				Phase:      corev1.PodRunning,
+				QOSClass:   corev1.PodQOSBurstable,
+				StartTime:  &started,
+				PodIP:      "10.0.0.12",
+				HostIP:     "192.168.0.10",
+				Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue, Reason: "ContainersReady"}},
+			},
+		},
+	}
+	app.activePodUsage = cluster.PodResourceUsage{CPUUsedMilli: 120, CPURequestMilli: 250, HasCPUUsage: true}
+	app.podUsageFetchedAt = time.Now()
+
+	rendered := stripUsageANSI(app.renderPodDetails())
+	for _, fragment := range []string{"Pod", "Service account:", "api-sa", "QoS:", "Burstable", "Conditions", "Ready=True", "Scheduling", "Node selector:", "Containers", "requests=cpu=250m", "Annotations", "checksum/config=123"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestRenderDeploymentDetailsShowsStrategyContainersAndPods(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	replicas := int32(3)
+	maxUnavailable := intstr.FromString("25%")
+	maxSurge := intstr.FromString("1")
+	deployment := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default", Labels: map[string]string{"app": "frontend"}},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frontend"}},
+			Strategy: appsv1.DeploymentStrategy{Type: appsv1.RollingUpdateDeploymentStrategyType, RollingUpdate: &appsv1.RollingUpdateDeployment{MaxUnavailable: &maxUnavailable, MaxSurge: &maxSurge}},
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "frontend"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "nginx:1.27", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")}, Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}}}}},
+			},
+		},
+		Status: appsv1.DeploymentStatus{UpdatedReplicas: 3, AvailableReplicas: 2, ReadyReplicas: 2, Conditions: []appsv1.DeploymentCondition{{Type: appsv1.DeploymentAvailable, Status: corev1.ConditionTrue, Reason: "MinimumReplicasAvailable"}}},
+	}
+	store.UpsertDeployment("dev", deployment)
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default", Labels: map[string]string{"app": "frontend"}}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default", Labels: map[string]string{"app": "other"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning}})
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	details, ok := store.DeploymentDetailsByKey(state.DeploymentKey{Cluster: "dev", Namespace: "default", Name: "frontend"}, time.Now())
+	if !ok {
+		t.Fatalf("expected deployment details")
+	}
+	app.activeDeployment = details
+	app.refreshAssociatedPods(time.Now())
+
+	rendered := stripUsageANSI(app.renderDeploymentDetails())
+	for _, fragment := range []string{"Strategy:", "RollingUpdate", "maxUnavailable=25%", "Rollout", "Conditions", "MinimumReplicasAvailable", "Template resources", "Runtime usage", "Containers", "nginx:1.27", "requests=cpu=250m"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+	if strings.Contains(rendered, "other") {
+		t.Fatalf("unexpected non-associated pod in\n%s", rendered)
+	}
+}
+
+func TestRenderServiceDetailsShowsPoliciesPortsAndPods(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	internalPolicy := corev1.ServiceInternalTrafficPolicyLocal
+	appProtocol := "http"
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default", Labels: map[string]string{"app": "frontend"}},
+		Spec: corev1.ServiceSpec{
+			Type:                  corev1.ServiceTypeLoadBalancer,
+			Selector:              map[string]string{"app": "frontend"},
+			ClusterIP:             "10.96.0.10",
+			ClusterIPs:            []string{"10.96.0.10"},
+			ExternalIPs:           []string{"34.1.2.3"},
+			ExternalTrafficPolicy: corev1.ServiceExternalTrafficPolicyLocal,
+			InternalTrafficPolicy: &internalPolicy,
+			SessionAffinity:       corev1.ServiceAffinityClientIP,
+			Ports:                 []corev1.ServicePort{{Name: "http", Port: 80, Protocol: corev1.ProtocolTCP, TargetPort: intstr.FromInt(8080), AppProtocol: &appProtocol}},
+		},
+	}
+	store.UpsertService("dev", service)
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default", Labels: map[string]string{"app": "frontend"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.activeResource = cluster.ResourceKind{Display: "Services", Resource: "services", Namespaced: true}
+	details, ok := store.ServiceDetailsByKey(state.ServiceKey{Cluster: "dev", Namespace: "default", Name: "frontend"}, time.Now())
+	if !ok {
+		t.Fatalf("expected service details")
+	}
+	app.activeService = details
+	app.refreshAssociatedPods(time.Now())
+
+	rendered := stripUsageANSI(app.renderServiceDetails())
+	for _, fragment := range []string{"Type:", "LoadBalancer", "Cluster IP:", "10.96.0.10", "External IPs:", "34.1.2.3", "Traffic policy:", "external=Local", "internal=Local", "Ports", "http  80/TCP  target=8080  app=http"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestRenderNodeDetailsShowsSystemInfoAndScheduledPods(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node-a", Labels: map[string]string{"node.kubernetes.io/instance-type": "m5.large"}},
+		Spec: corev1.NodeSpec{
+			ProviderID: "aws:///us-east-1a/i-123",
+			PodCIDR:    "10.0.0.0/24",
+			Taints:     []corev1.Taint{{Key: "dedicated", Value: "gpu", Effect: corev1.TaintEffectNoSchedule}},
+		},
+		Status: corev1.NodeStatus{
+			Addresses:   []corev1.NodeAddress{{Type: corev1.NodeHostName, Address: "ip-10-0-0-1"}, {Type: corev1.NodeInternalIP, Address: "10.0.0.1"}, {Type: corev1.NodeExternalIP, Address: "54.0.0.1"}},
+			NodeInfo:    corev1.NodeSystemInfo{OSImage: "Ubuntu 24.04", KernelVersion: "6.8.0", KubeletVersion: "v1.31.0", KubeProxyVersion: "v1.31.0", ContainerRuntimeVersion: "containerd://2.0.0", Architecture: "arm64"},
+			Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue, Reason: "KubeletReady"}},
+			Capacity:    corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("4"), corev1.ResourceMemory: resource.MustParse("16Gi")},
+			Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("3900m"), corev1.ResourceMemory: resource.MustParse("15Gi")},
+		},
+	}
+	store.UpsertNode("dev", node)
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	details, ok := store.NodeDetailsByKey(state.NodeKey{Cluster: "dev", Name: "node-a"}, time.Now())
+	if !ok {
+		t.Fatalf("expected node details")
+	}
+	app.activeNode = details
+	app.activeNodeUsage = cluster.NodeResourceUsage{CPUUsedMilli: 1200, CPUAllocatableMilli: 3900, HasCPUUsage: true}
+	app.nodeUsageFetchedAt = time.Now()
+	app.refreshAssociatedPods(time.Now())
+
+	rendered := stripUsageANSI(app.renderNodeDetails())
+	for _, fragment := range []string{"OS image:", "Ubuntu 24.04", "Kernel:", "6.8.0", "Kubelet:", "v1.31.0", "Resource usage", "Taints", "dedicated=gpu:NoSchedule", "Conditions", "Ready=True", "Capacity", "cpu=4"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
+	}
+}
+
+func TestResourceDetailsEmbeddedPodTableOpensSelectedPod(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	app.height = 24
+	replicas := int32(1)
+	store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frontend"}}}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default", Labels: map[string]string{"app": "frontend"}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+	details, ok := store.DeploymentDetailsByKey(state.DeploymentKey{Cluster: "dev", Namespace: "default", Name: "frontend"}, time.Now())
+	if !ok {
+		t.Fatalf("expected deployment details")
+	}
+	app.activeDeployment = details
+	app.activeDeploymentPods = app.deploymentAssociatedPods(time.Now())
+	app.screen = screenResourceDetails
+
+	_ = app.View()
+	if !strings.Contains(stripUsageANSI(app.View()), "Pods pane (1)") {
+		t.Fatalf("expected embedded pod pane")
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyTab})
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := app.screen, screenPodDetails; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.activePod.Row.Name, "frontend-abc"; got != want {
+		t.Fatalf("pod = %q, want %q", got, want)
+	}
+	if got, want := app.podDetailReturnScreen, screenResourceDetails; got != want {
+		t.Fatalf("return screen = %d, want %d", got, want)
+	}
+}
+
+func TestResourceDetailsViewShowsEmbeddedPodTableFocusState(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	app.height = 24
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	details, ok := store.NodeDetailsByKey(state.NodeKey{Cluster: "dev", Name: "node-a"}, time.Now())
+	if !ok {
+		t.Fatalf("expected node details")
+	}
+	app.activeNode = details
+	app.activeNodePods = app.nodeAssociatedPods(time.Now())
+	app.screen = screenResourceDetails
+
+	view := stripUsageANSI(app.View())
+	if !strings.Contains(view, "● Details pane") || !strings.Contains(view, "○ Pods pane (1)") {
+		t.Fatalf("expected distinct pane headers in\n%s", view)
+	}
+	if !strings.Contains(view, "╭") || !strings.Contains(view, "╰") {
+		t.Fatalf("expected boxed panes in\n%s", view)
+	}
+	if !strings.Contains(view, "active pane: details") {
+		t.Fatalf("expected active pane in title:\n%s", view)
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	view = stripUsageANSI(app.View())
+	if !strings.Contains(view, "○ Details pane") || !strings.Contains(view, "● Pods pane (1)") {
+		t.Fatalf("expected pod-table focus header in\n%s", view)
+	}
+	if !strings.Contains(view, "active pane: pods") {
+		t.Fatalf("expected pod active pane in title:\n%s", view)
+	}
+}
+
+func TestResourceDetailPaneSwitchIsExplicit(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	app.height = 24
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	for idx := 0; idx < 2; idx++ {
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("frontend-%d", idx), Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	}
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	details, ok := store.NodeDetailsByKey(state.NodeKey{Cluster: "dev", Name: "node-a"}, time.Now())
+	if !ok {
+		t.Fatalf("expected node details")
+	}
+	app.activeNode = details
+	app.activeNodePods = app.nodeAssociatedPods(time.Now())
+	app.screen = screenResourceDetails
+	_ = app.View()
+
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if got, want := app.detailFocus, detailFocusContent; got != want {
+		t.Fatalf("focus = %d, want %d", got, want)
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	if got, want := app.detailFocus, detailFocusPods; got != want {
+		t.Fatalf("focus = %d, want %d", got, want)
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	if got, want := app.detailFocus, detailFocusPods; got != want {
+		t.Fatalf("focus changed unexpectedly = %d, want %d", got, want)
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
+	if got, want := app.detailFocus, detailFocusContent; got != want {
+		t.Fatalf("focus = %d, want %d", got, want)
+	}
+}
+
+func TestResourceDetailDetailsPaneNavigationWorks(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	app.height = 16
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	details, ok := store.NodeDetailsByKey(state.NodeKey{Cluster: "dev", Name: "node-a"}, time.Now())
+	if !ok {
+		t.Fatalf("expected node details")
+	}
+	app.activeNode = details
+	app.activeNodePods = app.nodeAssociatedPods(time.Now())
+	app.screen = screenResourceDetails
+	_ = app.View()
+
+	if got, want := app.textViewport.YOffset, 0; got != want {
+		t.Fatalf("initial offset = %d, want %d", got, want)
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if got, want := app.textViewport.YOffset, 1; got != want {
+		t.Fatalf("offset = %d, want %d", got, want)
+	}
+}
+
+func TestResourceDetailPodsPaneNavigationWorks(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+	app.width = 120
+	app.height = 24
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	for idx := 0; idx < 3; idx++ {
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("frontend-%d", idx), Namespace: "default"}, Spec: corev1.PodSpec{NodeName: "node-a"}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	}
+	app.activeResource = cluster.ResourceKind{Display: "Nodes", Resource: "nodes", Namespaced: false}
+	details, ok := store.NodeDetailsByKey(state.NodeKey{Cluster: "dev", Name: "node-a"}, time.Now())
+	if !ok {
+		t.Fatalf("expected node details")
+	}
+	app.activeNode = details
+	app.activeNodePods = app.nodeAssociatedPods(time.Now())
+	app.screen = screenResourceDetails
+	_ = app.View()
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
+	if got, want := app.detailPodTable.SelectedIndex(), 0; got != want {
+		t.Fatalf("initial selected index = %d, want %d", got, want)
+	}
+	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if got, want := app.detailPodTable.SelectedIndex(), 1; got != want {
+		t.Fatalf("selected index = %d, want %d", got, want)
+	}
+}
+
+func TestTypedGenericDaemonSetDetailsRender(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "DaemonSets", Kind: "DaemonSet", Resource: "daemonsets", APIGroup: "apps", Version: "v1", Namespaced: true}
+	app.activeGenericDetails = cluster.GenericResourceDetails{
+		Row: cluster.GenericResourceRow{Name: "node-agent", Namespace: "kube-system", Cluster: "dev", Ready: "3/3", Status: "Running", Age: "15m"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{
+			"apiVersion": "apps/v1",
+			"kind":       "DaemonSet",
+			"metadata": map[string]interface{}{
+				"name":      "node-agent",
+				"namespace": "kube-system",
+				"labels":    map[string]interface{}{"app": "node-agent"},
+			},
+			"spec": map[string]interface{}{
+				"selector":       map[string]interface{}{"matchLabels": map[string]interface{}{"app": "node-agent"}},
+				"updateStrategy": map[string]interface{}{"type": "RollingUpdate"},
+				"template": map[string]interface{}{
+					"metadata": map[string]interface{}{"labels": map[string]interface{}{"app": "node-agent"}},
+					"spec":     map[string]interface{}{"containers": []interface{}{map[string]interface{}{"name": "agent", "image": "ghcr.io/acme/agent:1.0.0"}}},
+				},
+			},
+			"status": map[string]interface{}{"desiredNumberScheduled": int64(3), "currentNumberScheduled": int64(3), "updatedNumberScheduled": int64(3), "numberReady": int64(3)},
+		}},
+	}
+
+	rendered := stripUsageANSI(app.renderGenericResourceDetails())
+	for _, fragment := range []string{"DaemonSet", "Update strategy:", "RollingUpdate", "Rollout", "Desired:", "Pod template", "Containers", "agent", "Resource context"} {
+		if !strings.Contains(rendered, fragment) {
+			t.Fatalf("missing %q in\n%s", fragment, rendered)
+		}
 	}
 }
 

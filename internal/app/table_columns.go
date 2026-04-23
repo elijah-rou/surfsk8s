@@ -135,6 +135,17 @@ func (a *App) selectedTableColumnTarget() (string, string, int, int, bool) {
 			return "", "", 0, 0, false
 		}
 		return "pods", columns[index].Title, columns[index].Width, defaults[index].Width, true
+	case screenResourceDetails:
+		if a.detailFocus != detailFocusPods {
+			return "", "", 0, 0, false
+		}
+		index := a.detailPodTable.SelectedColumnIndex()
+		columns := a.currentPodColumns()
+		defaults := a.podsView.Columns()
+		if index < 0 || index >= len(columns) || index >= len(defaults) {
+			return "", "", 0, 0, false
+		}
+		return "pods", columns[index].Title, columns[index].Width, defaults[index].Width, true
 	case screenResourceList:
 		index := a.resourceTable.SelectedColumnIndex()
 		columns := a.currentResourceColumns()

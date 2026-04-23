@@ -25,7 +25,7 @@ func (a *App) scrollWheel(direction int) tea.Cmd {
 		panic("app.scrollWheel: invalid direction")
 	}
 
-	if a.usesTextViewport() {
+	if a.usesTextViewport() || (a.screen == screenResourceDetails && a.resourceDetailHasPodTable() && a.detailFocus == detailFocusContent) {
 		var cmd tea.Cmd
 		a.textViewport, cmd = a.textViewport.Update(wheelMouseMsg(direction))
 		return cmd
@@ -54,6 +54,14 @@ func (a *App) scrollWheel(direction int) tea.Cmd {
 			a.resourceTable.MoveUp(steps)
 		} else {
 			a.resourceTable.MoveDown(steps)
+		}
+	case screenResourceDetails:
+		if a.resourceDetailHasPodTable() && a.detailFocus == detailFocusPods {
+			if direction < 0 {
+				a.detailPodTable.MoveUp(steps)
+			} else {
+				a.detailPodTable.MoveDown(steps)
+			}
 		}
 	}
 	return nil

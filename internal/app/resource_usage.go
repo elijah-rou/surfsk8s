@@ -102,10 +102,13 @@ func (a *App) listUsageStatus(now time.Time) string {
 }
 
 func (a *App) maybeRefreshPodUsageListCmd(now time.Time) tea.Cmd {
-	if a.screen != screenPods || a.podUsageListLoading {
+	if !a.screenSupportsPodUsageList() || a.podUsageListLoading {
 		return nil
 	}
-	scopeKey := a.podUsageScopeKey()
+	contextScope, namespace, scopeKey, ok := a.podUsageFetchScope()
+	if !ok {
+		return nil
+	}
 	if a.podUsageListScopeKey == scopeKey && !a.podUsageListFetchedAt.IsZero() && now.Sub(a.podUsageListFetchedAt) < resourceUsageRefreshInterval {
 		return nil
 	}
@@ -118,7 +121,7 @@ func (a *App) maybeRefreshPodUsageListCmd(now time.Time) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
-		return podUsageSnapshotMsg{scopeKey: scopeKey, generation: generation, usages: a.manager.ListPodResourceUsages(ctx, a.contextScope, a.namespace)}
+		return podUsageSnapshotMsg{scopeKey: scopeKey, generation: generation, usages: a.manager.ListPodResourceUsages(ctx, contextScope, namespace)}
 	}
 }
 
@@ -164,29 +167,75 @@ func (a *App) maybeRefreshResourceUsageCmd(now time.Time) tea.Cmd {
 			return podUsageResultMsg{key: details.Row.Key, usage: a.manager.PodResourceUsage(ctx, details)}
 		}
 	case screenResourceDetails:
-		if a.activeResource.Resource != "nodes" || a.activeResource.APIGroup != "" || a.activeNode.Node == nil || a.nodeUsageLoading {
-			return nil
+		cmds := make([]tea.Cmd, 0, 2)
+		if cmd := a.maybeRefreshPodUsageListCmd(now); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
-		if usage, ok := a.nodeUsageByKey[a.activeNode.Row.Key.String()]; ok {
-			a.activeNodeUsage = usage
+		if a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" && a.activeNode.Node != nil && !a.nodeUsageLoading {
+			if usage, ok := a.nodeUsageByKey[a.activeNode.Row.Key.String()]; ok {
+				a.activeNodeUsage = usage
+			}
+			if a.nodeUsageFetchedAt.IsZero() || now.Sub(a.nodeUsageFetchedAt) >= resourceUsageRefreshInterval {
+				a.nodeUsageLoading = true
+				details := a.activeNode
+				cmds = append(cmds, func() tea.Msg {
+					ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+					defer cancel()
+					return nodeUsageResultMsg{key: details.Row.Key, usage: a.manager.NodeResourceUsage(ctx, details)}
+				})
+			}
 		}
-		if !a.nodeUsageFetchedAt.IsZero() && now.Sub(a.nodeUsageFetchedAt) < resourceUsageRefreshInterval {
-			return nil
-		}
-		a.nodeUsageLoading = true
-		details := a.activeNode
-		return func() tea.Msg {
-			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-			defer cancel()
-			return nodeUsageResultMsg{key: details.Row.Key, usage: a.manager.NodeResourceUsage(ctx, details)}
-		}
+		return tea.Batch(cmds...)
 	default:
 		return nil
 	}
 }
 
 func (a *App) podUsageScopeKey() string {
-	return a.contextScope + "|" + a.namespace
+	_, _, scopeKey, ok := a.podUsageFetchScope()
+	if !ok {
+		return a.contextScope + "|" + a.namespace
+	}
+	return scopeKey
+}
+
+func (a *App) screenSupportsPodUsageList() bool {
+	if a.screen == screenPods {
+		return true
+	}
+	if a.screen != screenResourceDetails {
+		return false
+	}
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		return a.activeDeployment.Deployment != nil
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		return a.activeService.Service != nil
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		return a.activeNode.Node != nil
+	default:
+		return false
+	}
+}
+
+func (a *App) podUsageFetchScope() (string, string, string, bool) {
+	switch {
+	case a.screen == screenPods:
+		return a.contextScope, a.namespace, a.contextScope + "|" + a.namespace, true
+	case a.screen == screenResourceDetails && a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		clusterName := a.activeDeployment.Row.Cluster
+		namespace := a.activeDeployment.Row.Namespace
+		return clusterName, namespace, clusterName + "|" + namespace, true
+	case a.screen == screenResourceDetails && a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		clusterName := a.activeService.Row.Cluster
+		namespace := a.activeService.Row.Namespace
+		return clusterName, namespace, clusterName + "|" + namespace, true
+	case a.screen == screenResourceDetails && a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		clusterName := a.activeNode.Row.Cluster
+		return clusterName, "", clusterName + "|", true
+	default:
+		return "", "", "", false
+	}
 }
 
 func (a *App) nodeUsageScopeKey() string {

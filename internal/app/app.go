@@ -85,6 +85,13 @@ const (
 	screenTableSortManager
 )
 
+type detailFocusKind uint8
+
+const (
+	detailFocusContent detailFocusKind = iota
+	detailFocusPods
+)
+
 type pickerMode int
 
 const (
@@ -128,6 +135,7 @@ type App struct {
 	navTable              components.Table
 	podTable              components.Table
 	resourceTable         components.Table
+	detailPodTable        components.Table
 	filter                components.Filter
 	statusBar             components.StatusBar
 	textViewport          viewport.Model
@@ -136,7 +144,9 @@ type App struct {
 	commands              []commandItem
 	screen                screen
 	prevScreen            screen
+	podDetailReturnScreen screen
 	pickerMode            pickerMode
+	detailFocus           detailFocusKind
 
 	width  int
 	height int
@@ -217,6 +227,9 @@ type App struct {
 	activeDeployment             state.DeploymentDetails
 	activeService                state.ServiceDetails
 	activeNode                   state.NodeDetails
+	activeDeploymentPods         []state.PodRow
+	activeServicePods            []state.PodRow
+	activeNodePods               []state.PodRow
 	activeGenericDetails         cluster.GenericResourceDetails
 	activePodUsage               cluster.PodResourceUsage
 	activeNodeUsage              cluster.NodeResourceUsage
@@ -325,6 +338,9 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	podTable.SetEmptyMessage("No pods")
 	resourceTable := components.NewTable(deploymentsView.Columns())
 	resourceTable.SetVariant(components.TableVariantRich)
+	detailPodTable := components.NewTable(podsView.Columns())
+	detailPodTable.SetVariant(components.TableVariantRich)
+	detailPodTable.SetEmptyMessage("No associated pods")
 	filter := components.NewFilter()
 	statusBar := components.NewStatusBar()
 	textViewport := viewport.New(0, 0)
@@ -351,6 +367,7 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 		navTable:               navTable,
 		podTable:               podTable,
 		resourceTable:          resourceTable,
+		detailPodTable:         detailPodTable,
 		filter:                 filter,
 		statusBar:              statusBar,
 		textViewport:           textViewport,
@@ -617,6 +634,8 @@ func (a *App) View() string {
 
 	if catalogScreen {
 		body = a.renderCatalogBody()
+	} else if a.screen == screenResourceDetails && a.resourceDetailHasPodTable() {
+		body = a.renderResourceDetailBody(body, len(sections))
 	} else if a.usesTextViewport() {
 		body = a.renderTextViewport(body, len(sections))
 	}
@@ -980,6 +999,7 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		a.podUsageLoading = false
 		a.lastDataVersion = a.store.PodVersion()
 		a.lastTick = time.Now()
+		a.podDetailReturnScreen = screenPods
 		a.screen = screenPodDetails
 		a.resetTextViewport()
 		return a.maybeRefreshResourceUsageCmd(time.Now())
@@ -1104,6 +1124,12 @@ func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
 	}
 	switch msg.String() {
 	case "esc", "backspace":
+		if a.podDetailReturnScreen == screenResourceDetails {
+			a.screen = screenResourceDetails
+			a.detailFocus = detailFocusPods
+			a.resetTextViewport()
+			return nil
+		}
 		a.screen = screenPods
 		a.refreshPods(time.Now())
 	case "x":
@@ -1125,10 +1151,28 @@ func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
-	if a.updateTextViewportKeys(msg) {
+	if a.resourceDetailHasPodTable() {
+		if a.detailFocus == detailFocusPods {
+			if a.updateResourceDetailPodTableKeys(msg) {
+				return nil
+			}
+		} else if a.updateResourceDetailViewportKeys(msg) {
+			return nil
+		}
+	} else if a.updateTextViewportKeys(msg) {
 		return nil
 	}
 	switch msg.String() {
+	case "tab", "]":
+		if a.resourceDetailHasPodTable() {
+			a.detailFocus = detailFocusPods
+			return nil
+		}
+	case "shift+tab", "[":
+		if a.resourceDetailHasPodTable() {
+			a.detailFocus = detailFocusContent
+			return nil
+		}
 	case "esc", "backspace":
 		if a.isResourceListKindImplemented() {
 			a.screen = screenResourceList
@@ -1155,6 +1199,109 @@ func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.openContextScopePicker()
 	}
 	return nil
+}
+
+func (a *App) updateResourceDetailViewportKeys(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "j", "down":
+		a.textViewport.ScrollDown(1)
+		return true
+	case "k", "up":
+		a.textViewport.ScrollUp(1)
+		return true
+	case "g", "home":
+		a.textViewport.GotoTop()
+		return true
+	case "G", "end":
+		a.textViewport.GotoBottom()
+		return true
+	case "pgdown", "f":
+		a.textViewport.PageDown()
+		return true
+	case "pgup", "b":
+		a.textViewport.PageUp()
+		return true
+	default:
+		return false
+	}
+}
+
+func (a *App) updateResourceDetailPodTableKeys(msg tea.KeyMsg) bool {
+	switch msg.String() {
+	case "j", "down":
+		a.detailPodTable.MoveDown(1)
+		return true
+	case "J":
+		a.detailPodTable.MoveBottom()
+		return true
+	case "k", "up":
+		a.detailPodTable.MoveUp(1)
+		return true
+	case "K":
+		a.detailPodTable.MoveTop()
+		return true
+	case "g", "home":
+		a.detailPodTable.MoveTop()
+		return true
+	case "G", "end":
+		a.detailPodTable.MoveBottom()
+		return true
+	case "pgdown", "f":
+		a.detailPodTable.MoveDown(max(1, a.listPageSize()))
+		return true
+	case "pgup", "b":
+		a.detailPodTable.MoveUp(max(1, a.listPageSize()))
+		return true
+	case "h":
+		a.detailPodTable.MoveLeft(1)
+		return true
+	case "H", "shift+h":
+		a.detailPodTable.MoveColumnStart()
+		return true
+	case "l":
+		a.detailPodTable.MoveRight(1)
+		return true
+	case "L", "shift+l":
+		a.detailPodTable.MoveColumnEnd()
+		return true
+	case "+", "=":
+		a.adjustSelectedTableColumnWidth(1)
+		return true
+	case "-", "_":
+		a.adjustSelectedTableColumnWidth(-1)
+		return true
+	case "0":
+		a.toggleSelectedTableColumnCollapse()
+		return true
+	case "enter":
+		return a.openSelectedDetailPod(time.Now())
+	default:
+		return false
+	}
+}
+
+func (a *App) openSelectedDetailPod(now time.Time) bool {
+	rows := a.currentAssociatedPodRows()
+	index := a.detailPodTable.SelectedIndex()
+	if index < 0 || index >= len(rows) {
+		a.statusMessage = "pod vanished during refresh"
+		return true
+	}
+	details, ok := a.store.PodDetailsByKey(rows[index].Key, now)
+	if !ok {
+		a.statusMessage = "pod vanished during refresh"
+		return true
+	}
+	a.activePod = details
+	a.activePodUsage = a.podUsageByKey[details.Row.Key.String()]
+	a.podUsageFetchedAt = time.Time{}
+	a.podUsageLoading = false
+	a.lastDataVersion = a.store.PodVersion()
+	a.lastTick = now
+	a.podDetailReturnScreen = screenResourceDetails
+	a.screen = screenPodDetails
+	a.resetTextViewport()
+	return true
 }
 
 func (a *App) updateCommandKeys(msg tea.KeyMsg) tea.Cmd {
@@ -1208,7 +1355,7 @@ func (a *App) currentView() (string, string, string) {
 	case screenPodDetails:
 		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  g/G edge  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  l logs  esc back"
 	case screenResourceDetails:
-		return "surfsk8s · resource details", a.renderResourceDetails(), a.resourceDetailFooter()
+		return a.resourceDetailTitle(), a.renderResourceDetails(), a.resourceDetailFooter()
 	case screenLogs:
 		return "surfsk8s · " + a.logTitle, a.renderLogs(), a.logFooter()
 	case screenCommands:
@@ -1578,6 +1725,7 @@ func (a *App) refreshActiveResourceDetails(now time.Time) {
 		storeVersion := a.builtInResourceDataVersion()
 		if storeVersion == a.lastDataVersion {
 			a.refreshCurrentDetailAge(now)
+			a.refreshAssociatedPods(now)
 			a.lastTick = now
 			return
 		}
@@ -1599,16 +1747,20 @@ func (a *App) refreshCurrentDetail(now time.Time) bool {
 	case "deployments":
 		row, ok := a.store.DeploymentDetailsByKey(a.activeDeployment.Row.Key, now)
 		if !ok {
+			a.activeDeploymentPods = nil
 			return false
 		}
 		a.activeDeployment = row
+		a.activeDeploymentPods = a.deploymentAssociatedPods(now)
 		return true
 	case "services":
 		row, ok := a.store.ServiceDetailsByKey(a.activeService.Row.Key, now)
 		if !ok {
+			a.activeServicePods = nil
 			return false
 		}
 		a.activeService = row
+		a.activeServicePods = a.serviceAssociatedPods(now)
 		return true
 	case "nodes":
 		row, ok := a.store.NodeDetailsByKey(a.activeNode.Row.Key, now)
@@ -1616,9 +1768,11 @@ func (a *App) refreshCurrentDetail(now time.Time) bool {
 			a.activeNodeUsage = cluster.NodeResourceUsage{}
 			a.nodeUsageFetchedAt = time.Time{}
 			a.nodeUsageLoading = false
+			a.activeNodePods = nil
 			return false
 		}
 		a.activeNode = row
+		a.activeNodePods = a.nodeAssociatedPods(now)
 		return true
 	default:
 		return false
@@ -1629,10 +1783,19 @@ func (a *App) refreshCurrentDetailAge(now time.Time) {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		a.activeDeployment.Row = a.activeDeployment.Row.WithAge(now)
+		for idx := range a.activeDeploymentPods {
+			a.activeDeploymentPods[idx] = a.activeDeploymentPods[idx].WithAge(now)
+		}
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		a.activeService.Row = a.activeService.Row.WithAge(now)
+		for idx := range a.activeServicePods {
+			a.activeServicePods[idx] = a.activeServicePods[idx].WithAge(now)
+		}
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		a.activeNode.Row = a.activeNode.Row.WithAge(now)
+		for idx := range a.activeNodePods {
+			a.activeNodePods[idx] = a.activeNodePods[idx].WithAge(now)
+		}
 	}
 }
 
@@ -1648,6 +1811,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 			return false
 		}
 		a.activeDeployment = details
+		a.activeDeploymentPods = a.deploymentAssociatedPods(now)
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		row, ok := a.serviceRowAt(index, now)
 		if !ok {
@@ -1658,6 +1822,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 			return false
 		}
 		a.activeService = details
+		a.activeServicePods = a.serviceAssociatedPods(now)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		row, ok := a.nodeRowAt(index, now)
 		if !ok {
@@ -1668,6 +1833,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 			return false
 		}
 		a.activeNode = details
+		a.activeNodePods = a.nodeAssociatedPods(now)
 		a.activeNodeUsage = a.nodeUsageByKey[details.Row.Key.String()]
 		a.nodeUsageFetchedAt = time.Time{}
 		a.nodeUsageLoading = false
@@ -1675,6 +1841,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 		return a.openCurrentGenericResourceSelection(index, now)
 	}
 	a.screen = screenResourceDetails
+	a.detailFocus = detailFocusContent
 	a.lastDataVersion = a.builtInResourceDataVersion()
 	a.lastTick = now
 	a.resetTextViewport()
@@ -1705,49 +1872,17 @@ func (a *App) resizeTables() {
 }
 
 func (a *App) renderPodDetails() string {
-	pod := a.activePod.Pod
-	if pod == nil {
-		return "pod disappeared"
-	}
-
-	sections := []string{
-		fmt.Sprintf("Name:      %s", a.activePod.Row.Name),
-		fmt.Sprintf("Namespace: %s", a.activePod.Row.Namespace),
-		fmt.Sprintf("Cluster:   %s", a.activePod.Row.Cluster),
-		fmt.Sprintf("Status:    %s", a.activePod.Row.Status),
-		fmt.Sprintf("Ready:     %s", a.activePod.Row.Ready),
-		fmt.Sprintf("Restarts:  %d", a.activePod.Row.Restarts),
-		fmt.Sprintf("Node:      %s", a.activePod.Row.Node),
-		fmt.Sprintf("Age:       %s", a.activePod.Row.Age),
-	}
-
-	if usage := renderPodUsageSectionWithLabel(a.activePodUsage, formatUsageDetailLabel(time.Now(), a.podUsageFetchedAt, a.podUsageLoading)); usage != "" {
-		sections = append(sections, "", usage)
-	}
-	if len(pod.Spec.Containers) != 0 {
-		sections = append(sections, "", "Containers:")
-		for _, container := range pod.Spec.Containers {
-			sections = append(sections, "- "+container.Name+renderContainerPorts(container))
-		}
-	}
-	if len(pod.Labels) != 0 {
-		sections = append(sections, "", "Labels:")
-		keys := sortedMapKeys(pod.Labels)
-		for _, key := range keys {
-			sections = append(sections, fmt.Sprintf("- %s=%s", key, pod.Labels[key]))
-		}
-	}
-	return strings.Join(sections, "\n")
+	return renderPodDetails(a.activePod, a.activePodUsage, formatUsageDetailLabel(time.Now(), a.podUsageFetchedAt, a.podUsageLoading))
 }
 
 func (a *App) renderResourceDetails() string {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return renderDeploymentDetails(a.activeDeployment)
+		return a.renderDeploymentDetails()
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		return renderServiceDetails(a.activeService)
+		return a.renderServiceDetails()
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return renderNodeDetails(a.activeNode, a.activeNodeUsage, formatUsageDetailLabel(time.Now(), a.nodeUsageFetchedAt, a.nodeUsageLoading))
+		return a.renderNodeDetails()
 	default:
 		return a.renderGenericResourceDetails()
 	}
@@ -1774,15 +1909,27 @@ func (a *App) resourceListFooter() string {
 	}
 }
 
+func (a *App) resourceDetailTitle() string {
+	if !a.resourceDetailHasPodTable() {
+		return "surfsk8s · resource details"
+	}
+	pane := "details"
+	if a.detailFocus == detailFocusPods {
+		pane = "pods"
+	}
+	return "surfsk8s · resource details · active pane: " + pane
+}
+
 func (a *App) resourceDetailFooter() string {
-	prefix := "j/k scroll  pgup/pgdn page  g/G edge  R resource-find  c ctx-find  "
+	prefix := "j/k scroll  pgup/pgdn page  g/G edge  [/tab pane-up  ]/tab pane-down  R resource-find  c ctx-find  "
+	podTableHints := "enter open-pod  +/- width  0 collapse  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return prefix + "n ns-find  s scale  r restart  e edit  l logs  esc back"
+		return prefix + podTableHints + "n ns-find  s scale  r restart  e edit  l logs  esc back"
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		return prefix + "n ns-find  p port-forward  e edit  esc back"
+		return prefix + podTableHints + "n ns-find  p port-forward  e edit  esc back"
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return prefix + "e edit  l logs  esc back"
+		return prefix + podTableHints + "e edit  l logs  esc back"
 	default:
 		if a.activeResource.Namespaced {
 			return prefix + "n ns-find  e edit  esc back"
@@ -2302,82 +2449,6 @@ func renderContainerPorts(container corev1.Container) string {
 		ports = append(ports, fmt.Sprintf("%d/%s", port.ContainerPort, port.Protocol))
 	}
 	return "  ports=" + strings.Join(ports, ",")
-}
-
-func renderDeploymentDetails(details state.DeploymentDetails) string {
-	deployment := details.Deployment
-	if deployment == nil {
-		return "deployment disappeared"
-	}
-	sections := []string{
-		fmt.Sprintf("Name:      %s", details.Row.Name),
-		fmt.Sprintf("Namespace: %s", details.Row.Namespace),
-		fmt.Sprintf("Cluster:   %s", details.Row.Cluster),
-		fmt.Sprintf("Ready:     %s", details.Row.Ready),
-		fmt.Sprintf("Updated:   %d", details.Row.UpToDate),
-		fmt.Sprintf("Available: %d", details.Row.Available),
-		fmt.Sprintf("Age:       %s", details.Row.Age),
-	}
-	if len(deployment.Spec.Template.Spec.Containers) != 0 {
-		sections = append(sections, "", "Containers:")
-		for _, container := range deployment.Spec.Template.Spec.Containers {
-			sections = append(sections, fmt.Sprintf("- %s  image=%s%s", container.Name, container.Image, renderContainerPorts(container)))
-		}
-	}
-	return strings.Join(sections, "\n")
-}
-
-func renderServiceDetails(details state.ServiceDetails) string {
-	service := details.Service
-	if service == nil {
-		return "service disappeared"
-	}
-	sections := []string{
-		fmt.Sprintf("Name:       %s", details.Row.Name),
-		fmt.Sprintf("Namespace:  %s", details.Row.Namespace),
-		fmt.Sprintf("Cluster:    %s", details.Row.Cluster),
-		fmt.Sprintf("Type:       %s", details.Row.Type),
-		fmt.Sprintf("Cluster IP: %s", details.Row.ClusterIP),
-		fmt.Sprintf("Ports:      %s", details.Row.Ports),
-		fmt.Sprintf("Age:        %s", details.Row.Age),
-	}
-	if len(service.Spec.Selector) != 0 {
-		sections = append(sections, "", "Selector:")
-		keys := sortedMapKeys(service.Spec.Selector)
-		for _, key := range keys {
-			sections = append(sections, fmt.Sprintf("- %s=%s", key, service.Spec.Selector[key]))
-		}
-	}
-	return strings.Join(sections, "\n")
-}
-
-func renderNodeDetails(details state.NodeDetails, usage cluster.NodeResourceUsage, usageLabel string) string {
-	node := details.Node
-	if node == nil {
-		return "node disappeared"
-	}
-	sections := []string{
-		fmt.Sprintf("Name:    %s", details.Row.Name),
-		fmt.Sprintf("Cluster: %s", details.Row.Cluster),
-		fmt.Sprintf("Status:  %s", details.Row.Status),
-		fmt.Sprintf("Roles:   %s", details.Row.Roles),
-		fmt.Sprintf("Version: %s", details.Row.Version),
-		fmt.Sprintf("Age:     %s", details.Row.Age),
-	}
-	if internalIP := nodeAddress(node, corev1.NodeInternalIP); internalIP != "" {
-		sections = append(sections, fmt.Sprintf("Internal IP: %s", internalIP))
-	}
-	if usageSection := renderNodeUsageSectionWithLabel(usage, usageLabel); usageSection != "" {
-		sections = append(sections, "", usageSection)
-	}
-	if len(node.Labels) != 0 {
-		sections = append(sections, "", "Labels:")
-		keys := sortedMapKeys(node.Labels)
-		for _, key := range keys {
-			sections = append(sections, fmt.Sprintf("- %s=%s", key, node.Labels[key]))
-		}
-	}
-	return strings.Join(sections, "\n")
 }
 
 func nodeAddress(node *corev1.Node, addressType corev1.NodeAddressType) string {

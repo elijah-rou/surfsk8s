@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -339,26 +338,29 @@ func (a *App) openCurrentGenericResourceSelection(index int, now time.Time) bool
 }
 
 func (a *App) renderGenericResourceDetails() string {
+	if rendered, ok := a.renderTypedGenericResourceDetails(); ok {
+		return rendered
+	}
 	details := a.activeGenericDetails
 	if details.Object == nil {
 		return "resource disappeared"
 	}
 	sections := []string{
-		fmt.Sprintf("Name:        %s", details.Row.Name),
-		fmt.Sprintf("Namespace:   %s", defaultString(details.Row.Namespace, "cluster")),
-		fmt.Sprintf("Cluster:     %s", details.Row.Cluster),
-		fmt.Sprintf("Kind:        %s", a.activeResource.Kind),
-		fmt.Sprintf("API group:   %s", defaultString(a.activeResource.APIGroup, "core")),
-		fmt.Sprintf("API version: %s", defaultString(a.activeResource.Version, "server-default")),
-		fmt.Sprintf("Resource:    %s", a.activeResource.Resource),
-		fmt.Sprintf("Ready:       %s", defaultString(details.Row.Ready, "unknown")),
-		fmt.Sprintf("Status:      %s", defaultString(details.Row.Status, "unknown")),
-		fmt.Sprintf("Age:         %s", details.Row.Age),
-		"",
-		"YAML:",
-		details.YAML,
+		renderDetailFieldSection("Resource", []detailField{
+			{Label: "Name", Value: details.Row.Name},
+			{Label: "Namespace", Value: defaultString(details.Row.Namespace, "cluster")},
+			{Label: "Cluster", Value: details.Row.Cluster},
+			{Label: "Kind", Value: a.activeResource.Kind},
+			{Label: "API group", Value: defaultString(a.activeResource.APIGroup, "core")},
+			{Label: "API version", Value: defaultString(a.activeResource.Version, "server-default")},
+			{Label: "Resource", Value: a.activeResource.Resource},
+			{Label: "Ready", Value: defaultString(details.Row.Ready, "unknown")},
+			{Label: "Status", Value: defaultString(details.Row.Status, "unknown")},
+			{Label: "Age", Value: details.Row.Age},
+		}),
+		renderDetailSection("YAML", []string{details.YAML}),
 	}
-	return strings.Join(sections, "\n")
+	return joinDetailSections(sections...)
 }
 
 func genericPrinterCacheKey(row cluster.GenericResourceRow) string {
