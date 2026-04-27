@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/elijahrou/surfsk8s/internal/actions"
+	"github.com/elijahrou/surfsk8s/internal/cluster"
 )
 
 type inputMode uint8
@@ -528,4 +529,279 @@ func (a *App) runRestartResource() tea.Cmd {
 		}
 		return runProcessCommand(cmd, description)
 	})
+}
+
+func (a *App) deleteSelectedPod(now time.Time) tea.Cmd {
+	row, ok := a.podRowAt(a.podTable.SelectedIndex(), now)
+	if !ok {
+		a.statusMessage = "pod vanished during refresh"
+		return nil
+	}
+	details, ok := a.store.PodDetailsByKey(row.Key, now)
+	if !ok {
+		a.statusMessage = "pod vanished during refresh"
+		return nil
+	}
+	a.activePod = details
+	return a.runDeletePod()
+}
+
+func (a *App) deleteSelectedResource(now time.Time) tea.Cmd {
+	if !a.selectCurrentResourceDeleteTarget(now) {
+		if a.statusMessage == "" {
+			a.statusMessage = "resource vanished during refresh"
+		}
+		return nil
+	}
+	return a.runDeleteResource()
+}
+
+func (a *App) selectCurrentResourceDeleteTarget(now time.Time) bool {
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return false
+		}
+		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
+		if !ok {
+			return false
+		}
+		a.activeDeployment = details
+		return true
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return false
+		}
+		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
+		if !ok {
+			return false
+		}
+		a.activeService = details
+		return true
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		row, ok := a.nodeRowAt(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return false
+		}
+		details, ok := a.store.NodeDetailsByKey(row.Key, now)
+		if !ok {
+			return false
+		}
+		a.activeNode = details
+		return true
+	default:
+		row, ok := a.genericResourceRowAt(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return false
+		}
+		details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, row.Key, now)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return false
+		}
+		a.activeGenericDetails = details
+		return true
+	}
+}
+
+func (a *App) runDeletePod() tea.Cmd {
+	_, description, err := a.executor.DeletePod(a.activePod)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return nil
+	}
+	returnScreen := a.screen
+	confirmation := deleteConfirmationDescription(description, "Pod", a.activePod.Row.Cluster, a.activePod.Row.Namespace, a.activePod.Row.Name)
+	return a.openConfirmAction(confirmation, func() tea.Cmd {
+		details, ok := a.store.PodDetailsByKey(a.activePod.Row.Key, time.Now())
+		if !ok {
+			a.statusMessage = "pod vanished during refresh"
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activePod = details
+		cmd, description, err := a.executor.DeletePod(details)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		if returnScreen == screenPodDetails {
+			if a.podDetailReturnScreen == screenResourceDetails {
+				a.screen = screenResourceDetails
+			} else {
+				a.screen = screenPods
+			}
+		}
+		return runProcessCommand(cmd, description)
+	})
+}
+
+func (a *App) runDeleteResource() tea.Cmd {
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		return a.runDeleteDeployment()
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		return a.runDeleteService()
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		return a.runDeleteNode()
+	default:
+		return a.runDeleteGenericResource()
+	}
+}
+
+func (a *App) runDeleteDeployment() tea.Cmd {
+	_, description, err := a.executor.DeleteDeployment(a.activeDeployment)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return nil
+	}
+	returnScreen := a.screen
+	confirmation := deleteConfirmationDescription(description, "Deployment", a.activeDeployment.Row.Cluster, a.activeDeployment.Row.Namespace, a.activeDeployment.Row.Name)
+	return a.openConfirmAction(confirmation, func() tea.Cmd {
+		details, ok := a.store.DeploymentDetailsByKey(a.activeDeployment.Row.Key, time.Now())
+		if !ok {
+			a.statusMessage = "resource vanished during refresh"
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activeDeployment = details
+		cmd, description, err := a.executor.DeleteDeployment(details)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		if returnScreen == screenResourceDetails {
+			a.screen = screenResourceList
+		}
+		return runProcessCommand(cmd, description)
+	})
+}
+
+func (a *App) runDeleteService() tea.Cmd {
+	_, description, err := a.executor.DeleteService(a.activeService)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return nil
+	}
+	returnScreen := a.screen
+	confirmation := deleteConfirmationDescription(description, "Service", a.activeService.Row.Cluster, a.activeService.Row.Namespace, a.activeService.Row.Name)
+	return a.openConfirmAction(confirmation, func() tea.Cmd {
+		details, ok := a.store.ServiceDetailsByKey(a.activeService.Row.Key, time.Now())
+		if !ok {
+			a.statusMessage = "resource vanished during refresh"
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activeService = details
+		cmd, description, err := a.executor.DeleteService(details)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		if returnScreen == screenResourceDetails {
+			a.screen = screenResourceList
+		}
+		return runProcessCommand(cmd, description)
+	})
+}
+
+func (a *App) runDeleteNode() tea.Cmd {
+	_, description, err := a.executor.DeleteNode(a.activeNode)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return nil
+	}
+	returnScreen := a.screen
+	confirmation := deleteConfirmationDescription(description, "Node", a.activeNode.Row.Cluster, "", a.activeNode.Row.Name)
+	return a.openConfirmAction(confirmation, func() tea.Cmd {
+		details, ok := a.store.NodeDetailsByKey(a.activeNode.Row.Key, time.Now())
+		if !ok {
+			a.statusMessage = "resource vanished during refresh"
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activeNode = details
+		cmd, description, err := a.executor.DeleteNode(details)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		if returnScreen == screenResourceDetails {
+			a.screen = screenResourceList
+		}
+		return runProcessCommand(cmd, description)
+	})
+}
+
+func (a *App) runDeleteGenericResource() tea.Cmd {
+	_, description, err := a.executor.DeleteGenericResource(a.activeResource, a.activeGenericDetails)
+	if err != nil {
+		a.statusMessage = err.Error()
+		return nil
+	}
+	returnScreen := a.screen
+	kind := genericDeleteKind(a.activeResource)
+	confirmation := deleteConfirmationDescription(description, kind, a.activeGenericDetails.Row.Cluster, a.activeGenericDetails.Row.Namespace, a.activeGenericDetails.Row.Name)
+	return a.openConfirmAction(confirmation, func() tea.Cmd {
+		details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, a.activeGenericDetails.Row.Key, time.Now())
+		if err != nil {
+			a.statusMessage = err.Error()
+			a.refreshCurrentScreen(time.Now())
+			return nil
+		}
+		a.activeGenericDetails = details
+		cmd, description, err := a.executor.DeleteGenericResource(a.activeResource, details)
+		if err != nil {
+			a.statusMessage = err.Error()
+			return nil
+		}
+		if returnScreen == screenResourceDetails {
+			a.screen = screenResourceList
+		}
+		return runProcessCommand(cmd, description)
+	})
+}
+
+func deleteConfirmationDescription(action string, kind string, clusterName string, namespace string, name string) string {
+	kind = strings.TrimSpace(kind)
+	clusterName = strings.TrimSpace(clusterName)
+	name = strings.TrimSpace(name)
+	if action == "" {
+		panic("app.deleteConfirmationDescription: empty action")
+	}
+	if kind == "" {
+		panic("app.deleteConfirmationDescription: empty kind")
+	}
+	if clusterName == "" {
+		panic("app.deleteConfirmationDescription: empty cluster")
+	}
+	if name == "" {
+		panic("app.deleteConfirmationDescription: empty name")
+	}
+	if namespace == "" {
+		namespace = "cluster"
+	}
+	return strings.Join([]string{
+		"Action: " + action,
+		"",
+		"Target:",
+		"  Resource:  " + kind,
+		"  Name:      " + name,
+		"  Namespace: " + namespace,
+		"  Context:   " + clusterName,
+		"",
+		"This deletes the live Kubernetes object.",
+	}, "\n")
+}
+
+func genericDeleteKind(resource cluster.ResourceKind) string {
+	if strings.TrimSpace(resource.Kind) != "" {
+		return resource.Kind
+	}
+	if strings.TrimSpace(resource.Display) != "" {
+		return resource.Display
+	}
+	return resource.Resource
 }

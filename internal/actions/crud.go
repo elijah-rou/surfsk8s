@@ -138,6 +138,18 @@ func (e *Executor) PortForwardPodWithPorts(details state.PodDetails, localPort i
 	return exec.Command("kubectl", args...), fmt.Sprintf("port-forward pod/%s %s", details.Row.Name, mapping), nil
 }
 
+func (e *Executor) DeletePod(details state.PodDetails) (*exec.Cmd, string, error) {
+	if details.Pod == nil {
+		return nil, "", fmt.Errorf("pod disappeared")
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	args = append(args, "delete", "-n", details.Row.Namespace, "pod/"+details.Row.Name)
+	return exec.Command("kubectl", args...), fmt.Sprintf("delete pod/%s", details.Row.Name), nil
+}
+
 func (e *Executor) ScaleDeployment(details state.DeploymentDetails, replicas int) (*exec.Cmd, string, error) {
 	if details.Deployment == nil {
 		return nil, "", fmt.Errorf("deployment disappeared")
@@ -168,6 +180,18 @@ func (e *Executor) RestartDeployment(details state.DeploymentDetails) (*exec.Cmd
 	}
 	args = append(args, "rollout", "restart", "-n", details.Row.Namespace, "deployment/"+details.Row.Name)
 	return exec.Command("kubectl", args...), fmt.Sprintf("restart deployment/%s", details.Row.Name), nil
+}
+
+func (e *Executor) DeleteDeployment(details state.DeploymentDetails) (*exec.Cmd, string, error) {
+	if details.Deployment == nil {
+		return nil, "", fmt.Errorf("deployment disappeared")
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	args = append(args, "delete", "-n", details.Row.Namespace, "deployment/"+details.Row.Name)
+	return exec.Command("kubectl", args...), fmt.Sprintf("delete deployment/%s", details.Row.Name), nil
 }
 
 func (e *Executor) EditDeployment(details state.DeploymentDetails) (*exec.Cmd, string, error) {
@@ -222,6 +246,18 @@ func (e *Executor) EditService(details state.ServiceDetails) (*exec.Cmd, string,
 	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit service/%s manifest", details.Row.Name), object)
 }
 
+func (e *Executor) DeleteService(details state.ServiceDetails) (*exec.Cmd, string, error) {
+	if details.Service == nil {
+		return nil, "", fmt.Errorf("service disappeared")
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	args = append(args, "delete", "-n", details.Row.Namespace, "service/"+details.Row.Name)
+	return exec.Command("kubectl", args...), fmt.Sprintf("delete service/%s", details.Row.Name), nil
+}
+
 func (e *Executor) EditNode(details state.NodeDetails) (*exec.Cmd, string, error) {
 	if details.Node == nil {
 		return nil, "", fmt.Errorf("node disappeared")
@@ -231,6 +267,18 @@ func (e *Executor) EditNode(details state.NodeDetails) (*exec.Cmd, string, error
 		return nil, "", err
 	}
 	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit node/%s manifest", details.Row.Name), object)
+}
+
+func (e *Executor) DeleteNode(details state.NodeDetails) (*exec.Cmd, string, error) {
+	if details.Node == nil {
+		return nil, "", fmt.Errorf("node disappeared")
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	args = append(args, "delete", "node/"+details.Row.Name)
+	return exec.Command("kubectl", args...), fmt.Sprintf("delete node/%s", details.Row.Name), nil
 }
 
 func (e *Executor) EditGenericResource(resource cluster.ResourceKind, details cluster.GenericResourceDetails) (*exec.Cmd, string, error) {
@@ -255,6 +303,29 @@ func (e *Executor) EditGenericResource(resource cluster.ResourceKind, details cl
 		object.SetKind(resource.Kind)
 	}
 	return e.editManifest(details.Row.Cluster, fmt.Sprintf("edit %s/%s manifest", resource.Resource, details.Row.Name), object)
+}
+
+func (e *Executor) DeleteGenericResource(resource cluster.ResourceKind, details cluster.GenericResourceDetails) (*exec.Cmd, string, error) {
+	if resource.Resource == "" {
+		return nil, "", fmt.Errorf("resource kind disappeared")
+	}
+	if details.Row.Name == "" {
+		return nil, "", fmt.Errorf("resource row disappeared")
+	}
+	if details.Object == nil {
+		return nil, "", fmt.Errorf("resource disappeared")
+	}
+	args, err := e.baseArgs(details.Row.Cluster)
+	if err != nil {
+		return nil, "", err
+	}
+	qualifiedResource := qualifiedResourceName(resource)
+	if resource.Namespaced {
+		args = append(args, "delete", "-n", details.Row.Namespace, qualifiedResource+"/"+details.Row.Name)
+	} else {
+		args = append(args, "delete", qualifiedResource+"/"+details.Row.Name)
+	}
+	return exec.Command("kubectl", args...), fmt.Sprintf("delete %s/%s", resource.Resource, details.Row.Name), nil
 }
 
 func (e *Executor) editManifest(contextName string, description string, object *unstructured.Unstructured) (*exec.Cmd, string, error) {
@@ -453,6 +524,16 @@ func validatePort(port int, field string) error {
 
 func portMapping(localPort int, remotePort int) string {
 	return strconv.Itoa(localPort) + ":" + strconv.Itoa(remotePort)
+}
+
+func qualifiedResourceName(resource cluster.ResourceKind) string {
+	if resource.Resource == "" {
+		panic("actions.qualifiedResourceName: empty resource")
+	}
+	if resource.APIGroup == "" {
+		return resource.Resource
+	}
+	return resource.Resource + "." + resource.APIGroup
 }
 
 func defaultProtocol(protocol corev1.Protocol) string {

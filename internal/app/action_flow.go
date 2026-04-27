@@ -222,12 +222,16 @@ func (a *App) renderConfirmAction() string {
 	if a.confirmDescription == "" {
 		return "confirm action"
 	}
+	confirmLabel := "Confirm"
+	if strings.HasPrefix(strings.ToLower(a.confirmDescription), "action: delete ") {
+		confirmLabel = "Delete"
+	}
 	return strings.Join([]string{
 		"Confirm cluster change:",
 		"",
 		a.confirmDescription,
 		"",
-		"Enter to proceed. Esc to cancel.",
+		"[Esc] Cancel    [Enter] " + confirmLabel,
 	}, "\n")
 }
 

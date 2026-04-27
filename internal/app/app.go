@@ -1003,6 +1003,8 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.yankSelectedTable()
 	case "Y":
 		return a.yankFullTableRow()
+	case "d":
+		return a.deleteSelectedPod(time.Now())
 	case "o":
 		return a.openTableSortColumnPicker()
 	case "O", "shift+o":
@@ -1110,6 +1112,8 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.yankSelectedTable()
 	case "Y":
 		return a.yankFullTableRow()
+	case "d":
+		return a.deleteSelectedResource(time.Now())
 	case "o":
 		return a.openTableSortColumnPicker()
 	case "O", "shift+o":
@@ -1187,6 +1191,8 @@ func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.runExecPod()
 	case "e":
 		return a.runEditPod()
+	case "d":
+		return a.runDeletePod()
 	case "p":
 		return a.runPortForwardPod()
 	case "l":
@@ -1252,6 +1258,8 @@ func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
 		return a.runPortForwardResource()
 	case "e":
 		return a.runEditResource()
+	case "d":
+		return a.runDeleteResource()
 	case "s":
 		return a.openScalePrompt()
 	case "l":
@@ -1420,7 +1428,7 @@ func (a *App) currentView() (string, string, string) {
 	case screenResourceList:
 		return "", a.resourceTable.View(), a.resourceListFooter()
 	case screenPodDetails:
-		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  home/end edge  g owner  G dependents  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  l logs  esc back"
+		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  home/end edge  g owner  G dependents  r resource-find  n ns-find  c ctx-find  x exec  e edit  d delete  p port-forward  l logs  esc back"
 	case screenResourceDetails:
 		return a.resourceDetailTitle(), a.renderResourceDetails(), a.resourceDetailFooter()
 	case screenLogs:
@@ -1961,11 +1969,11 @@ func (a *App) renderResourceDetails() string {
 }
 
 func (a *App) podListFooter() string {
-	return "hjkl nav  HJKL jump  g owner  G dependents  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  n ns-find  c ctx-find  esc back"
+	return "hjkl nav  HJKL jump  g owner  G dependents  +/- width  0 collapse  enter open  d delete  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  n ns-find  c ctx-find  esc back"
 }
 
 func (a *App) resourceListFooter() string {
-	base := "hjkl nav  HJKL jump  g owner  G dependents  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  c ctx-find  "
+	base := "hjkl nav  HJKL jump  g owner  G dependents  +/- width  0 collapse  enter open  d delete  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  c ctx-find  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		return base + "n ns-find  S scale  R restart  esc back"
@@ -1997,16 +2005,16 @@ func (a *App) resourceDetailFooter() string {
 	podTableHints := "enter open-pod  +/- width  0 collapse  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return prefix + podTableHints + "n ns-find  s scale  r restart  e edit  l logs  esc back"
+		return prefix + podTableHints + "n ns-find  s scale  r restart  e edit  d delete  l logs  esc back"
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		return prefix + podTableHints + "n ns-find  p port-forward  e edit  esc back"
+		return prefix + podTableHints + "n ns-find  p port-forward  e edit  d delete  esc back"
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		return prefix + podTableHints + "x shell  e edit  l logs  esc back"
+		return prefix + podTableHints + "x shell  e edit  d delete  l logs  esc back"
 	default:
 		if a.activeResource.Namespaced {
-			return prefix + "n ns-find  e edit  esc back"
+			return prefix + "n ns-find  e edit  d delete  esc back"
 		}
-		return prefix + "e edit  esc back"
+		return prefix + "e edit  d delete  esc back"
 	}
 }
 

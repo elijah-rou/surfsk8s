@@ -84,6 +84,47 @@ func TestPortForwardServiceWithPortsBuildsKubectlCommand(t *testing.T) {
 	}
 }
 
+func TestDeletePodBuildsKubectlCommand(t *testing.T) {
+	executor := NewExecutor("/tmp/config")
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}}
+
+	cmd, desc, err := executor.DeletePod(state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+		Pod: pod,
+	})
+	if err != nil {
+		t.Fatalf("DeletePod error: %v", err)
+	}
+	if got, want := desc, "delete pod/api"; got != want {
+		t.Fatalf("desc = %q, want %q", got, want)
+	}
+	wantArgs := []string{"kubectl", "--kubeconfig", "/tmp/config", "--context", "dev", "delete", "-n", "default", "pod/api"}
+	if !reflect.DeepEqual(cmd.Args, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", cmd.Args, wantArgs)
+	}
+}
+
+func TestDeleteGenericResourceBuildsQualifiedKubectlCommand(t *testing.T) {
+	executor := NewExecutor("")
+	resource := cluster.ResourceKind{Resource: "services", APIGroup: "serving.knative.dev", Namespaced: true}
+	details := cluster.GenericResourceDetails{
+		Row:    cluster.GenericResourceRow{Cluster: "dev", Namespace: "apps", Name: "api"},
+		Object: &unstructured.Unstructured{Object: map[string]interface{}{"metadata": map[string]interface{}{"name": "api", "namespace": "apps"}}},
+	}
+
+	cmd, desc, err := executor.DeleteGenericResource(resource, details)
+	if err != nil {
+		t.Fatalf("DeleteGenericResource error: %v", err)
+	}
+	if got, want := desc, "delete services/api"; got != want {
+		t.Fatalf("desc = %q, want %q", got, want)
+	}
+	wantArgs := []string{"kubectl", "--context", "dev", "delete", "-n", "apps", "services.serving.knative.dev/api"}
+	if !reflect.DeepEqual(cmd.Args, wantArgs) {
+		t.Fatalf("args = %#v, want %#v", cmd.Args, wantArgs)
+	}
+}
+
 func TestExecNodeShellBuildsKubectlDebugCommand(t *testing.T) {
 	executor := NewExecutor("/tmp/config")
 	cmd, desc, err := executor.ExecNodeShell(state.NodeDetails{
