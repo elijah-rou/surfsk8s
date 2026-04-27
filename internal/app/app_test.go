@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +134,35 @@ func TestNewLoadsPersistedSelectedContexts(t *testing.T) {
 	app := New(state.NewStore(), manager, Config{})
 	if !app.selectedContext["dev"] {
 		t.Fatalf("expected persisted selected context")
+	}
+}
+
+func TestNewHonorsPersistedEmptySelectedContexts(t *testing.T) {
+	tempDir := t.TempDir()
+	previousUserConfigDir := userConfigDir
+	userConfigDir = func() (string, error) { return tempDir, nil }
+	defer func() { userConfigDir = previousUserConfigDir }()
+	if err := savePreferences(preferences{SelectedContextsSet: true}); err != nil {
+		t.Fatalf("savePreferences error: %v", err)
+	}
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	if got, want := len(app.selectedContext), 0; got != want {
+		t.Fatalf("selected contexts = %d, want %d", got, want)
+	}
+}
+
+func TestOpenAddContextPickerDoesNotReselectConnectedContexts(t *testing.T) {
+	manager := newTestManager(t)
+	if err := manager.Connect(context.Background(), []string{"dev"}); err != nil {
+		t.Fatalf("connect context: %v", err)
+	}
+	app := New(state.NewStore(), manager, Config{})
+	app.selectedContext = map[string]bool{}
+
+	app.openContextPicker(pickerModeAdd)
+	if app.selectedContext["dev"] {
+		t.Fatalf("expected connected context to stay deselected")
 	}
 }
 

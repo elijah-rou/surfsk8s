@@ -408,6 +408,18 @@ func (a *App) Init() tea.Cmd {
 func loadSelectedContexts(contexts []cluster.ContextInfo) map[string]bool {
 	selected := make(map[string]bool, len(contexts))
 	prefs, err := loadPreferences()
+	if err == nil && prefs.SelectedContextsSet {
+		available := make(map[string]struct{}, len(contexts))
+		for _, context := range contexts {
+			available[context.Name] = struct{}{}
+		}
+		for _, name := range prefs.SelectedContexts {
+			if _, ok := available[name]; ok {
+				selected[name] = true
+			}
+		}
+		return selected
+	}
 	if err == nil && len(prefs.SelectedContexts) != 0 {
 		available := make(map[string]struct{}, len(contexts))
 		for _, context := range contexts {
@@ -418,7 +430,7 @@ func loadSelectedContexts(contexts []cluster.ContextInfo) map[string]bool {
 				selected[name] = true
 			}
 		}
-		if len(selected) != 0 || len(prefs.SelectedContexts) == 0 {
+		if len(selected) != 0 {
 			return selected
 		}
 	}
@@ -433,6 +445,7 @@ func loadSelectedContexts(contexts []cluster.ContextInfo) map[string]bool {
 func (a *App) persistSelectedContexts() {
 	if err := updatePreferences(func(prefs *preferences) {
 		prefs.SelectedContexts = a.selectedContextNames()
+		prefs.SelectedContextsSet = true
 	}); err != nil {
 		a.statusMessage = err.Error()
 	}
@@ -799,9 +812,9 @@ func (a *App) updateContextKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveUp(1)
 	case "K":
 		a.navTable.MoveTop()
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case " ":
 		index := a.navTable.SelectedIndex()
@@ -846,9 +859,9 @@ func (a *App) updateCatalogKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveDown(1)
 	case "k", "up":
 		a.navTable.MoveUp(1)
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case "enter":
 		index := a.navTable.SelectedIndex()
@@ -884,9 +897,9 @@ func (a *App) updateGroupKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveDown(1)
 	case "k", "up":
 		a.navTable.MoveUp(1)
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case "enter":
 		index := a.navTable.SelectedIndex()
@@ -935,9 +948,21 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		a.podTable.MoveUp(1)
 	case "K":
 		a.podTable.MoveTop()
-	case "g", "home":
+	case "g":
+		if cmd, handled := a.tryOpenOwnerJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no owner targets"
+		return nil
+	case "home":
 		a.podTable.MoveTop()
-	case "G", "end":
+	case "G":
+		if cmd, handled := a.tryOpenChildJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no dependent targets"
+		return nil
+	case "end":
 		a.podTable.MoveBottom()
 	case "pgdown":
 		a.podTable.MoveDown(max(1, a.listPageSize()))
@@ -1024,9 +1049,21 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 		a.resourceTable.MoveUp(1)
 	case "K":
 		a.resourceTable.MoveTop()
-	case "g", "home":
+	case "g":
+		if cmd, handled := a.tryOpenOwnerJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no owner targets"
+		return nil
+	case "home":
 		a.resourceTable.MoveTop()
-	case "G", "end":
+	case "G":
+		if cmd, handled := a.tryOpenChildJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no dependent targets"
+		return nil
+	case "end":
 		a.resourceTable.MoveBottom()
 	case "pgdown":
 		a.resourceTable.MoveDown(max(1, a.listPageSize()))
@@ -1119,6 +1156,20 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "g":
+		if cmd, handled := a.tryOpenOwnerJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no owner targets"
+		return nil
+	case "G":
+		if cmd, handled := a.tryOpenChildJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no dependent targets"
+		return nil
+	}
 	if a.updateTextViewportKeys(msg) {
 		return nil
 	}
@@ -1151,6 +1202,20 @@ func (a *App) updatePodDetailKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) updateResourceDetailKeys(msg tea.KeyMsg) tea.Cmd {
+	switch msg.String() {
+	case "g":
+		if cmd, handled := a.tryOpenOwnerJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no owner targets"
+		return nil
+	case "G":
+		if cmd, handled := a.tryOpenChildJump(time.Now()); handled {
+			return cmd
+		}
+		a.statusMessage = "no dependent targets"
+		return nil
+	}
 	if a.resourceDetailHasPodTable() {
 		if a.detailFocus == detailFocusPods {
 			if a.updateResourceDetailPodTableKeys(msg) {
@@ -1211,10 +1276,10 @@ func (a *App) updateResourceDetailViewportKeys(msg tea.KeyMsg) bool {
 	case "k", "up":
 		a.textViewport.ScrollUp(1)
 		return true
-	case "g", "home":
+	case "home":
 		a.textViewport.GotoTop()
 		return true
-	case "G", "end":
+	case "end":
 		a.textViewport.GotoBottom()
 		return true
 	case "pgdown", "f":
@@ -1242,10 +1307,10 @@ func (a *App) updateResourceDetailPodTableKeys(msg tea.KeyMsg) bool {
 	case "K":
 		a.detailPodTable.MoveTop()
 		return true
-	case "g", "home":
+	case "home":
 		a.detailPodTable.MoveTop()
 		return true
-	case "G", "end":
+	case "end":
 		a.detailPodTable.MoveBottom()
 		return true
 	case "pgdown", "f":
@@ -1312,9 +1377,9 @@ func (a *App) updateCommandKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveDown(1)
 	case "k", "up":
 		a.navTable.MoveUp(1)
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case "esc", "backspace":
 		if a.commandQuery != "" {
@@ -1355,32 +1420,32 @@ func (a *App) currentView() (string, string, string) {
 	case screenResourceList:
 		return "", a.resourceTable.View(), a.resourceListFooter()
 	case screenPodDetails:
-		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  g/G edge  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  l logs  esc back"
+		return "surfsk8s · pod details", a.renderPodDetails(), "j/k scroll  pgup/pgdn page  home/end edge  g owner  G dependents  r resource-find  n ns-find  c ctx-find  x exec  e edit  p port-forward  l logs  esc back"
 	case screenResourceDetails:
 		return a.resourceDetailTitle(), a.renderResourceDetails(), a.resourceDetailFooter()
 	case screenLogs:
 		return "surfsk8s · " + a.logTitle, a.renderLogs(), a.logFooter()
 	case screenCommands:
-		return "surfsk8s · commands", a.navTable.View(), "type to filter  j/k move  g/G edge  enter run  esc clear/close"
+		return "surfsk8s · commands", a.navTable.View(), "type to filter  j/k move  home/end edge  enter run  esc clear/close"
 	case screenResourceFinder:
-		return "surfsk8s · resource finder", a.navTable.View(), "+ fav  - unfav  type to filter  j/k move  g/G edge  enter open  esc close"
+		return "surfsk8s · resource finder", a.navTable.View(), "+ fav  - unfav  type to filter  j/k move  home/end edge  enter open  esc close"
 	case screenScopePicker:
 		title := "namespace scope"
 		if a.scopePickerKind == scopePickerContext {
 			title = "context scope"
 		}
-		return "surfsk8s · " + title, a.navTable.View(), "type to filter  j/k move  g/G edge  enter select  esc cancel"
+		return "surfsk8s · " + title, a.navTable.View(), "type to filter  j/k move  home/end edge  enter select  esc cancel"
 	case screenActionPicker:
 		return "surfsk8s · " + a.actionPickerTitle, a.navTable.View(), a.actionPickerFooter
 	case screenConfirmAction:
-		return "surfsk8s · confirm action", a.renderConfirmAction(), "j/k scroll  pgup/pgdn page  g/G edge  enter confirm  esc cancel"
+		return "surfsk8s · confirm action", a.renderConfirmAction(), "j/k scroll  pgup/pgdn page  home/end edge  enter confirm  esc cancel"
 	case screenTableFilterColumnPicker:
 		if a.filter.Active() && a.inputMode == inputModeTableFilterValue {
 			return "surfsk8s · add filter", a.navTable.View(), "type filter  enter add  esc cancel"
 		}
 		return "surfsk8s · add filter", a.navTable.View(), "type fuzzy-find  enter select-column  esc cancel"
 	case screenTableFilterManager:
-		return "surfsk8s · filters", a.navTable.View(), "j/k move  g/G edge  enter/space toggle  x remove  esc close"
+		return "surfsk8s · filters", a.navTable.View(), "j/k move  home/end edge  enter/space toggle  x remove  esc close"
 	case screenTableSortColumnPicker:
 		return "surfsk8s · add sort", a.navTable.View(), "type fuzzy-find  enter select-column  esc cancel"
 	case screenTableSortDirectionPicker:
@@ -1442,12 +1507,6 @@ func (a *App) openContextPicker(mode pickerMode) {
 	a.filter.Deactivate()
 	a.pickerMode = mode
 	a.contextQuery = ""
-	if mode == pickerModeAdd {
-		for _, name := range a.manager.ConnectedContextNames() {
-			a.selectedContext[name] = true
-		}
-		a.persistSelectedContexts()
-	}
 	a.refreshContextRows()
 }
 
@@ -1902,11 +1961,11 @@ func (a *App) renderResourceDetails() string {
 }
 
 func (a *App) podListFooter() string {
-	return "hjkl nav  HJKL jump  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  n ns-find  c ctx-find  esc back"
+	return "hjkl nav  HJKL jump  g owner  G dependents  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  n ns-find  c ctx-find  esc back"
 }
 
 func (a *App) resourceListFooter() string {
-	base := "hjkl nav  HJKL jump  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  c ctx-find  "
+	base := "hjkl nav  HJKL jump  g owner  G dependents  +/- width  0 collapse  enter open  y row  Y CSV  / filter  f add-filter  F filters  o add-sort  O sorts  r resource-find  c ctx-find  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		return base + "n ns-find  S scale  R restart  esc back"
@@ -1934,7 +1993,7 @@ func (a *App) resourceDetailTitle() string {
 }
 
 func (a *App) resourceDetailFooter() string {
-	prefix := "j/k scroll  pgup/pgdn page  g/G edge  [/tab pane-up  ]/tab pane-down  R resource-find  c ctx-find  "
+	prefix := "j/k scroll  pgup/pgdn page  home/end edge  g owner  G dependents  [/tab pane-up  ]/tab pane-down  R resource-find  c ctx-find  "
 	podTableHints := "enter open-pod  +/- width  0 collapse  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":

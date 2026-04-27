@@ -347,7 +347,7 @@ func TestCommandPromptEnterRunsHighlightedCommand(t *testing.T) {
 	}
 }
 
-func TestCommandPromptSupportsVimNavigationKeys(t *testing.T) {
+func TestCommandPromptSupportsHomeEndNavigationKeys(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})
 	app.screen = screenPodDetails
@@ -363,7 +363,7 @@ func TestCommandPromptSupportsVimNavigationKeys(t *testing.T) {
 	if got, want := app.navTable.SelectedIndex(), 0; got != want {
 		t.Fatalf("selected index = %d, want %d", got, want)
 	}
-	app.updateFilter(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	app.updateFilter(tea.KeyMsg{Type: tea.KeyEnd})
 	if got, want := app.navTable.SelectedIndex(), len(app.visibleCommands)-1; got != want {
 		t.Fatalf("selected index = %d, want %d", got, want)
 	}
@@ -1077,9 +1077,14 @@ func TestResourceDetailPaneSwitchIsExplicit(t *testing.T) {
 	_ = app.View()
 
 	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if got, want := app.screen, screenActionPicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
 	if got, want := app.detailFocus, detailFocusContent; got != want {
 		t.Fatalf("focus = %d, want %d", got, want)
 	}
+	app.updateActionPickerKeys(tea.KeyMsg{Type: tea.KeyEsc})
+
 	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{']'}})
 	if got, want := app.detailFocus, detailFocusPods; got != want {
 		t.Fatalf("focus = %d, want %d", got, want)
@@ -1091,6 +1096,106 @@ func TestResourceDetailPaneSwitchIsExplicit(t *testing.T) {
 	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
 	if got, want := app.detailFocus, detailFocusContent; got != want {
 		t.Fatalf("focus = %d, want %d", got, want)
+	}
+}
+
+func TestPodDetailJumpToOwnerOffersOwnerChain(t *testing.T) {
+	manager := newTestManager(t)
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{{APIGroup: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Namespaced: true}})
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+
+	store.UpsertNode("dev", &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	replicas := int32(1)
+	store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas}})
+	manager.SetGenericResourceFixtureForTest("apps/replicasets", "dev", &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "ReplicaSet",
+		"metadata": map[string]interface{}{
+			"name":            "frontend-7d8f6d4c5b",
+			"namespace":       "default",
+			"resourceVersion": "1",
+			"ownerReferences": []interface{}{map[string]interface{}{"apiVersion": "apps/v1", "kind": "Deployment", "name": "frontend"}},
+		},
+	}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default", OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "frontend-7d8f6d4c5b"}}}, Spec: corev1.PodSpec{NodeName: "node-a", Containers: []corev1.Container{{Name: "web"}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+	details, ok := store.PodDetailsByKey(state.PodKey{Cluster: "dev", Namespace: "default", Name: "frontend-abc"}, time.Now())
+	if !ok {
+		t.Fatalf("expected pod details")
+	}
+	app.activePod = details
+	app.screen = screenPodDetails
+
+	app.updatePodDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if got, want := app.screen, screenActionPicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.pendingAction, pendingActionResourceJump; got != want {
+		t.Fatalf("pendingAction = %d, want %d", got, want)
+	}
+	labels := make(map[string]bool, len(app.actionPickerOptions))
+	for _, option := range app.actionPickerOptions {
+		labels[option.Label] = true
+	}
+	for _, want := range []string{
+		"ReplicaSet default/frontend-7d8f6d4c5b · dev",
+		"Deployment default/frontend · dev",
+		"Node node-a · dev",
+	} {
+		if !labels[want] {
+			t.Fatalf("missing %q in %#v", want, labels)
+		}
+	}
+}
+
+func TestDeploymentListJumpToDependentsOpensSelectedPod(t *testing.T) {
+	manager := newTestManager(t)
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{{APIGroup: "apps", Version: "v1", Resource: "replicasets", Kind: "ReplicaSet", Namespaced: true}})
+	store := state.NewStore()
+	app := New(store, manager, Config{})
+
+	replicas := int32(1)
+	store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "frontend", Namespace: "default"}, Spec: appsv1.DeploymentSpec{Replicas: &replicas, Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "frontend"}}}})
+	manager.SetGenericResourceFixtureForTest("apps/replicasets", "dev", &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "ReplicaSet",
+		"metadata": map[string]interface{}{
+			"name":            "frontend-7d8f6d4c5b",
+			"namespace":       "default",
+			"resourceVersion": "1",
+			"ownerReferences": []interface{}{map[string]interface{}{"apiVersion": "apps/v1", "kind": "Deployment", "name": "frontend"}},
+		},
+	}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "frontend-abc", Namespace: "default", Labels: map[string]string{"app": "frontend"}, OwnerReferences: []metav1.OwnerReference{{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "frontend-7d8f6d4c5b"}}}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web"}}}, Status: corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{Ready: true}}}})
+
+	app.activeResource = builtinDeploymentResourceKind()
+	app.screen = screenResourceList
+	app.refreshResourceList(time.Now())
+
+	app.updateResourceListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if got, want := app.screen, screenActionPicker; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	labels := make([]string, 0, len(app.actionPickerOptions))
+	podIndex := -1
+	for idx, option := range app.actionPickerOptions {
+		labels = append(labels, option.Label)
+		if option.Label == "Pod default/frontend-abc · dev" {
+			podIndex = idx
+		}
+	}
+	if podIndex < 0 {
+		t.Fatalf("missing pod target in %#v", labels)
+	}
+	for step := 0; step < podIndex; step++ {
+		app.updateActionPickerKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	}
+	app.updateActionPickerKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	if got, want := app.screen, screenPodDetails; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.activePod.Row.Name, "frontend-abc"; got != want {
+		t.Fatalf("pod = %q, want %q", got, want)
 	}
 }
 

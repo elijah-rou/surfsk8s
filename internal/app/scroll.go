@@ -119,7 +119,7 @@ func (a *App) renderResourceDetailBody(content string, topSections int) string {
 		}
 		return a.podTableRows(rows[start:end], time.Now())
 	})
-	summaryPane := a.renderResourceDetailPane("Details pane", detailFocusContent, "j/k scroll  g/G edge  ]/tab → pods", viewportBody, paneOuterWidth)
+	summaryPane := a.renderResourceDetailPane("Details pane", detailFocusContent, "j/k scroll  home/end edge  g owner  G deps  ]/tab → pods", viewportBody, paneOuterWidth)
 	statusRow := a.renderResourceDetailStatusRow(len(rows), paneOuterWidth)
 	podsPane := a.renderResourceDetailPane(fmt.Sprintf("Pods pane (%d)", len(rows)), detailFocusPods, "hjkl nav  enter open-pod  [/shift+tab → details", a.detailPodTable.View(), paneOuterWidth)
 	return summaryPane + "\n" + statusRow + "\n" + podsPane
@@ -172,10 +172,10 @@ func (a *App) updateTextViewportKeys(msg tea.KeyMsg) bool {
 	case "k", "up":
 		a.textViewport.ScrollUp(1)
 		return true
-	case "g", "home":
+	case "home":
 		a.textViewport.GotoTop()
 		return true
-	case "G", "end":
+	case "end":
 		a.textViewport.GotoBottom()
 		return true
 	case "pgdown", "f":

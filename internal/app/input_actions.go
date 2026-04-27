@@ -210,10 +210,10 @@ func (a *App) updateCommandPrompt(msg tea.Msg) tea.Cmd {
 		case "k", "up":
 			a.navTable.MoveUp(1)
 			return nil
-		case "g", "home":
+		case "home":
 			a.navTable.MoveTop()
 			return nil
-		case "G", "end":
+		case "end":
 			a.navTable.MoveBottom()
 			return nil
 		case "enter":

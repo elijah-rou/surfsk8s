@@ -18,6 +18,7 @@ type tableColumnPreference struct {
 
 type preferences struct {
 	SelectedContexts     []string                                    `json:"selected_contexts"`
+	SelectedContextsSet  bool                                        `json:"selected_contexts_set,omitempty"`
 	FavoriteResources    []string                                    `json:"favorite_resources,omitempty"`
 	FavoriteResourcesSet bool                                        `json:"favorite_resources_set,omitempty"`
 	TableColumns         map[string]map[string]tableColumnPreference `json:"table_columns,omitempty"`

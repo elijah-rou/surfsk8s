@@ -50,6 +50,15 @@ type catalogOverviewData struct {
 	Restarts   []overviewLine
 }
 
+type catalogOverviewScope struct {
+	ContextScope   string
+	Namespace      string
+	ScopeLabel     string
+	Connected      int
+	Catalog        []cluster.ResourceGroup
+	ManagerCatalog []cluster.ResourceGroup
+}
+
 const (
 	catalogOverviewRefreshInterval = 15 * time.Second
 	catalogOverviewTimeout         = 8 * time.Second
@@ -68,11 +77,12 @@ func (a *App) maybeRefreshCatalogOverviewCmd(now time.Time) tea.Cmd {
 	if a.catalogOverviewScopeKey == scopeKey && a.catalogOverviewStoreVersion == storeVersion && a.catalogOverviewManagerVersion == managerVersion && !a.catalogOverviewFetchedAt.IsZero() && now.Sub(a.catalogOverviewFetchedAt) < catalogOverviewRefreshInterval {
 		return nil
 	}
+	scope := a.catalogOverviewScopeSnapshot()
 	a.catalogOverviewLoading = true
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), catalogOverviewTimeout)
 		defer cancel()
-		return catalogOverviewResultMsg{scopeKey: scopeKey, storeVersion: storeVersion, managerVersion: managerVersion, data: a.buildCatalogOverviewWithContext(ctx, now)}
+		return catalogOverviewResultMsg{scopeKey: scopeKey, storeVersion: storeVersion, managerVersion: managerVersion, data: a.buildCatalogOverviewWithContext(ctx, now, scope)}
 	}
 }
 
@@ -80,23 +90,53 @@ func (a *App) catalogOverviewCurrentScopeKey() string {
 	return a.contextScope + "|" + a.namespace
 }
 
-func (a *App) buildCatalogOverview(now time.Time) catalogOverviewData {
-	return a.buildCatalogOverviewWithContext(context.Background(), now)
+func (a *App) catalogOverviewScopeSnapshot() catalogOverviewScope {
+	return catalogOverviewScope{
+		ContextScope:   a.contextScope,
+		Namespace:      a.namespace,
+		ScopeLabel:     a.catalogOverviewScopeLabel(),
+		Connected:      len(a.manager.ConnectedContextNames()),
+		Catalog:        cloneResourceGroups(a.catalog),
+		ManagerCatalog: cloneResourceGroups(a.manager.Catalog()),
+	}
 }
 
-func (a *App) buildCatalogOverviewWithContext(ctx context.Context, now time.Time) catalogOverviewData {
-	data := catalogOverviewData{ScopeLabel: a.catalogOverviewScopeLabel()}
-	data.Cards = []overviewCard{
-		a.buildPodOverviewCard(),
-		a.buildGenericWorkloadOverviewCard(ctx, "Deployments", "apps", "deployments"),
-		a.buildGenericWorkloadOverviewCard(ctx, "ReplicaSets", "apps", "replicasets"),
-		a.buildGenericWorkloadOverviewCard(ctx, "DaemonSets", "apps", "daemonsets"),
-		a.buildGenericWorkloadOverviewCard(ctx, "StatefulSets", "apps", "statefulsets"),
-		a.buildCronJobOverviewCard(ctx),
-		a.buildJobOverviewCard(ctx),
+func cloneResourceGroups(groups []cluster.ResourceGroup) []cluster.ResourceGroup {
+	if len(groups) == 0 {
+		return nil
 	}
-	data.Warnings = a.buildRecentWarningLines(ctx, now)
-	data.Restarts = a.buildRecentRestartLines(now)
+	cloned := make([]cluster.ResourceGroup, len(groups))
+	for idx, group := range groups {
+		cloned[idx] = group
+		cloned[idx].Resources = append([]cluster.ResourceKind(nil), group.Resources...)
+	}
+	return cloned
+}
+
+func catalogContextMatches(scope catalogOverviewScope, clusterName string) bool {
+	if scope.ContextScope == "" {
+		return true
+	}
+	return clusterName == scope.ContextScope
+}
+
+func (a *App) buildCatalogOverview(now time.Time) catalogOverviewData {
+	return a.buildCatalogOverviewWithContext(context.Background(), now, a.catalogOverviewScopeSnapshot())
+}
+
+func (a *App) buildCatalogOverviewWithContext(ctx context.Context, now time.Time, scope catalogOverviewScope) catalogOverviewData {
+	data := catalogOverviewData{ScopeLabel: scope.ScopeLabel}
+	data.Cards = []overviewCard{
+		a.buildPodOverviewCard(scope),
+		a.buildGenericWorkloadOverviewCard(ctx, scope, "Deployments", "apps", "deployments"),
+		a.buildGenericWorkloadOverviewCard(ctx, scope, "ReplicaSets", "apps", "replicasets"),
+		a.buildGenericWorkloadOverviewCard(ctx, scope, "DaemonSets", "apps", "daemonsets"),
+		a.buildGenericWorkloadOverviewCard(ctx, scope, "StatefulSets", "apps", "statefulsets"),
+		a.buildCronJobOverviewCard(ctx, scope),
+		a.buildJobOverviewCard(ctx, scope),
+	}
+	data.Warnings = a.buildRecentWarningLines(ctx, now, scope)
+	data.Restarts = a.buildRecentRestartLines(now, scope)
 	return data
 }
 
@@ -136,13 +176,13 @@ func (a *App) catalogOverviewScopeLabel() string {
 	return a.namespace
 }
 
-func (a *App) buildPodOverviewCard() overviewCard {
+func (a *App) buildPodOverviewCard(scope catalogOverviewScope) overviewCard {
 	counts := make(map[string]overviewMetric, 8)
 	a.store.ForEachPod(func(row state.PodRow) bool {
-		if !a.contextMatches(row.Cluster) {
+		if !catalogContextMatches(scope, row.Cluster) {
 			return true
 		}
-		if a.namespace != "" && row.Namespace != a.namespace {
+		if scope.Namespace != "" && row.Namespace != scope.Namespace {
 			return true
 		}
 		label, tone := podOverviewBucket(row.Status)
@@ -156,9 +196,9 @@ func (a *App) buildPodOverviewCard() overviewCard {
 	return overviewCard{Title: "Pods", Metrics: orderedOverviewMetrics(counts, []string{"Running", "Error", "Pending", "Unschedulable", "ImagePullBackOff", "CrashLoopBackOff", "Completed"})}
 }
 
-func (a *App) buildGenericWorkloadOverviewCard(ctx context.Context, title string, apiGroup string, resource string) overviewCard {
+func (a *App) buildGenericWorkloadOverviewCard(ctx context.Context, scope catalogOverviewScope, title string, apiGroup string, resource string) overviewCard {
 	counts := make(map[string]overviewMetric, 4)
-	a.forEachFilteredCatalogRow(ctx, apiGroup, resource, func(row cluster.GenericResourceRow) bool {
+	a.forEachFilteredCatalogRow(ctx, scope, apiGroup, resource, func(row cluster.GenericResourceRow) bool {
 		label, tone := genericReplicaOverviewBucket(row)
 		metric := counts[label]
 		metric.Label = label
@@ -170,9 +210,9 @@ func (a *App) buildGenericWorkloadOverviewCard(ctx context.Context, title string
 	return overviewCard{Title: title, Metrics: orderedOverviewMetrics(counts, []string{"Running", "Pending", "Unavailable", "Idle", "Failed"})}
 }
 
-func (a *App) buildCronJobOverviewCard(ctx context.Context) overviewCard {
+func (a *App) buildCronJobOverviewCard(ctx context.Context, scope catalogOverviewScope) overviewCard {
 	counts := make(map[string]overviewMetric, 3)
-	a.forEachFilteredCatalogRow(ctx, "batch", "cronjobs", func(row cluster.GenericResourceRow) bool {
+	a.forEachFilteredCatalogRow(ctx, scope, "batch", "cronjobs", func(row cluster.GenericResourceRow) bool {
 		label, tone := cronJobOverviewBucket(row.Object)
 		metric := counts[label]
 		metric.Label = label
@@ -184,9 +224,9 @@ func (a *App) buildCronJobOverviewCard(ctx context.Context) overviewCard {
 	return overviewCard{Title: "CronJobs", Metrics: orderedOverviewMetrics(counts, []string{"Scheduled", "Suspended", "Failed"})}
 }
 
-func (a *App) buildJobOverviewCard(ctx context.Context) overviewCard {
+func (a *App) buildJobOverviewCard(ctx context.Context, scope catalogOverviewScope) overviewCard {
 	counts := make(map[string]overviewMetric, 4)
-	a.forEachFilteredCatalogRow(ctx, "batch", "jobs", func(row cluster.GenericResourceRow) bool {
+	a.forEachFilteredCatalogRow(ctx, scope, "batch", "jobs", func(row cluster.GenericResourceRow) bool {
 		label, tone := jobOverviewBucket(row.Object)
 		metric := counts[label]
 		metric.Label = label
@@ -199,32 +239,32 @@ func (a *App) buildJobOverviewCard(ctx context.Context) overviewCard {
 }
 
 // forEachFilteredCatalogRow streams generic rows for the catalog scope without materializing a full slice.
-func (a *App) forEachFilteredCatalogRow(ctx context.Context, apiGroup string, resource string, visit func(cluster.GenericResourceRow) bool) {
-	kind, ok := a.catalogResourceKind(apiGroup, resource)
+func (a *App) forEachFilteredCatalogRow(ctx context.Context, scope catalogOverviewScope, apiGroup string, resource string, visit func(cluster.GenericResourceRow) bool) {
+	kind, ok := catalogResourceKind(scope, apiGroup, resource)
 	if !ok {
 		return
 	}
 	_ = a.manager.ForEachGenericResourceRow(ctx, kind, func(row cluster.GenericResourceRow) bool {
-		if !a.contextMatches(row.Cluster) {
+		if !catalogContextMatches(scope, row.Cluster) {
 			return true
 		}
-		if kind.Namespaced && a.namespace != "" && row.Namespace != a.namespace {
+		if kind.Namespaced && scope.Namespace != "" && row.Namespace != scope.Namespace {
 			return true
 		}
 		return visit(row)
 	})
 }
 
-func (a *App) catalogResourceKind(apiGroup string, resource string) (cluster.ResourceKind, bool) {
+func catalogResourceKind(scope catalogOverviewScope, apiGroup string, resource string) (cluster.ResourceKind, bool) {
 	id := apiGroup + "/" + resource
-	for _, group := range a.catalog {
+	for _, group := range scope.Catalog {
 		for _, kind := range group.Resources {
 			if kind.ID == id {
 				return kind, true
 			}
 		}
 	}
-	for _, group := range a.manager.Catalog() {
+	for _, group := range scope.ManagerCatalog {
 		for _, kind := range group.Resources {
 			if kind.ID == id {
 				return kind, true
@@ -270,10 +310,10 @@ func keepWarningCandidate(items []eventOverviewItem, item eventOverviewItem, k i
 	return items
 }
 
-func (a *App) buildRecentWarningLines(ctx context.Context, now time.Time) []overviewLine {
+func (a *App) buildRecentWarningLines(ctx context.Context, now time.Time, scope catalogOverviewScope) []overviewLine {
 	const topK = 5
 	items := make([]eventOverviewItem, 0, topK)
-	a.forEachFilteredCatalogRow(ctx, "", "events", func(row cluster.GenericResourceRow) bool {
+	a.forEachFilteredCatalogRow(ctx, scope, "", "events", func(row cluster.GenericResourceRow) bool {
 		if row.Object == nil {
 			return true
 		}
@@ -295,7 +335,7 @@ func (a *App) buildRecentWarningLines(ctx context.Context, now time.Time) []over
 		return warningBetter(items[i], items[j])
 	})
 	lines := make([]overviewLine, 0, max(1, len(items)))
-	showCluster := a.contextScope == "" && len(a.manager.ConnectedContextNames()) > 1
+	showCluster := scope.ContextScope == "" && scope.Connected > 1
 	for _, item := range items {
 		primary := fmt.Sprintf("%s (%dx)", item.Reason, item.Count)
 		if showCluster {
@@ -349,14 +389,14 @@ func keepRestartCandidate(items []restartOverviewItem, item restartOverviewItem,
 	return items
 }
 
-func (a *App) buildRecentRestartLines(now time.Time) []overviewLine {
+func (a *App) buildRecentRestartLines(now time.Time, scope catalogOverviewScope) []overviewLine {
 	const topK = 5
 	items := make([]restartOverviewItem, 0, topK)
 	a.store.ForEachPod(func(row state.PodRow) bool {
-		if !a.contextMatches(row.Cluster) {
+		if !catalogContextMatches(scope, row.Cluster) {
 			return true
 		}
-		if a.namespace != "" && row.Namespace != a.namespace {
+		if scope.Namespace != "" && row.Namespace != scope.Namespace {
 			return true
 		}
 		if row.Restarts == 0 {
@@ -377,7 +417,7 @@ func (a *App) buildRecentRestartLines(now time.Time) []overviewLine {
 		return restartBetter(items[i], items[j])
 	})
 	lines := make([]overviewLine, 0, max(1, len(items)))
-	showCluster := a.contextScope == "" && len(a.manager.ConnectedContextNames()) > 1
+	showCluster := scope.ContextScope == "" && scope.Connected > 1
 	for _, item := range items {
 		location := item.Namespace + " / " + item.Pod
 		if showCluster {

@@ -127,10 +127,10 @@ func (a *App) updateResourceFinderPrompt(msg tea.Msg) tea.Cmd {
 		case "k", "up":
 			a.navTable.MoveUp(1)
 			return nil
-		case "g", "home":
+		case "home":
 			a.navTable.MoveTop()
 			return nil
-		case "G", "end":
+		case "end":
 			a.navTable.MoveBottom()
 			return nil
 		case "+":
@@ -153,9 +153,9 @@ func (a *App) updateResourceFinderKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveDown(1)
 	case "k", "up":
 		a.navTable.MoveUp(1)
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case "esc", "backspace":
 		if a.resourceFinderQuery != "" {

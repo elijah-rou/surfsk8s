@@ -23,7 +23,7 @@ func TestBuildPodOverviewCardSummarizesStatuses(t *testing.T) {
 	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pending", Namespace: "default"}, Status: corev1.PodStatus{Phase: corev1.PodPending}})
 	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "crash", Namespace: "default"}, Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}}}}})
 
-	card := app.buildPodOverviewCard()
+	card := app.buildPodOverviewCard(app.catalogOverviewScopeSnapshot())
 	if got, want := card.Title, "Pods"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
 	}
@@ -180,7 +180,7 @@ func TestBuildGenericWorkloadOverviewCardFallsBackToManagerCatalog(t *testing.T)
 		},
 	}})
 
-	card := app.buildGenericWorkloadOverviewCard(context.Background(), "Deployments", "apps", "deployments")
+	card := app.buildGenericWorkloadOverviewCard(context.Background(), app.catalogOverviewScopeSnapshot(), "Deployments", "apps", "deployments")
 	if got, want := card.Title, "Deployments"; got != want {
 		t.Fatalf("title = %q, want %q", got, want)
 	}

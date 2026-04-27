@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -41,7 +43,7 @@ func Execute() error {
 	if err != nil {
 		return err
 	}
-	defer manager.Close()
+	defer closeManagerWithTimeout(manager, 5*time.Second)
 
 	program := tea.NewProgram(
 		app.New(store, manager, app.Config{InitialNamespace: *namespace, KubeconfigPath: *kubeconfig}),
@@ -50,7 +52,26 @@ func Execute() error {
 		tea.WithContext(ctx),
 	)
 	if _, err := program.Run(); err != nil {
+		if errors.Is(err, tea.ErrProgramPanic) {
+			return fmt.Errorf("fatal UI panic: %w", err)
+		}
 		return err
 	}
 	return nil
+}
+
+func closeManagerWithTimeout(manager *cluster.Manager, timeout time.Duration) {
+	if manager == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.Close()
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		fmt.Fprintf(os.Stderr, "fatal: timed out shutting down cluster manager after %s\n", timeout)
+	}
 }

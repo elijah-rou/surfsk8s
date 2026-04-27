@@ -21,16 +21,18 @@ const (
 	pendingActionDeploymentLogsSources
 	pendingActionNodeLogsPath
 	pendingActionLogRange
+	pendingActionResourceJump
 )
 
 type actionOption struct {
-	Label     string
-	Container string
-	Port      int
-	Path      string
-	Directory bool
-	Selected  bool
-	LogRange  logRange
+	Label      string
+	Container  string
+	Port       int
+	Path       string
+	Directory  bool
+	Selected   bool
+	LogRange   logRange
+	JumpTarget resourceJumpTarget
 }
 
 func (a *App) openActionPicker(title string, footer string, action pendingAction, options []actionOption) tea.Cmd {
@@ -85,9 +87,9 @@ func (a *App) updateActionPickerKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveDown(1)
 	case "k", "up":
 		a.navTable.MoveUp(1)
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case " ":
 		if a.actionPickerIsToggleMode() {
@@ -170,6 +172,9 @@ func (a *App) handleActionOption(option actionOption) tea.Cmd {
 		a.resetActionFlowState()
 		a.logRange = option.LogRange
 		return a.openLogsScreen(a.logTitle, true)
+	case pendingActionResourceJump:
+		a.resetActionFlowState()
+		return a.openResourceJumpTarget(option.JumpTarget, time.Now())
 	default:
 		a.statusMessage = "unsupported action selection"
 		a.cancelActionFlow()

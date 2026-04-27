@@ -1062,7 +1062,7 @@ func logSourceStyle(key string) lipgloss.Style {
 }
 
 func (a *App) logFooter() string {
-	parts := []string{"j/k scroll", "pgup/pgdn page", "g/G edge", "/ fuzzy", "f exact", "p range", "t timestamps", "w wrap", "u refresh", "space pause", "y yank", "s save"}
+	parts := []string{"j/k scroll", "pgup/pgdn page", "home/end edge", "/ fuzzy", "f exact", "p range", "t timestamps", "w wrap", "u refresh", "space pause", "y yank", "s save"}
 	if a.logTarget == logTargetPod || a.logTarget == logTargetDeployment {
 		parts = append(parts, "c containers")
 	}

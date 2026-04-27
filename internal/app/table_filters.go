@@ -235,9 +235,9 @@ func (a *App) updateTableFilterColumnPickerKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveDown(1)
 	case "k", "up":
 		a.navTable.MoveUp(1)
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case "enter":
 		index := a.navTable.SelectedIndex()
@@ -260,9 +260,9 @@ func (a *App) updateTableFilterManagerKeys(msg tea.KeyMsg) tea.Cmd {
 		a.navTable.MoveDown(1)
 	case "k", "up":
 		a.navTable.MoveUp(1)
-	case "g", "home":
+	case "home":
 		a.navTable.MoveTop()
-	case "G", "end":
+	case "end":
 		a.navTable.MoveBottom()
 	case " ", "enter":
 		index := a.navTable.SelectedIndex()

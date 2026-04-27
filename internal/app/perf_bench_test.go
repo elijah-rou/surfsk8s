@@ -36,9 +36,10 @@ func BenchmarkBuildPodOverviewCard10000(b *testing.B) {
 	store := state.NewStore()
 	app := New(store, manager, Config{})
 	seedBenchmarkPods(store, app, 10000)
+	scope := app.catalogOverviewScopeSnapshot()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = app.buildPodOverviewCard()
+		_ = app.buildPodOverviewCard(scope)
 	}
 }
 
@@ -47,9 +48,10 @@ func BenchmarkBuildRecentRestartLines10000(b *testing.B) {
 	store := state.NewStore()
 	app := New(store, manager, Config{})
 	seedBenchmarkPods(store, app, 10000)
+	scope := app.catalogOverviewScopeSnapshot()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = app.buildRecentRestartLines(time.Now())
+		_ = app.buildRecentRestartLines(time.Now(), scope)
 	}
 }
 
