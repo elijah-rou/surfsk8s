@@ -24,6 +24,7 @@ import (
 type Config struct {
 	InitialNamespace string
 	KubeconfigPath   string
+	Resume           bool
 }
 
 type tickMsg time.Time
@@ -318,6 +319,9 @@ type App struct {
 	sortedDeployments []state.DeploymentRow
 	sortedServices    []state.ServiceRow
 	sortedNodes       []state.NodeRow
+
+	resumeOnStart bool
+	resumeSession sessionPreference
 }
 
 func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
@@ -381,6 +385,13 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 		namespaces:             []string{""},
 		logRange:               logRangeLive,
 		logShowTimestamps:      true,
+		resumeOnStart:          cfg.Resume,
+	}
+	if cfg.Resume {
+		prefs, err := loadPreferences()
+		if err == nil {
+			app.resumeSession = prefs.LastSession
+		}
 	}
 	app.commands = []commandItem{
 		{Name: "add-context", Description: "Open context picker, connect more kubeconfig contexts", Run: func(a *App) { a.openContextPicker(pickerModeAdd) }},
@@ -403,6 +414,14 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 }
 
 func (a *App) Init() tea.Cmd {
+	if a.resumeOnStart {
+		selected := a.selectedContextNames()
+		if len(selected) != 0 {
+			a.connecting = true
+			a.activity = "connecting contexts"
+			return tea.Batch(tickCmd(), connectContextsCmd(a.manager, selected))
+		}
+	}
 	return tickCmd()
 }
 
@@ -484,6 +503,94 @@ func (a *App) persistFavoriteResources() {
 	}
 }
 
+func (a *App) persistSession() {
+	session := sessionPreference{Namespace: a.namespace, ContextScope: a.contextScope}
+	switch a.screen {
+	case screenCatalog:
+		session.Screen = "catalog"
+		session.Query = a.catalogQuery
+	case screenGroupResources:
+		session.Screen = "group-resources"
+		session.GroupName = a.activeGroup.Name
+		session.Query = a.resourceQuery
+	case screenPods:
+		session.Screen = "pods"
+		session.Query = a.podQuery
+	case screenResourceList:
+		session.Screen = "resource-list"
+		session.ResourceID = a.activeResource.ID
+		session.Query = a.resourceQuery2
+	case screenResourceDetails:
+		session.Screen = "resource-list"
+		session.ResourceID = a.activeResource.ID
+		session.Query = a.resourceQuery2
+	case screenPodDetails, screenLogs:
+		session.Screen = "pods"
+		session.Query = a.podQuery
+	default:
+		session.Screen = "catalog"
+	}
+	if err := updatePreferences(func(prefs *preferences) { prefs.LastSession = session }); err != nil {
+		a.statusMessage = err.Error()
+	}
+}
+
+func (a *App) applyResumeSession(now time.Time) {
+	session := a.resumeSession
+	a.namespace = session.Namespace
+	a.contextScope = session.ContextScope
+	switch session.Screen {
+	case "group-resources":
+		if group, ok := a.catalogGroupByName(session.GroupName); ok {
+			a.activeGroup = group
+			a.resourceQuery = session.Query
+			a.screen = screenGroupResources
+			a.refreshGroupResources()
+			return
+		}
+	case "pods":
+		a.openResourceList(builtinPodResourceKind())
+		a.podQuery = session.Query
+		a.refreshPods(now)
+		return
+	case "resource-list":
+		if resource, ok := a.catalogResourceByID(session.ResourceID); ok {
+			a.resourceQuery2 = session.Query
+			a.openResourceList(resource)
+			a.setCurrentQuery(session.Query)
+			a.refreshCurrentScreen(now)
+			return
+		}
+	case "catalog":
+		a.catalogQuery = session.Query
+		a.screen = screenCatalog
+		a.refreshCatalog()
+		return
+	}
+	a.screen = screenCatalog
+	a.refreshCatalog()
+}
+
+func (a *App) catalogGroupByName(name string) (cluster.ResourceGroup, bool) {
+	for _, group := range a.manager.Catalog() {
+		if group.Name == name {
+			return group, true
+		}
+	}
+	return cluster.ResourceGroup{}, false
+}
+
+func (a *App) catalogResourceByID(id string) (cluster.ResourceKind, bool) {
+	for _, group := range a.manager.Catalog() {
+		for _, resource := range group.Resources {
+			if resource.ID == id {
+				return resource, true
+			}
+		}
+	}
+	return cluster.ResourceKind{}, false
+}
+
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if a.filter.Active() {
 		if _, ok := msg.(tea.KeyMsg); ok {
@@ -521,8 +628,13 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.persistSelectedContexts()
 		a.statusMessage = fmt.Sprintf("connected %d context(s)", len(typed.contexts))
-		a.screen = screenCatalog
-		a.refreshCatalog()
+		if a.resumeOnStart {
+			a.resumeOnStart = false
+			a.applyResumeSession(time.Now())
+		} else {
+			a.screen = screenCatalog
+			a.refreshCatalog()
+		}
 		return a, a.maybeRefreshCatalogOverviewCmd(time.Now())
 
 	case actionResultMsg:
@@ -739,7 +851,10 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 	a.statusMessage = ""
 
 	switch msg.String() {
-	case "ctrl+c", "q":
+	case "ctrl+c":
+		return tea.Quit
+	case "q":
+		a.persistSession()
 		return tea.Quit
 	case ":":
 		if a.screen != screenContexts && a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenLogs {
@@ -2476,14 +2591,20 @@ func fuzzyResources(resources []cluster.ResourceKind, query string) []cluster.Re
 	}
 	matched := make([]scoredResource, 0, len(resources))
 	for _, resource := range resources {
-		candidate := resource.Display + " " + resource.Kind + " " + resource.Resource + " " + resource.APIGroup
-		score, ok := scoreSearchCandidate(candidate, query)
+		score, ok := resourceSearchScore(resource, query, "")
 		if !ok {
 			continue
 		}
 		matched = append(matched, scoredResource{resource: resource, score: score})
 	}
-	sort.SliceStable(matched, func(i int, j int) bool { return matched[i].score > matched[j].score })
+	sort.SliceStable(matched, func(i int, j int) bool {
+		if matched[i].score != matched[j].score {
+			return matched[i].score > matched[j].score
+		}
+		left := strings.ToLower(matched[i].resource.Display + " " + matched[i].resource.APIGroup)
+		right := strings.ToLower(matched[j].resource.Display + " " + matched[j].resource.APIGroup)
+		return left < right
+	})
 	result := make([]cluster.ResourceKind, 0, len(matched))
 	for _, item := range matched {
 		result = append(result, item.resource)
@@ -2494,6 +2615,36 @@ func fuzzyResources(resources []cluster.ResourceKind, query string) []cluster.Re
 type scoredResource struct {
 	resource cluster.ResourceKind
 	score    int
+}
+
+func resourceSearchScore(resource cluster.ResourceKind, query string, groupName string) (int, bool) {
+	fields := []struct {
+		value  string
+		weight int
+	}{
+		{value: resource.Display, weight: 120},
+		{value: resource.Kind, weight: 100},
+		{value: resource.Resource, weight: 80},
+		{value: resource.APIGroup, weight: 40},
+		{value: groupName, weight: 20},
+	}
+	best := 0
+	matched := false
+	for _, field := range fields {
+		if strings.TrimSpace(field.value) == "" {
+			continue
+		}
+		score, ok := scoreSearchCandidate(field.value, query)
+		if !ok {
+			continue
+		}
+		score += field.weight
+		if !matched || score > best {
+			best = score
+		}
+		matched = true
+	}
+	return best, matched
 }
 
 func fuzzyCommands(commands []commandItem, query string) []commandItem {

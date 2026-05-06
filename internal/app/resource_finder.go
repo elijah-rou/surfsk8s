@@ -13,7 +13,7 @@ import (
 type resourceFinderItem struct {
 	resource cluster.ResourceKind
 	label    string
-	search   string
+	group    string
 }
 
 func (a *App) openResourceFinder() tea.Cmd {
@@ -50,8 +50,7 @@ func buildResourceFinderItems(groups []cluster.ResourceGroup) []resourceFinderIt
 			}
 			seen[resource.ID] = struct{}{}
 			label := resource.Display + "  (" + defaultString(resource.APIGroup, "core") + " · " + scopeAbbrev(resource.Namespaced) + ")"
-			search := strings.Join([]string{resource.Display, resource.Kind, resource.Resource, resource.APIGroup, group.Name}, " ")
-			items = append(items, resourceFinderItem{resource: resource, label: label, search: search})
+			items = append(items, resourceFinderItem{resource: resource, label: label, group: group.Name})
 		}
 	}
 	sort.SliceStable(items, func(i int, j int) bool {
@@ -72,13 +71,20 @@ func fuzzyResourceFinderItems(items []resourceFinderItem, query string) []resour
 	}
 	matched := make([]scoredItem, 0, len(items))
 	for _, item := range items {
-		score, ok := scoreSearchCandidate(item.search, query)
+		score, ok := resourceSearchScore(item.resource, query, item.group)
 		if !ok {
 			continue
 		}
 		matched = append(matched, scoredItem{item: item, score: score})
 	}
-	sort.SliceStable(matched, func(i int, j int) bool { return matched[i].score > matched[j].score })
+	sort.SliceStable(matched, func(i int, j int) bool {
+		if matched[i].score != matched[j].score {
+			return matched[i].score > matched[j].score
+		}
+		left := strings.ToLower(matched[i].item.resource.Display + " " + matched[i].item.resource.APIGroup)
+		right := strings.ToLower(matched[j].item.resource.Display + " " + matched[j].item.resource.APIGroup)
+		return left < right
+	})
 	result := make([]resourceFinderItem, 0, len(matched))
 	for _, item := range matched {
 		result = append(result, item.item)

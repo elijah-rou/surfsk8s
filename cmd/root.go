@@ -18,6 +18,13 @@ import (
 )
 
 func Execute() error {
+	args := os.Args[1:]
+	resume := false
+	if len(args) != 0 && args[0] == "resume" {
+		resume = true
+		args = args[1:]
+	}
+
 	flags := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 
@@ -25,7 +32,7 @@ func Execute() error {
 	contextName := flags.String("context", "", "kubeconfig context to load")
 	namespace := flags.String("namespace", "", "initial namespace filter")
 
-	if err := flags.Parse(os.Args[1:]); err != nil {
+	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if len(flags.Args()) != 0 {
@@ -46,7 +53,7 @@ func Execute() error {
 	defer closeManagerWithTimeout(manager, 5*time.Second)
 
 	program := tea.NewProgram(
-		app.New(store, manager, app.Config{InitialNamespace: *namespace, KubeconfigPath: *kubeconfig}),
+		app.New(store, manager, app.Config{InitialNamespace: *namespace, KubeconfigPath: *kubeconfig, Resume: resume}),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 		tea.WithContext(ctx),

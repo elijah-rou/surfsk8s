@@ -166,6 +166,60 @@ func TestOpenResourceFinderResetsPreviousQuery(t *testing.T) {
 	}
 }
 
+func TestQuitPersistsResumeSession(t *testing.T) {
+	previousUserConfigDir := userConfigDir
+	configDir := t.TempDir()
+	userConfigDir = func() (string, error) { return configDir, nil }
+	defer func() { userConfigDir = previousUserConfigDir }()
+
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenPods
+	app.namespace = "kube-system"
+	app.contextScope = "dev"
+	app.podQuery = "coredns"
+	cmd := app.updateKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Fatalf("expected quit command")
+	}
+	prefs, err := loadPreferences()
+	if err != nil {
+		t.Fatalf("load preferences: %v", err)
+	}
+	if got, want := prefs.LastSession.Screen, "pods"; got != want {
+		t.Fatalf("screen = %q, want %q", got, want)
+	}
+	if got, want := prefs.LastSession.Query, "coredns"; got != want {
+		t.Fatalf("query = %q, want %q", got, want)
+	}
+	if got, want := prefs.LastSession.Namespace, "kube-system"; got != want {
+		t.Fatalf("namespace = %q, want %q", got, want)
+	}
+}
+
+func TestApplyResumeSessionRestoresPodsView(t *testing.T) {
+	manager := newTestManager(t)
+	store := state.NewStore()
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "coredns", Namespace: "kube-system"}})
+	store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}})
+	app := New(store, manager, Config{})
+	app.resumeSession = sessionPreference{Screen: "pods", Namespace: "kube-system", ContextScope: "dev", Query: "core"}
+
+	app.applyResumeSession(time.Now())
+	if got, want := app.screen, screenPods; got != want {
+		t.Fatalf("screen = %d, want %d", got, want)
+	}
+	if got, want := app.namespace, "kube-system"; got != want {
+		t.Fatalf("namespace = %q, want %q", got, want)
+	}
+	if got, want := app.podQuery, "core"; got != want {
+		t.Fatalf("podQuery = %q, want %q", got, want)
+	}
+	if got, want := app.visibleRows, 1; got != want {
+		t.Fatalf("visibleRows = %d, want %d", got, want)
+	}
+}
+
 func TestGroupResourcePlusAddsFavorite(t *testing.T) {
 	previousUserConfigDir := userConfigDir
 	userConfigDir = func() (string, error) { return t.TempDir(), nil }
@@ -1692,6 +1746,51 @@ func TestBuildResourceFinderItemsDeduplicatesResources(t *testing.T) {
 	items := buildResourceFinderItems([]cluster.ResourceGroup{{Name: "Favourites", Resources: []cluster.ResourceKind{{ID: "/pods", Display: "Pods", Resource: "pods", Namespaced: true}}}, {Name: "Workloads", Resources: []cluster.ResourceKind{{ID: "/pods", Display: "Pods", Resource: "pods", Namespaced: true}, {ID: "serving.knative.dev/revisions", Display: "Revisions", Resource: "revisions", APIGroup: "serving.knative.dev", Namespaced: true}}}})
 	if got, want := len(items), 2; got != want {
 		t.Fatalf("items = %d, want %d", got, want)
+	}
+}
+
+func TestFuzzyResourcesSortsStrongestResourceMatchFirst(t *testing.T) {
+	resources := []cluster.ResourceKind{
+		{ID: "example.dev/services", Display: "Backends", Kind: "Backend", Resource: "backends", APIGroup: "services.example.dev"},
+		{ID: "/services", Display: "Services", Kind: "Service", Resource: "services"},
+	}
+	matched := fuzzyResources(resources, "serv")
+	if got, want := matched[0].ID, "/services"; got != want {
+		t.Fatalf("first resource = %q, want %q", got, want)
+	}
+}
+
+func TestResourceFinderSortsStrongestResourceMatchFirst(t *testing.T) {
+	items := []resourceFinderItem{
+		{resource: cluster.ResourceKind{ID: "example.dev/services", Display: "Backends", Kind: "Backend", Resource: "backends", APIGroup: "services.example.dev"}, group: "Custom"},
+		{resource: cluster.ResourceKind{ID: "/services", Display: "Services", Kind: "Service", Resource: "services"}, group: "Network"},
+	}
+	matched := fuzzyResourceFinderItems(items, "serv")
+	if got, want := matched[0].resource.ID, "/services"; got != want {
+		t.Fatalf("first resource = %q, want %q", got, want)
+	}
+}
+
+func TestGroupResourceFuzzyFilterMovesCursorToStrongestMatch(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenGroupResources
+	app.activeGroup = cluster.ResourceGroup{Name: "Network", Resources: []cluster.ResourceKind{
+		{ID: "example.dev/services", Display: "Backends", Kind: "Backend", Resource: "backends", APIGroup: "services.example.dev"},
+		{ID: "/services", Display: "Services", Kind: "Service", Resource: "services"},
+	}}
+	app.refreshGroupResources()
+	app.navTable.MoveDown(1)
+	app.filter.Activate()
+	app.updateSearchPrompt(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	app.updateSearchPrompt(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
+	app.updateSearchPrompt(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	app.updateSearchPrompt(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'v'}})
+	if got, want := app.navTable.SelectedIndex(), 0; got != want {
+		t.Fatalf("selected index = %d, want %d", got, want)
+	}
+	if got, want := app.visibleResources[0].ID, "/services"; got != want {
+		t.Fatalf("first resource = %q, want %q", got, want)
 	}
 }
 

@@ -126,6 +126,7 @@ func (a *App) updateLogExactFilterPrompt(msg tea.Msg) tea.Cmd {
 }
 
 func (a *App) updateSearchPrompt(msg tea.Msg) tea.Cmd {
+	previousQuery := a.currentQuery()
 	switch typed := msg.(type) {
 	case tea.KeyMsg:
 		switch typed.String() {
@@ -186,6 +187,9 @@ func (a *App) updateSearchPrompt(msg tea.Msg) tea.Cmd {
 	cmd := a.filter.Update(msg)
 	a.setCurrentQuery(a.filter.Value())
 	a.refreshCurrentScreen(time.Now())
+	if a.screen == screenGroupResources && a.currentQuery() != previousQuery {
+		a.navTable.MoveTop()
+	}
 	return cmd
 }
 

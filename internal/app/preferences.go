@@ -22,6 +22,16 @@ type preferences struct {
 	FavoriteResources    []string                                    `json:"favorite_resources,omitempty"`
 	FavoriteResourcesSet bool                                        `json:"favorite_resources_set,omitempty"`
 	TableColumns         map[string]map[string]tableColumnPreference `json:"table_columns,omitempty"`
+	LastSession          sessionPreference                           `json:"last_session,omitempty"`
+}
+
+type sessionPreference struct {
+	Screen       string `json:"screen,omitempty"`
+	Namespace    string `json:"namespace,omitempty"`
+	ContextScope string `json:"context_scope,omitempty"`
+	GroupName    string `json:"group_name,omitempty"`
+	ResourceID   string `json:"resource_id,omitempty"`
+	Query        string `json:"query,omitempty"`
 }
 
 func preferencesPath() (string, error) {
