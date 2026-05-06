@@ -49,9 +49,10 @@ func (a *App) renderTextViewportSized(content string, width int, height int) str
 		if content != "" {
 			a.textViewportLineCount = len(strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n"))
 		}
-		if a.textViewport.PastBottom() {
+		if a.logFollowOnRender || a.textViewport.PastBottom() {
 			a.textViewport.GotoBottom()
 		}
+		a.logFollowOnRender = false
 	}
 	lines := max(1, a.textViewportLineCount)
 	visible := min(lines, a.textViewport.Height)

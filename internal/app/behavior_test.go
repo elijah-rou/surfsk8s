@@ -2003,6 +2003,28 @@ func TestLogsResultMsgReplacesLoadingPlaceholder(t *testing.T) {
 	}
 }
 
+func TestLogsResultAutoFollowsWhenViewportAtBottom(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenLogs
+	app.width = 120
+	app.height = 8
+	app.logRequestToken = 7
+	app.logEntries = []logEntry{{UniqueKey: "k1", Message: "line1"}, {UniqueKey: "k2", Message: "line2"}, {UniqueKey: "k3", Message: "line3"}, {UniqueKey: "k4", Message: "line4"}, {UniqueKey: "k5", Message: "line5"}}
+	app.logEntriesVersion = 1
+	_ = app.renderTextViewport(app.renderLogs(), 2)
+	app.textViewport.GotoBottom()
+	if !app.textViewport.AtBottom() {
+		t.Fatalf("expected viewport at bottom before append")
+	}
+
+	app.Update(logsResultMsg{Token: 7, Replace: false, Cursor: time.Now(), Entries: []logEntry{{UniqueKey: "k6", Message: "line6"}, {UniqueKey: "k7", Message: "line7"}}})
+	_ = app.renderTextViewport(app.renderLogs(), 2)
+	if !app.textViewport.AtBottom() {
+		t.Fatalf("expected viewport to follow appended logs")
+	}
+}
+
 func TestNodeLogPickerResultOpensActionPicker(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})

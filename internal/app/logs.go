@@ -788,6 +788,7 @@ func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 	if msg.Token != a.logRequestToken {
 		return nil
 	}
+	follow := a.screen == screenLogs && a.textViewport.AtBottom()
 	a.activity = ""
 	a.logLoading = false
 	if msg.Err != nil {
@@ -821,6 +822,9 @@ func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 	a.trimLiveLogEntries()
 	a.logEntriesVersion++
 	a.invalidateLogsRenderCache()
+	if follow {
+		a.logFollowOnRender = true
+	}
 	if msg.Cursor.After(a.logCursor) {
 		a.logCursor = msg.Cursor
 	}

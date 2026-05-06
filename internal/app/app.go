@@ -193,6 +193,7 @@ type App struct {
 	logRenderedWrap       bool
 	logRenderedTimestamps bool
 	logRenderedContent    string
+	logFollowOnRender     bool
 
 	contexts            []cluster.ContextInfo
 	visibleContexts     []cluster.ContextInfo
