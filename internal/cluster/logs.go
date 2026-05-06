@@ -29,6 +29,7 @@ type PodLogsOptions struct {
 	Timestamps bool
 	TailLines  *int64
 	SinceTime  *time.Time
+	LimitBytes *int64
 }
 
 type NodeLogOptions struct {
@@ -57,6 +58,9 @@ func (m *Manager) PodLogsWithOptions(ctx context.Context, details state.PodDetai
 	if options.TailLines != nil && *options.TailLines <= 0 {
 		return "", fmt.Errorf("tail lines must be > 0")
 	}
+	if options.LimitBytes != nil && *options.LimitBytes <= 0 {
+		return "", fmt.Errorf("limit bytes must be > 0")
+	}
 
 	m.mu.RLock()
 	conn, ok := m.conns[details.Row.Cluster]
@@ -72,6 +76,7 @@ func (m *Manager) PodLogsWithOptions(ctx context.Context, details state.PodDetai
 		Container:  options.Container,
 		Timestamps: options.Timestamps,
 		TailLines:  options.TailLines,
+		LimitBytes: options.LimitBytes,
 	}
 	if options.SinceTime != nil {
 		t := metav1.NewTime(options.SinceTime.UTC())

@@ -89,6 +89,18 @@ func TestPodLogsReadsFakeClientLogStream(t *testing.T) {
 	}
 }
 
+func TestPodLogsRejectsNonPositiveLimitBytes(t *testing.T) {
+	limit := int64(0)
+	manager := &Manager{}
+	_, err := manager.PodLogsWithOptions(context.Background(), state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+		Pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"}, Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
+	}, PodLogsOptions{Container: "main", LimitBytes: &limit})
+	if err == nil || !strings.Contains(err.Error(), "limit bytes") {
+		t.Fatalf("err = %v, want limit bytes error", err)
+	}
+}
+
 func TestNodeLogUsesRangeHeaderAndPath(t *testing.T) {
 	var gotPath string
 	var gotRange string

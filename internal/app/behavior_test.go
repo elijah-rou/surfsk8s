@@ -2066,6 +2066,17 @@ func TestRenderLogBodyPrettyPrintsJSONWhenWrapEnabled(t *testing.T) {
 	}
 }
 
+func TestRenderLogBodyTruncatesHugeLine(t *testing.T) {
+	message := strings.Repeat("x", maxRenderedLogRunes+512)
+	rendered := renderLogBody(message, false, 120)
+	if !strings.Contains(rendered, "[truncated]") {
+		t.Fatalf("expected truncation marker")
+	}
+	if got, want := len([]rune(rendered)), maxRenderedLogRunes+14; got != want {
+		t.Fatalf("rendered runes = %d, want %d", got, want)
+	}
+}
+
 func TestFilteredLogEntriesSupportFuzzyAndExact(t *testing.T) {
 	manager := newTestManager(t)
 	app := New(state.NewStore(), manager, Config{})

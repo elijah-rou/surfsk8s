@@ -25,6 +25,8 @@ import (
 const (
 	defaultLogTailLines    int64 = 50
 	defaultNodeTailBytes   int64 = 64 * 1024
+	defaultPodLogBytes     int64 = 1 * 1024 * 1024
+	maxRenderedLogRunes          = 8192
 	logLiveRefreshInterval       = time.Second
 	maxLiveLogEntries            = 10000
 	logFetchConcurrency          = 4
@@ -597,6 +599,7 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 		concurrency = 1
 	}
 	sem := make(chan struct{}, concurrency)
+	limitBytes := defaultPodLogBytes
 	var wg sync.WaitGroup
 	for idx, source := range sources {
 		wg.Add(1)
@@ -614,6 +617,7 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 					Timestamps: true,
 					TailLines:  tailLines,
 					SinceTime:  sinceTime,
+					LimitBytes: &limitBytes,
 				})
 			case source.NodeLogPath != "":
 				options := cluster.NodeLogOptions{Path: source.NodeLogPath, TailBytes: fetchRange.nodeTailBytes()}
@@ -927,14 +931,34 @@ func renderPrefixedLogBlock(prefixStyled string, prefixPlain string, body string
 }
 
 func renderLogBody(message string, wrap bool, width int) string {
+	message = truncateLogMessage(message, maxRenderedLogRunes)
 	trimmed := strings.TrimSpace(message)
-	if rendered, ok := renderJSONLog(trimmed, wrap); ok {
-		return rendered
+	if len([]rune(trimmed)) <= maxRenderedLogRunes && len(trimmed) <= maxRenderedLogRunes*4 {
+		if rendered, ok := renderJSONLog(trimmed, wrap); ok {
+			return rendered
+		}
 	}
 	if !wrap || width <= 0 {
 		return message
 	}
 	return wrapLogText(message, width)
+}
+
+func truncateLogMessage(message string, maxRunes int) string {
+	if maxRunes <= 0 {
+		panic("app.truncateLogMessage: non-positive maxRunes")
+	}
+	if len(message) <= maxRunes {
+		return message
+	}
+	runeCount := 0
+	for index := range message {
+		if runeCount == maxRunes {
+			return message[:index] + " … [truncated]"
+		}
+		runeCount++
+	}
+	return message
 }
 
 func renderJSONLog(message string, pretty bool) (string, bool) {
