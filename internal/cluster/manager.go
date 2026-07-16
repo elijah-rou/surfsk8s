@@ -13,6 +13,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -25,8 +26,9 @@ import (
 )
 
 type Config struct {
-	KubeconfigPath string
-	Context        string
+	KubeconfigPath   string
+	Context          string
+	DiscoveryTimeout time.Duration
 }
 
 type ContextInfo struct {
@@ -42,6 +44,7 @@ type ClusterConn struct {
 	Clientset kubernetes.Interface
 	Dynamic   dynamic.Interface
 	REST      rest.Interface
+	Discovery discovery.DiscoveryInterface
 	Watcher   *informer.Watcher
 	Cancel    context.CancelFunc
 	Context   context.Context
@@ -71,14 +74,15 @@ type Manager struct {
 	mu sync.RWMutex
 	wg sync.WaitGroup
 
-	store     *state.Store
-	rawConfig clientcmdapi.Config
-	contexts  []ContextInfo
-	conns     map[string]*ClusterConn
-	connOrder []string // sorted context names; mirrors keys in conns
-	resources map[string][]discoveredResource
-	closed    bool
-	version   atomic.Uint64
+	store            *state.Store
+	discoveryTimeout time.Duration
+	rawConfig        clientcmdapi.Config
+	contexts         []ContextInfo
+	conns            map[string]*ClusterConn
+	connOrder        []string // sorted context names; mirrors keys in conns
+	resources        map[string][]discoveredResource
+	closed           bool
+	version          atomic.Uint64
 
 	genericVersionMu sync.RWMutex
 	genericVersions  map[string]uint64
@@ -89,6 +93,13 @@ func NewManager(store *state.Store, cfg Config) (*Manager, error) {
 	if store == nil {
 		panic("cluster.NewManager: nil store")
 	}
+	discoveryTimeout := cfg.DiscoveryTimeout
+	if discoveryTimeout == 0 {
+		discoveryTimeout = 4 * time.Second
+	}
+	if discoveryTimeout < 0 {
+		return nil, fmt.Errorf("discovery timeout must be >= 0")
+	}
 
 	rawConfig, contexts, err := loadContexts(cfg)
 	if err != nil {
@@ -96,13 +107,14 @@ func NewManager(store *state.Store, cfg Config) (*Manager, error) {
 	}
 
 	return &Manager{
-		store:           store,
-		rawConfig:       rawConfig,
-		contexts:        contexts,
-		conns:           make(map[string]*ClusterConn, max(1, len(contexts))),
-		resources:       make(map[string][]discoveredResource, max(1, len(contexts))),
-		genericVersions: make(map[string]uint64, 8),
-		genericChanges:  make(map[string][]GenericResourceChange, 8),
+		store:            store,
+		discoveryTimeout: discoveryTimeout,
+		rawConfig:        rawConfig,
+		contexts:         contexts,
+		conns:            make(map[string]*ClusterConn, max(1, len(contexts))),
+		resources:        make(map[string][]discoveredResource, max(1, len(contexts))),
+		genericVersions:  make(map[string]uint64, 8),
+		genericChanges:   make(map[string][]GenericResourceChange, 8),
 	}, nil
 }
 
@@ -285,6 +297,13 @@ func (m *Manager) ConnectContext(ctx context.Context, contextName string) (*Clus
 		m.mu.Unlock()
 		return nil, fmt.Errorf("create dynamic client for context %q: %w", contextName, err)
 	}
+	discoveryConfig := rest.CopyConfig(restConfig)
+	discoveryConfig.Timeout = m.discoveryTimeout
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(discoveryConfig)
+	if err != nil {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("create discovery client for context %q: %w", contextName, err)
+	}
 
 	connCtx, cancel := context.WithCancel(ctx)
 	watcher := informer.NewWatcher(clientset, contextName, m.store)
@@ -294,6 +313,7 @@ func (m *Manager) ConnectContext(ctx context.Context, contextName string) (*Clus
 		Clientset:      clientset,
 		Dynamic:        dynamicClient,
 		REST:           clientset.CoreV1().RESTClient(),
+		Discovery:      discoveryClient,
 		Watcher:        watcher,
 		Cancel:         cancel,
 		Context:        connCtx,
@@ -671,7 +691,11 @@ func (m *Manager) awaitInitialSync(ctx context.Context, conn *ClusterConn) {
 }
 
 func (m *Manager) discoverResources(ctx context.Context, conn *ClusterConn) {
-	resourceLists, err := conn.Clientset.Discovery().ServerPreferredResources()
+	discoveryClient := conn.Discovery
+	if discoveryClient == nil {
+		discoveryClient = conn.Clientset.Discovery()
+	}
+	resourceLists, err := discoveryClient.ServerPreferredResources()
 	if err != nil {
 		switch {
 		case apierrors.IsNotFound(err):
