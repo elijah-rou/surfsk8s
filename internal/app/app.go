@@ -621,12 +621,6 @@ func (a *App) catalogResourceByID(id string) (cluster.ResourceKind, bool) {
 }
 
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if a.filter.Active() {
-		if _, ok := msg.(tea.KeyMsg); ok {
-			return a, a.updateFilter(msg)
-		}
-	}
-
 	switch typed := msg.(type) {
 	case tea.WindowSizeMsg:
 		a.width = typed.Width
@@ -636,6 +630,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case tea.KeyMsg:
+		if typed.String() == "ctrl+c" {
+			return a, tea.Quit
+		}
+		if a.filter.Active() {
+			return a, a.updateFilter(typed)
+		}
 		return a, a.updateKey(typed)
 
 	case tea.MouseMsg:
@@ -871,6 +871,8 @@ func (a *App) updateFilter(msg tea.Msg) tea.Cmd {
 		return a.updateTableFilterValuePrompt(msg)
 	case inputModeLogExactFilter:
 		return a.updateLogExactFilterPrompt(msg)
+	case inputModeLogSavePath:
+		return a.updateLogSavePrompt(msg)
 	default:
 		return a.updateSearchPrompt(msg)
 	}

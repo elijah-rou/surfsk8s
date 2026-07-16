@@ -298,6 +298,7 @@ func (a *App) runExecPod() tea.Cmd {
 		return nil
 	}
 	if len(containers) == 1 {
+		a.actionReturnScreen = a.screen
 		return a.runExecPodWithContainer(containers[0])
 	}
 	return a.openPodContainerPicker(containers)
@@ -346,6 +347,7 @@ func (a *App) runPortForwardPod() tea.Cmd {
 		return nil
 	}
 	if len(choices) == 1 {
+		a.actionReturnScreen = a.screen
 		return a.openLocalPortPrompt(pendingActionPortForwardPod, choices[0].Port)
 	}
 	return a.openPodPortPicker(choices)
@@ -480,6 +482,7 @@ func (a *App) runPortForwardResource() tea.Cmd {
 		return nil
 	}
 	if len(choices) == 1 {
+		a.actionReturnScreen = a.screen
 		return a.openLocalPortPrompt(pendingActionPortForwardService, choices[0].Port)
 	}
 	return a.openServicePortPicker(choices)
