@@ -111,11 +111,13 @@ type logFetchSource struct {
 }
 
 type logsResultMsg struct {
-	Token   uint64
-	Replace bool
-	Cursor  time.Time
-	Entries []logEntry
-	Err     error
+	Token      uint64
+	Replace    bool
+	Cursor     time.Time
+	Entries    []logEntry
+	Err        error
+	Truncated  bool
+	StatusNote string
 }
 
 type nodeLogPickerResultMsg struct {
@@ -589,28 +591,29 @@ func (a *App) refreshLogs(force bool) tea.Cmd {
 	backend := a.logBackend
 	return func() tea.Msg {
 		defer cancel()
-		entries, nextCursor, err := fetchLogEntries(ctx, backend, fetchTarget, pod, deployment, node, nodePath, selected, fetchRange, sinceTime, tailLines)
-		return logsResultMsg{Token: token, Replace: replace, Cursor: nextCursor, Entries: entries, Err: err}
+		entries, nextCursor, truncated, statusNote, err := fetchLogEntries(ctx, backend, fetchTarget, pod, deployment, node, nodePath, selected, fetchRange, sinceTime, tailLines)
+		return logsResultMsg{Token: token, Replace: replace, Cursor: nextCursor, Entries: entries, Err: err, Truncated: truncated, StatusNote: statusNote}
 	}
 }
 
-func fetchLogEntries(ctx context.Context, backend logBackend, target logTarget, pod state.PodDetails, deployment state.DeploymentDetails, node state.NodeDetails, nodePath string, selected map[string]bool, fetchRange logRange, sinceTime *time.Time, tailLines *int64) ([]logEntry, time.Time, error) {
+func fetchLogEntries(ctx context.Context, backend logBackend, target logTarget, pod state.PodDetails, deployment state.DeploymentDetails, node state.NodeDetails, nodePath string, selected map[string]bool, fetchRange logRange, sinceTime *time.Time, tailLines *int64) ([]logEntry, time.Time, bool, string, error) {
 	if backend == nil {
 		panic("app.fetchLogEntries: nil backend")
 	}
 	now := time.Now()
 	sources, err := buildLogFetchSources(now, backend, target, pod, deployment, node, nodePath, selected)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, time.Time{}, false, "", err
 	}
 	if len(sources) > maxLogFetchSources {
-		return nil, time.Time{}, fmt.Errorf("too many log sources (%d); narrow containers/pods (max %d)", len(sources), maxLogFetchSources)
+		return nil, time.Time{}, false, "", fmt.Errorf("too many log sources (%d); narrow containers/pods (max %d)", len(sources), maxLogFetchSources)
 	}
 
 	type logFetchResult struct {
-		entries []logEntry
-		cursor  time.Time
-		err     string
+		entries   []logEntry
+		cursor    time.Time
+		err       string
+		truncated bool
 	}
 
 	results := make([]logFetchResult, len(sources))
@@ -656,7 +659,7 @@ func fetchLogEntries(ctx context.Context, backend logBackend, target logTarget, 
 			if perSourceBudget <= 0 {
 				perSourceBudget = maxRetainedLogEntries
 			}
-			results[index].entries, results[index].cursor = parseLogEntriesBounded(content, source.Key, source.Label, index<<20, perSourceBudget)
+			results[index].entries, results[index].cursor, results[index].truncated = parseLogEntriesBounded(content, source.Key, source.Label, index<<20, perSourceBudget)
 		}(idx, source)
 	}
 	wg.Wait()
@@ -664,10 +667,14 @@ func fetchLogEntries(ctx context.Context, backend logBackend, target logTarget, 
 	entries := make([]logEntry, 0, 256)
 	cursor := time.Time{}
 	errors := make([]string, 0, len(sources))
+	truncated := false
 	for _, result := range results {
 		if result.err != "" {
 			errors = append(errors, result.err)
 			continue
+		}
+		if result.truncated {
+			truncated = true
 		}
 		entries = append(entries, result.entries...)
 		if result.cursor.After(cursor) {
@@ -678,20 +685,25 @@ func fetchLogEntries(ctx context.Context, backend logBackend, target logTarget, 
 	sort.SliceStable(entries, func(i int, j int) bool { return logEntryLess(entries[i], entries[j]) })
 	if len(entries) > maxRetainedLogEntries {
 		entries = entries[len(entries)-maxRetainedLogEntries:]
+		truncated = true
 	}
 
 	if cursor.IsZero() {
 		cursor = now
 	}
+	statusNote := ""
+	if truncated {
+		statusNote = fmt.Sprintf("log entries truncated to newest %d", maxRetainedLogEntries)
+	}
 	if len(errors) != 0 {
 		sort.Strings(errors)
 		joined := strings.Join(errors, "; ")
 		if len(entries) == 0 {
-			return nil, cursor, fmt.Errorf("%s", joined)
+			return nil, cursor, truncated, statusNote, fmt.Errorf("%s", joined)
 		}
 		entries = append(entries, logEntry{UniqueKey: "__error__|" + joined, Message: "Errors: " + joined, SourceKey: "errors", SourceLabel: "errors", Order: len(entries) + 1})
 	}
-	return entries, cursor, nil
+	return entries, cursor, truncated, statusNote, nil
 }
 
 func buildLogFetchSources(now time.Time, backend logBackend, target logTarget, pod state.PodDetails, deployment state.DeploymentDetails, node state.NodeDetails, nodePath string, selected map[string]bool) ([]logFetchSource, error) {
@@ -704,6 +716,9 @@ func buildLogFetchSources(now time.Time, backend logBackend, target logTarget, p
 		selectedNames := selectedLogContainers(selected, containers)
 		if len(selectedNames) == 0 {
 			return nil, fmt.Errorf("select at least one container")
+		}
+		if len(selectedNames) > maxLogFetchSources {
+			return nil, fmt.Errorf("too many log sources (%d); narrow containers/pods (max %d)", len(selectedNames), maxLogFetchSources)
 		}
 		sources := make([]logFetchSource, 0, len(selectedNames))
 		for _, container := range selectedNames {
@@ -732,7 +747,11 @@ func buildLogFetchSources(now time.Time, backend logBackend, target logTarget, p
 		if err != nil {
 			return nil, err
 		}
-		sources := make([]logFetchSource, 0, len(pods)*len(selectedNames))
+		sourceCount := len(pods) * len(selectedNames)
+		if sourceCount > maxLogFetchSources {
+			return nil, fmt.Errorf("too many log sources (%d); narrow containers/pods (max %d)", sourceCount, maxLogFetchSources)
+		}
+		sources := make([]logFetchSource, 0, sourceCount)
 		for _, podDetails := range pods {
 			for _, container := range selectedNames {
 				sources = append(sources, logFetchSource{
@@ -755,16 +774,19 @@ func buildLogFetchSources(now time.Time, backend logBackend, target logTarget, p
 }
 
 func parseLogEntries(content string, sourceKey string, sourceLabel string, orderStart int) ([]logEntry, time.Time) {
-	return parseLogEntriesBounded(content, sourceKey, sourceLabel, orderStart, 0)
+	entries, cursor, _ := parseLogEntriesBounded(content, sourceKey, sourceLabel, orderStart, 0)
+	return entries, cursor
 }
 
-func parseLogEntriesBounded(content string, sourceKey string, sourceLabel string, orderStart int, limit int) ([]logEntry, time.Time) {
+func parseLogEntriesBounded(content string, sourceKey string, sourceLabel string, orderStart int, limit int) ([]logEntry, time.Time, bool) {
 	lines := strings.Split(strings.ReplaceAll(strings.TrimRight(content, "\n"), "\r\n", "\n"), "\n")
 	if len(lines) == 1 && lines[0] == "" {
-		return nil, time.Time{}
+		return nil, time.Time{}, false
 	}
+	truncated := false
 	if limit > 0 && len(lines) > limit {
 		lines = lines[len(lines)-limit:]
+		truncated = true
 	}
 	entries := make([]logEntry, 0, len(lines))
 	maxTime := time.Time{}
@@ -785,7 +807,7 @@ func parseLogEntriesBounded(content string, sourceKey string, sourceLabel string
 			maxTime = stamp
 		}
 	}
-	return entries, maxTime
+	return entries, maxTime, truncated
 }
 
 func splitLogTimestamp(line string) (time.Time, string, string, bool) {
@@ -867,6 +889,11 @@ func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 		a.logCursor = msg.Cursor
 	}
 	a.logFetchedAt = time.Now()
+	if msg.StatusNote != "" {
+		a.statusMessage = msg.StatusNote
+	} else if msg.Truncated {
+		a.statusMessage = fmt.Sprintf("log entries truncated to newest %d", maxRetainedLogEntries)
+	}
 	return nil
 }
 

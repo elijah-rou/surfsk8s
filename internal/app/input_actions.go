@@ -528,12 +528,7 @@ func (a *App) runRestartResource() tea.Cmd {
 }
 
 func (a *App) deleteSelectedPod(now time.Time) tea.Cmd {
-	row, ok := a.podRowAt(a.podTable.SelectedIndex(), now)
-	if !ok {
-		a.statusMessage = "pod vanished during refresh"
-		return nil
-	}
-	details, ok := a.store.PodDetailsByKey(row.Key, now)
+	details, ok := a.selectedPodDetails(now)
 	if !ok {
 		a.statusMessage = "pod vanished during refresh"
 		return nil

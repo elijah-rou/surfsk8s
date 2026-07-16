@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -241,33 +242,197 @@ func TestGenericActionRevalidationDoesNotBlock(t *testing.T) {
 }
 
 func TestGenericJumpUpdateDoesNotBlock(t *testing.T) {
-	h := newModelHarness(t)
-	fake := newBlockingGenericBackend()
-	row := cluster.GenericResourceRow{
-		Key:       cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "w1"},
-		Name:      "w1",
-		Namespace: "default",
-		Cluster:   "dev",
-	}
-	fake.details = cluster.GenericResourceDetails{Row: row, YAML: "kind: Widget"}
-	h.app.genericBackend = fake
-	h.app.screen = screenResourceDetails
-	h.app.activeResource = testGenericKind()
-	t.Cleanup(fake.detailBarrier.Release)
+	t.Run("open generic jump target", func(t *testing.T) {
+		h := newModelHarness(t)
+		fake := newBlockingGenericBackend()
+		row := cluster.GenericResourceRow{
+			Key:       cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "w1"},
+			Name:      "w1",
+			Namespace: "default",
+			Cluster:   "dev",
+		}
+		fake.details = cluster.GenericResourceDetails{Row: row, YAML: "kind: Widget"}
+		h.app.genericBackend = fake
+		h.app.screen = screenResourceDetails
+		h.app.activeResource = testGenericKind()
+		t.Cleanup(fake.detailBarrier.Release)
 
-	target := resourceJumpTarget{
-		Label:     "Widget/w1",
-		Resource:  testGenericKind(),
-		Cluster:   "dev",
-		Namespace: "default",
-		Name:      "w1",
+		target := resourceJumpTarget{
+			Label:     "Widget/w1",
+			Resource:  testGenericKind(),
+			Cluster:   "dev",
+			Namespace: "default",
+			Name:      "w1",
+		}
+		done := make(chan tea.Cmd, 1)
+		go func() {
+			done <- h.app.openResourceJumpTarget(target, time.Now())
+		}()
+		_ = assertUpdateDoesNotBlock(t, done)
+		if fake.detailCalls != 0 {
+			t.Fatalf("backend detail called during openResourceJumpTarget; want deferred command")
+		}
+	})
+
+	t.Run("owner key on unsynced generic list", func(t *testing.T) {
+		h := newModelHarness(t)
+		fake := newBlockingGenericBackend()
+		row := cluster.GenericResourceRow{
+			Key:       cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "w1"},
+			Name:      "w1",
+			Namespace: "default",
+			Cluster:   "dev",
+			// Object nil: forces GenericResourceDetails fallback
+		}
+		h.app.genericBackend = fake
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		h.app.sortedGenericRows = []cluster.GenericResourceRow{row}
+		h.app.resourceTable.SetWindowProvider(1, func(start int, end int) [][]string {
+			return [][]string{{"dev", "default", "w1"}}
+		})
+		t.Cleanup(fake.detailBarrier.Release)
+		t.Cleanup(fake.iterBarrier.Release)
+
+		done := make(chan tea.Cmd, 1)
+		go func() {
+			_, cmd := h.app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+			done <- cmd
+		}()
+		_ = assertUpdateDoesNotBlock(t, done)
+		if fake.detailCalls != 0 {
+			t.Fatalf("backend detail called during Update for owner jump; want deferred command")
+		}
+		if fake.iterCalls != 0 {
+			t.Fatalf("backend iter called during Update for owner jump; want deferred command")
+		}
+	})
+
+	t.Run("dependent key on unsynced generic details", func(t *testing.T) {
+		h := newModelHarness(t)
+		fake := newBlockingGenericBackend()
+		obj := &unstructured.Unstructured{}
+		obj.SetAPIVersion("example.com/v1")
+		obj.SetKind("Widget")
+		obj.SetName("w1")
+		obj.SetNamespace("default")
+		row := cluster.GenericResourceRow{
+			Key:       cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "w1"},
+			Name:      "w1",
+			Namespace: "default",
+			Cluster:   "dev",
+			Object:    obj,
+		}
+		h.app.genericBackend = fake
+		h.app.screen = screenResourceDetails
+		h.app.activeResource = testGenericKind()
+		h.app.activeGenericDetails = cluster.GenericResourceDetails{Row: row, Object: obj, YAML: "kind: Widget"}
+		t.Cleanup(fake.detailBarrier.Release)
+		t.Cleanup(fake.iterBarrier.Release)
+
+		done := make(chan tea.Cmd, 1)
+		go func() {
+			_, cmd := h.app.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("G")})
+			done <- cmd
+		}()
+		_ = assertUpdateDoesNotBlock(t, done)
+		if fake.detailCalls != 0 {
+			t.Fatalf("backend detail called during Update for dependent jump; want deferred command")
+		}
+		if fake.iterCalls != 0 {
+			t.Fatalf("backend iter called during Update for dependent jump; want deferred command")
+		}
+	})
+}
+
+func TestGenericListResultPreservesRowsOnError(t *testing.T) {
+	h := newModelHarness(t)
+	now := time.Now()
+	cached := []cluster.GenericResourceRow{{
+		Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "keep"}, Name: "keep", Namespace: "default", Cluster: "dev",
+	}}
+	h.app.screen = screenResourceList
+	h.app.activeResource = testGenericKind()
+	h.app.applyGenericListRows(cached, now, testGenericKind().ID)
+	h.app.genericListCacheKey = ""
+	h.app.renderGenericResourceList(now)
+	token := h.app.nextAsyncTokenValue()
+	h.app.genericListToken = token
+	h.app.genericListLoading = true
+
+	h.RunAll(func() tea.Msg {
+		return genericListResultMsg{
+			Token:      token,
+			ResourceID: testGenericKind().ID,
+			Rows:       []cluster.GenericResourceRow{{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "partial"}, Name: "partial"}},
+			Err:        context.DeadlineExceeded,
+		}
+	})
+	if len(h.app.sortedGenericRows) != 1 || h.app.sortedGenericRows[0].Name != "keep" {
+		t.Fatalf("rows replaced on error: %#v", h.app.sortedGenericRows)
 	}
-	done := make(chan tea.Cmd, 1)
-	go func() {
-		done <- h.app.openResourceJumpTarget(target, time.Now())
-	}()
-	_ = assertUpdateDoesNotBlock(t, done)
-	if fake.detailCalls != 0 {
-		t.Fatalf("backend detail called during openResourceJumpTarget; want deferred command")
+	if !strings.Contains(h.app.statusMessage, "deadline") && h.app.statusMessage == "" {
+		t.Fatalf("expected error status, got %q", h.app.statusMessage)
 	}
+}
+
+func TestGenericListResultOrderMatrix(t *testing.T) {
+	t.Run("stale token ignored", func(t *testing.T) {
+		h := newModelHarness(t)
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		h.app.genericListToken = 9
+		h.app.genericListLoading = true
+		h.RunAll(func() tea.Msg {
+			return genericListResultMsg{Token: 8, ResourceID: testGenericKind().ID, Rows: []cluster.GenericResourceRow{{Name: "stale"}}}
+		})
+		if len(h.app.sortedGenericRows) != 0 {
+			t.Fatalf("stale result applied: %#v", h.app.sortedGenericRows)
+		}
+		if !h.app.genericListLoading {
+			t.Fatal("stale result cleared loading")
+		}
+	})
+
+	t.Run("success applies matching token", func(t *testing.T) {
+		h := newModelHarness(t)
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		token := h.app.nextAsyncTokenValue()
+		h.app.genericListToken = token
+		h.app.genericListLoading = true
+		row := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "ok"}, Name: "ok", Namespace: "default", Cluster: "dev"}
+		h.RunAll(func() tea.Msg {
+			return genericListResultMsg{Token: token, ResourceID: testGenericKind().ID, Rows: []cluster.GenericResourceRow{row}}
+		})
+		if len(h.app.sortedGenericRows) != 1 || h.app.sortedGenericRows[0].Name != "ok" {
+			t.Fatalf("success not applied: %#v", h.app.sortedGenericRows)
+		}
+		if h.app.genericListLoading {
+			t.Fatal("loading stuck")
+		}
+	})
+
+	t.Run("reverse completion keeps latest", func(t *testing.T) {
+		h := newModelHarness(t)
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		oldToken := h.app.nextAsyncTokenValue()
+		newToken := h.app.nextAsyncTokenValue()
+		h.app.genericListToken = newToken
+		h.app.genericListLoading = true
+		oldRow := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "old"}, Name: "old", Namespace: "default", Cluster: "dev"}
+		newRow := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "new"}, Name: "new", Namespace: "default", Cluster: "dev"}
+		// Latest completes first.
+		h.RunAll(func() tea.Msg {
+			return genericListResultMsg{Token: newToken, ResourceID: testGenericKind().ID, Rows: []cluster.GenericResourceRow{newRow}}
+		})
+		// Stale older result arrives later.
+		h.RunAll(func() tea.Msg {
+			return genericListResultMsg{Token: oldToken, ResourceID: testGenericKind().ID, Rows: []cluster.GenericResourceRow{oldRow}}
+		})
+		if len(h.app.sortedGenericRows) != 1 || h.app.sortedGenericRows[0].Name != "new" {
+			t.Fatalf("reverse completion overwrote latest: %#v", h.app.sortedGenericRows)
+		}
+	})
 }

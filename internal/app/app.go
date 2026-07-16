@@ -345,10 +345,12 @@ type App struct {
 	serviceSort    listSortState
 	nodeSort       listSortState
 
-	sortedPods        []state.PodRow
-	sortedDeployments []state.DeploymentRow
-	sortedServices    []state.ServiceRow
-	sortedNodes       []state.NodeRow
+	sortedPods          []state.PodRow
+	podSelectionKey     state.PodKey
+	genericSelectionKey cluster.GenericResourceKey
+	sortedDeployments   []state.DeploymentRow
+	sortedServices      []state.ServiceRow
+	sortedNodes         []state.NodeRow
 
 	resumeOnStart bool
 	resumeSession sessionPreference
@@ -702,6 +704,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case resourceJumpResultMsg:
 		return a, a.handleResourceJumpResult(typed)
+
+	case resourceJumpDiscoveryResultMsg:
+		return a, a.handleResourceJumpDiscoveryResult(typed)
 
 	case nodeLogPickerResultMsg:
 		return a, a.handleNodeLogPickerResult(typed)
@@ -1109,12 +1114,16 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 	switch msg.String() {
 	case "j", "down":
 		a.podTable.MoveDown(1)
+		a.syncPodSelectionFromCursor(time.Now())
 	case "J":
 		a.podTable.MoveBottom()
+		a.syncPodSelectionFromCursor(time.Now())
 	case "k", "up":
 		a.podTable.MoveUp(1)
+		a.syncPodSelectionFromCursor(time.Now())
 	case "K":
 		a.podTable.MoveTop()
+		a.syncPodSelectionFromCursor(time.Now())
 	case "g":
 		if cmd, handled := a.tryOpenOwnerJump(time.Now()); handled {
 			return cmd
@@ -1123,6 +1132,7 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "home":
 		a.podTable.MoveTop()
+		a.syncPodSelectionFromCursor(time.Now())
 	case "G":
 		if cmd, handled := a.tryOpenChildJump(time.Now()); handled {
 			return cmd
@@ -1131,10 +1141,13 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "end":
 		a.podTable.MoveBottom()
+		a.syncPodSelectionFromCursor(time.Now())
 	case "pgdown":
 		a.podTable.MoveDown(max(1, a.listPageSize()))
+		a.syncPodSelectionFromCursor(time.Now())
 	case "pgup", "b":
 		a.podTable.MoveUp(max(1, a.listPageSize()))
+		a.syncPodSelectionFromCursor(time.Now())
 	case "h":
 		a.podTable.MoveLeft(1)
 	case "H", "shift+h":
@@ -1177,12 +1190,7 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 	case "O", "shift+o":
 		return a.openTableSortManager()
 	case "enter":
-		row, ok := a.podRowAt(a.podTable.SelectedIndex(), time.Now())
-		if !ok {
-			a.statusMessage = "pod vanished during refresh"
-			return nil
-		}
-		details, ok := a.store.PodDetailsByKey(row.Key, time.Now())
+		details, ok := a.selectedPodDetails(time.Now())
 		if !ok {
 			a.statusMessage = "pod vanished during refresh"
 			return nil
@@ -1209,15 +1217,31 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
+	syncGeneric := func() {
+		if a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps" {
+			return
+		}
+		if a.activeResource.Resource == "services" && a.activeResource.APIGroup == "" {
+			return
+		}
+		if a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
+			return
+		}
+		a.syncGenericSelectionFromCursor(time.Now())
+	}
 	switch msg.String() {
 	case "j", "down":
 		a.resourceTable.MoveDown(1)
+		syncGeneric()
 	case "J":
 		a.resourceTable.MoveBottom()
+		syncGeneric()
 	case "k", "up":
 		a.resourceTable.MoveUp(1)
+		syncGeneric()
 	case "K":
 		a.resourceTable.MoveTop()
+		syncGeneric()
 	case "g":
 		if cmd, handled := a.tryOpenOwnerJump(time.Now()); handled {
 			return cmd
@@ -1226,6 +1250,7 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "home":
 		a.resourceTable.MoveTop()
+		syncGeneric()
 	case "G":
 		if cmd, handled := a.tryOpenChildJump(time.Now()); handled {
 			return cmd
@@ -1234,10 +1259,13 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	case "end":
 		a.resourceTable.MoveBottom()
+		syncGeneric()
 	case "pgdown":
 		a.resourceTable.MoveDown(max(1, a.listPageSize()))
+		syncGeneric()
 	case "pgup", "b":
 		a.resourceTable.MoveUp(max(1, a.listPageSize()))
+		syncGeneric()
 	case "h":
 		a.resourceTable.MoveLeft(1)
 	case "H", "shift+h":
@@ -1521,6 +1549,24 @@ func (a *App) updateResourceDetailPodTableKeys(msg tea.KeyMsg) bool {
 	default:
 		return false
 	}
+}
+
+func (a *App) syncPodSelectionFromCursor(now time.Time) {
+	if row, ok := a.podRowAt(a.podTable.SelectedIndex(), now); ok {
+		a.podSelectionKey = row.Key
+	}
+}
+
+func (a *App) selectedPodDetails(now time.Time) (state.PodDetails, bool) {
+	if a.podSelectionKey.Name != "" {
+		return a.store.PodDetailsByKey(a.podSelectionKey, now)
+	}
+	row, ok := a.podRowAt(a.podTable.SelectedIndex(), now)
+	if !ok {
+		return state.PodDetails{}, false
+	}
+	a.podSelectionKey = row.Key
+	return a.store.PodDetailsByKey(row.Key, now)
 }
 
 func (a *App) openSelectedDetailPod(now time.Time) bool {
@@ -1811,9 +1857,12 @@ func (a *App) namespaceListCacheKey(storeVersion uint64, listKind string) string
 
 func (a *App) refreshPods(now time.Time) {
 	var selectedKey string
-	if idx := a.podTable.SelectedIndex(); idx >= 0 {
+	if a.podSelectionKey.Name != "" {
+		selectedKey = a.podSelectionKey.String()
+	} else if idx := a.podTable.SelectedIndex(); idx >= 0 {
 		if row, ok := a.podRowAt(idx, now); ok {
 			selectedKey = row.Key.String()
+			a.podSelectionKey = row.Key
 		}
 	}
 	storeVersion := a.store.PodVersion()
@@ -1838,12 +1887,13 @@ func (a *App) refreshPods(now time.Time) {
 		for i, row := range a.sortedPods {
 			if row.Key.String() == selectedKey {
 				a.podTable.SetCursor(i)
+				a.podSelectionKey = row.Key
 				restored = true
 				break
 			}
 		}
-		if !restored && filtered > 0 {
-			a.podTable.SetCursor(min(a.podTable.SelectedIndex(), filtered-1))
+		if !restored {
+			// Keep vanished identity for Enter/delete; do not adopt neighbor cursor identity.
 		}
 	}
 }

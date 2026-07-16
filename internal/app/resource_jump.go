@@ -124,11 +124,15 @@ func sortJumpTargets(targets []resourceJumpTarget) {
 }
 
 func (a *App) lookupResourceByGroupAndKind(apiGroup string, kind string) (cluster.ResourceKind, bool) {
+	return lookupResourceByGroupAndKind(a.manager.Catalog(), apiGroup, kind)
+}
+
+func lookupResourceByGroupAndKind(catalog []cluster.ResourceGroup, apiGroup string, kind string) (cluster.ResourceKind, bool) {
 	if kind == "" {
 		return cluster.ResourceKind{}, false
 	}
 	seen := make(map[string]struct{}, 64)
-	for _, group := range a.manager.Catalog() {
+	for _, group := range catalog {
 		for _, resource := range group.Resources {
 			if _, ok := seen[resource.ID]; ok {
 				continue
@@ -147,8 +151,12 @@ func (a *App) lookupResourceByGroupAndKind(apiGroup string, kind string) (cluste
 }
 
 func (a *App) lookupResourceByGroupAndResource(apiGroup string, resourceName string) (cluster.ResourceKind, bool) {
+	return lookupResourceByGroupAndResource(a.manager.Catalog(), apiGroup, resourceName)
+}
+
+func lookupResourceByGroupAndResource(catalog []cluster.ResourceGroup, apiGroup string, resourceName string) (cluster.ResourceKind, bool) {
 	seen := make(map[string]struct{}, 64)
-	for _, group := range a.manager.Catalog() {
+	for _, group := range catalog {
 		for _, resource := range group.Resources {
 			if _, ok := seen[resource.ID]; ok {
 				continue
@@ -301,11 +309,15 @@ func (a *App) currentResourceListJumpSource(now time.Time) (resourceJumpSource, 
 		if row.Object != nil {
 			return jumpSourceFromGenericDetails(a.activeResource, cluster.GenericResourceDetails{Row: row, Object: row.Object}), nil
 		}
-		details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, row.Key, now)
-		if err != nil || details.Object == nil {
-			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
-		}
-		return jumpSourceFromGenericDetails(a.activeResource, details), nil
+		// Defer network fetch to the jump discovery command; carry identity only.
+		return resourceJumpSource{
+			Resource:  a.activeResource,
+			Cluster:   row.Cluster,
+			Namespace: row.Namespace,
+			Name:      row.Name,
+			APIGroup:  a.activeResource.APIGroup,
+			Kind:      a.activeResource.Kind,
+		}, nil
 	}
 }
 
@@ -322,7 +334,7 @@ func (a *App) currentResourceDetailJumpSource() resourceJumpSource {
 	}
 }
 
-func (a *App) fetchJumpSourceFromTarget(target resourceJumpTarget, now time.Time) (resourceJumpSource, bool) {
+func (a *App) fetchJumpSourceFromTarget(ctx context.Context, backend genericResourceBackend, catalog []cluster.ResourceGroup, target resourceJumpTarget, now time.Time) (resourceJumpSource, bool) {
 	switch {
 	case target.Resource.Resource == "pods" && target.Resource.APIGroup == "":
 		details, ok := a.store.PodDetailsByKey(state.PodKey{Cluster: target.Cluster, Namespace: target.Namespace, Name: target.Name}, now)
@@ -349,7 +361,13 @@ func (a *App) fetchJumpSourceFromTarget(target resourceJumpTarget, now time.Time
 		}
 		return jumpSourceFromNodeDetails(details), true
 	default:
-		details, err := a.manager.GenericResourceDetails(context.Background(), target.Resource, cluster.GenericResourceKey{Cluster: target.Cluster, Namespace: target.Namespace, Name: target.Name}, now)
+		if backend == nil {
+			panic("app.fetchJumpSourceFromTarget: nil backend")
+		}
+		if ctx == nil {
+			panic("app.fetchJumpSourceFromTarget: nil context")
+		}
+		details, err := backend.GenericResourceDetails(ctx, target.Resource, cluster.GenericResourceKey{Cluster: target.Cluster, Namespace: target.Namespace, Name: target.Name}, now)
 		if err != nil || details.Object == nil {
 			return resourceJumpSource{}, false
 		}
@@ -373,7 +391,7 @@ func ownerRefMatchesSource(ref metav1.OwnerReference, source resourceJumpSource,
 	return true
 }
 
-func (a *App) ownerJumpTargets(source resourceJumpSource, now time.Time) []resourceJumpTarget {
+func (a *App) ownerJumpTargets(ctx context.Context, backend genericResourceBackend, catalog []cluster.ResourceGroup, source resourceJumpSource, now time.Time) []resourceJumpTarget {
 	targets := make([]resourceJumpTarget, 0, 8)
 	seen := make(map[string]struct{}, 8)
 	visited := make(map[string]struct{}, 8)
@@ -389,7 +407,7 @@ func (a *App) ownerJumpTargets(source resourceJumpSource, now time.Time) []resou
 		}
 		visited[visitKey] = struct{}{}
 		for _, ref := range current.Object.GetOwnerReferences() {
-			resource, ok := a.lookupResourceByGroupAndKind(groupFromAPIVersion(ref.APIVersion), ref.Kind)
+			resource, ok := lookupResourceByGroupAndKind(catalog, groupFromAPIVersion(ref.APIVersion), ref.Kind)
 			if !ok {
 				continue
 			}
@@ -413,7 +431,7 @@ func (a *App) ownerJumpTargets(source resourceJumpSource, now time.Time) []resou
 			if len(targets) == before {
 				continue
 			}
-			next, ok := a.fetchJumpSourceFromTarget(target, now)
+			next, ok := a.fetchJumpSourceFromTarget(ctx, backend, catalog, target, now)
 			if ok {
 				walk(next, depth+1)
 			}
@@ -436,11 +454,11 @@ func (a *App) ownerJumpTargets(source resourceJumpSource, now time.Time) []resou
 	return targets
 }
 
-func (a *App) descendantGenericCandidateResources() []cluster.ResourceKind {
+func (a *App) descendantGenericCandidateResources(catalog []cluster.ResourceGroup) []cluster.ResourceKind {
 	pairs := [][2]string{{"apps", "replicasets"}, {"apps", "daemonsets"}, {"apps", "statefulsets"}, {"batch", "jobs"}, {"batch", "cronjobs"}}
 	resources := make([]cluster.ResourceKind, 0, len(pairs))
 	for _, pair := range pairs {
-		resource, ok := a.lookupResourceByGroupAndResource(pair[0], pair[1])
+		resource, ok := lookupResourceByGroupAndResource(catalog, pair[0], pair[1])
 		if !ok {
 			continue
 		}
@@ -514,7 +532,7 @@ func (a *App) appendNodePods(targets []resourceJumpTarget, seen map[string]struc
 	return targets
 }
 
-func (a *App) directChildJumpTargets(source resourceJumpSource, depth int) []resourceJumpTarget {
+func (a *App) directChildJumpTargets(ctx context.Context, backend genericResourceBackend, catalog []cluster.ResourceGroup, source resourceJumpSource, depth int) []resourceJumpTarget {
 	targets := make([]resourceJumpTarget, 0, 8)
 	seen := make(map[string]struct{}, 8)
 
@@ -532,11 +550,17 @@ func (a *App) directChildJumpTargets(source resourceJumpSource, depth int) []res
 		return true
 	})
 
-	for _, resource := range a.descendantGenericCandidateResources() {
+	if backend == nil {
+		panic("app.directChildJumpTargets: nil backend")
+	}
+	if ctx == nil {
+		panic("app.directChildJumpTargets: nil context")
+	}
+	for _, resource := range a.descendantGenericCandidateResources(catalog) {
 		if len(targets) >= resourceJumpTargetLimit {
 			break
 		}
-		_ = a.manager.ForEachGenericResourceRow(context.Background(), resource, func(row cluster.GenericResourceRow) bool {
+		_ = backend.ForEachGenericResourceRow(ctx, resource, func(row cluster.GenericResourceRow) bool {
 			if len(targets) >= resourceJumpTargetLimit {
 				return false
 			}
@@ -564,7 +588,7 @@ func ownerReferenceMatchesAny(refs []metav1.OwnerReference, source resourceJumpS
 	return false
 }
 
-func (a *App) childJumpTargets(source resourceJumpSource, now time.Time) []resourceJumpTarget {
+func (a *App) childJumpTargets(ctx context.Context, backend genericResourceBackend, catalog []cluster.ResourceGroup, source resourceJumpSource, now time.Time) []resourceJumpTarget {
 	targets := make([]resourceJumpTarget, 0, 8)
 	seen := make(map[string]struct{}, 8)
 	visited := make(map[string]struct{}, 8)
@@ -588,7 +612,7 @@ func (a *App) childJumpTargets(source resourceJumpSource, now time.Time) []resou
 			return
 		}
 		visited[visitKey] = struct{}{}
-		for _, target := range a.directChildJumpTargets(current, depth) {
+		for _, target := range a.directChildJumpTargets(ctx, backend, catalog, current, depth) {
 			before := len(targets)
 			targets = addJumpTarget(targets, seen, target)
 			if len(targets) >= resourceJumpTargetLimit {
@@ -597,7 +621,7 @@ func (a *App) childJumpTargets(source resourceJumpSource, now time.Time) []resou
 			if len(targets) == before {
 				continue
 			}
-			next, ok := a.fetchJumpSourceFromTarget(target, now)
+			next, ok := a.fetchJumpSourceFromTarget(ctx, backend, catalog, target, now)
 			if ok {
 				walk(next, depth+1)
 			}
@@ -623,29 +647,72 @@ func (a *App) openJumpTargets(title string, targets []resourceJumpTarget, now ti
 }
 
 func (a *App) tryOpenOwnerJump(now time.Time) (tea.Cmd, bool) {
-	source, err := a.currentJumpSource(now)
-	if err != nil {
-		a.statusMessage = err.Error()
-		return nil, true
-	}
-	targets := a.ownerJumpTargets(source, now)
-	if len(targets) == 0 {
-		return nil, false
-	}
-	return a.openJumpTargets("select owner", targets, now), true
+	return a.beginJumpDiscovery(jumpDiscoverOwners, now)
 }
 
 func (a *App) tryOpenChildJump(now time.Time) (tea.Cmd, bool) {
+	return a.beginJumpDiscovery(jumpDiscoverChildren, now)
+}
+
+func (a *App) beginJumpDiscovery(kind jumpDiscoveryKind, now time.Time) (tea.Cmd, bool) {
 	source, err := a.currentJumpSource(now)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return nil, true
 	}
-	targets := a.childJumpTargets(source, now)
-	if len(targets) == 0 {
-		return nil, false
+	token := a.nextAsyncTokenValue()
+	a.genericJumpToken = token
+	a.genericJumpLoading = true
+	a.activity = "resolving jump targets"
+
+	backend := a.genericBackend
+	rootCtx := a.context
+	catalog := a.manager.Catalog()
+	walker := a
+	capturedSource := source
+	capturedKind := kind
+	capturedNow := now
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(rootCtx, genericRequestTimeout)
+		defer cancel()
+		resolved := capturedSource
+		if resolved.Object == nil && resolved.Name != "" && !isBuiltinJumpResource(resolved.Resource) {
+			details, fetchErr := backend.GenericResourceDetails(ctx, resolved.Resource, cluster.GenericResourceKey{
+				Cluster:   resolved.Cluster,
+				Namespace: resolved.Namespace,
+				Name:      resolved.Name,
+			}, capturedNow)
+			if fetchErr != nil || details.Object == nil {
+				return resourceJumpDiscoveryResultMsg{Token: token, Kind: capturedKind, Err: fmt.Errorf("resource vanished during refresh")}
+			}
+			resolved = jumpSourceFromGenericDetails(resolved.Resource, details)
+		}
+		var targets []resourceJumpTarget
+		switch capturedKind {
+		case jumpDiscoverOwners:
+			targets = walker.ownerJumpTargets(ctx, backend, catalog, resolved, capturedNow)
+		case jumpDiscoverChildren:
+			targets = walker.childJumpTargets(ctx, backend, catalog, resolved, capturedNow)
+		default:
+			return resourceJumpDiscoveryResultMsg{Token: token, Kind: capturedKind, Err: fmt.Errorf("unsupported jump discovery")}
+		}
+		return resourceJumpDiscoveryResultMsg{Token: token, Kind: capturedKind, Targets: targets}
+	}, true
+}
+
+func isBuiltinJumpResource(resource cluster.ResourceKind) bool {
+	switch {
+	case resource.Resource == "pods" && resource.APIGroup == "":
+		return true
+	case resource.Resource == "deployments" && resource.APIGroup == "apps":
+		return true
+	case resource.Resource == "services" && resource.APIGroup == "":
+		return true
+	case resource.Resource == "nodes" && resource.APIGroup == "":
+		return true
+	default:
+		return false
 	}
-	return a.openJumpTargets("select dependent", targets, now), true
 }
 
 func (a *App) openResourceJumpTarget(target resourceJumpTarget, now time.Time) tea.Cmd {

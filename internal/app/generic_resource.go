@@ -66,6 +66,20 @@ type resourceJumpResultMsg struct {
 	Resource cluster.ResourceKind
 }
 
+type jumpDiscoveryKind uint8
+
+const (
+	jumpDiscoverOwners jumpDiscoveryKind = iota + 1
+	jumpDiscoverChildren
+)
+
+type resourceJumpDiscoveryResultMsg struct {
+	Token   uint64
+	Kind    jumpDiscoveryKind
+	Targets []resourceJumpTarget
+	Err     error
+}
+
 func (a *App) supportsGenericResourceList(resource cluster.ResourceKind) bool {
 	return resource.Resource != ""
 }
@@ -343,6 +357,7 @@ func (a *App) handleGenericListResult(msg genericListResultMsg) tea.Cmd {
 	now := time.Now()
 	if msg.Err != nil {
 		a.statusMessage = msg.Err.Error()
+		return nil
 	}
 	a.applyGenericListRows(msg.Rows, now, msg.ResourceID)
 	a.lastManagerVersion = a.genericResourceVersion()
@@ -351,9 +366,12 @@ func (a *App) handleGenericListResult(msg genericListResultMsg) tea.Cmd {
 
 func (a *App) renderGenericResourceList(now time.Time) tea.Cmd {
 	var selectedKey string
-	if idx := a.resourceTable.SelectedIndex(); idx >= 0 {
+	if a.genericSelectionKey.Name != "" {
+		selectedKey = a.genericSelectionKey.String()
+	} else if idx := a.resourceTable.SelectedIndex(); idx >= 0 {
 		if row, ok := a.genericResourceRowAt(idx, now); ok {
 			selectedKey = row.Key.String()
+			a.genericSelectionKey = row.Key
 		}
 	}
 	a.ensureGenericCompiledColumns()
@@ -387,12 +405,13 @@ func (a *App) renderGenericResourceList(now time.Time) tea.Cmd {
 		for i, row := range a.sortedGenericRows {
 			if row.Key.String() == selectedKey {
 				a.resourceTable.SetCursor(i)
+				a.genericSelectionKey = row.Key
 				restored = true
 				break
 			}
 		}
-		if !restored && a.visibleRows > 0 {
-			a.resourceTable.SetCursor(min(a.resourceTable.SelectedIndex(), a.visibleRows-1))
+		if !restored {
+			// Keep vanished identity for Enter/delete; do not adopt neighbor cursor identity.
 		}
 	}
 	return nil
@@ -493,14 +512,32 @@ func (a *App) refreshGenericResourceDetails(now time.Time) tea.Cmd {
 	return a.fetchGenericResourceDetailsCmd(a.activeResource, a.activeGenericDetails.Row.Key, false)
 }
 
+func (a *App) syncGenericSelectionFromCursor(now time.Time) {
+	if row, ok := a.genericResourceRowAt(a.resourceTable.SelectedIndex(), now); ok {
+		a.genericSelectionKey = row.Key
+	}
+}
+
 func (a *App) openCurrentGenericResourceSelection(index int, now time.Time) tea.Cmd {
-	row, ok := a.genericResourceRowAt(index, now)
-	if !ok {
-		return nil
+	var key cluster.GenericResourceKey
+	if a.genericSelectionKey.Name != "" {
+		key = a.genericSelectionKey
+		if _, ok := a.genericRowsByKey[key.String()]; !ok {
+			a.statusMessage = "resource vanished during refresh"
+			return nil
+		}
+	} else {
+		row, ok := a.genericResourceRowAt(index, now)
+		if !ok {
+			a.statusMessage = "resource vanished during refresh"
+			return nil
+		}
+		key = row.Key
+		a.genericSelectionKey = key
 	}
 	a.genericDetailLoading = true
 	a.statusMessage = ""
-	return a.fetchGenericResourceDetailsCmd(a.activeResource, row.Key, true)
+	return a.fetchGenericResourceDetailsCmd(a.activeResource, key, true)
 }
 
 func (a *App) fetchGenericActionRevalidateCmd(resource cluster.ResourceKind, key cluster.GenericResourceKey, kind genericActionKind, returnScreen screen) tea.Cmd {
@@ -578,7 +615,7 @@ func (a *App) handleResourceJumpResult(msg resourceJumpResultMsg) tea.Cmd {
 		return nil
 	}
 	a.genericJumpLoading = false
-	if a.activity == "loading jump target" {
+	if a.activity == "loading jump target" || a.activity == "resolving jump targets" {
 		a.activity = ""
 	}
 	if msg.Err != nil {
@@ -595,6 +632,36 @@ func (a *App) handleResourceJumpResult(msg resourceJumpResultMsg) tea.Cmd {
 	a.detailFocus = detailFocusContent
 	a.resetTextViewport()
 	return a.maybeRefreshResourceUsageCmd(now)
+}
+
+func (a *App) handleResourceJumpDiscoveryResult(msg resourceJumpDiscoveryResultMsg) tea.Cmd {
+	if msg.Token != a.genericJumpToken {
+		return nil
+	}
+	a.genericJumpLoading = false
+	if a.activity == "resolving jump targets" {
+		a.activity = ""
+	}
+	if msg.Err != nil {
+		a.statusMessage = msg.Err.Error()
+		return nil
+	}
+	if len(msg.Targets) == 0 {
+		switch msg.Kind {
+		case jumpDiscoverOwners:
+			a.statusMessage = "no owner targets"
+		case jumpDiscoverChildren:
+			a.statusMessage = "no dependent targets"
+		default:
+			a.statusMessage = "no jump targets"
+		}
+		return nil
+	}
+	title := "select owner"
+	if msg.Kind == jumpDiscoverChildren {
+		title = "select dependent"
+	}
+	return a.openJumpTargets(title, msg.Targets, time.Now())
 }
 
 func (a *App) renderGenericResourceDetails() string {

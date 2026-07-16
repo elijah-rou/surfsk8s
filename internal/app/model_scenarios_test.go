@@ -1,9 +1,12 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -244,7 +247,7 @@ func TestModelScenarioSingleOptionActionReturnsToOrigin(t *testing.T) {
 }
 
 func TestListSelectionPreservesResourceIdentity(t *testing.T) {
-	t.Run("pods", func(t *testing.T) {
+	t.Run("pods keep identity through enter after insert", func(t *testing.T) {
 		h := newModelHarness(t)
 		store := h.store
 		now := time.Now()
@@ -252,8 +255,8 @@ func TestListSelectionPreservesResourceIdentity(t *testing.T) {
 		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
 		h.app.screen = screenPods
 		h.app.refreshPods(now)
-		// select c (second row after sort by name: b, c)
 		h.app.podTable.SetCursor(1)
+		h.app.syncPodSelectionFromCursor(now)
 		row, ok := h.app.podRowAt(h.app.podTable.SelectedIndex(), now)
 		if !ok || row.Name != "c" {
 			t.Fatalf("precondition: selected %v", row)
@@ -264,44 +267,256 @@ func TestListSelectionPreservesResourceIdentity(t *testing.T) {
 		if !ok || row.Name != "c" {
 			t.Fatalf("selected after insert = %q, want c", row.Name)
 		}
-		h.RunAll(h.app.openCurrentResourceSelection(h.app.podTable.SelectedIndex(), now))
-		// pods path opens details sync; generic uses cmd. For pods Enter uses openCurrentResourceSelection on pod table via updatePodKeys.
-		if h.app.screen != screenPods {
-			// openCurrentResourceSelection is for resource list; use pod details path:
+		h.Key(tea.KeyMsg{Type: tea.KeyEnter})
+		if h.app.screen != screenPodDetails {
+			t.Fatalf("screen=%d want pod details", h.app.screen)
 		}
-		details, ok := store.PodDetailsByKey(row.Key, now)
-		if !ok {
-			t.Fatalf("pod details missing")
-		}
-		h.app.activePod = details
-		h.app.screen = screenPodDetails
 		if h.app.activePod.Row.Name != "c" {
 			t.Fatalf("detail target = %q, want c", h.app.activePod.Row.Name)
 		}
 	})
 
-	t.Run("generic", func(t *testing.T) {
+	t.Run("pods report vanished after selected deletion", func(t *testing.T) {
+		h := newModelHarness(t)
+		store := h.store
+		now := time.Now()
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		h.app.screen = screenPods
+		h.app.refreshPods(now)
+		h.app.podTable.SetCursor(1)
+		h.app.syncPodSelectionFromCursor(now)
+		store.DeletePodByKey("dev", "default", "c")
+		h.app.refreshPods(now)
+		h.Key(tea.KeyMsg{Type: tea.KeyEnter})
+		if h.app.screen != screenPods {
+			t.Fatalf("screen=%d want pods list after vanished enter", h.app.screen)
+		}
+		if !strings.Contains(h.app.statusMessage, "vanished") {
+			t.Fatalf("status=%q, want vanished", h.app.statusMessage)
+		}
+		if h.app.activePod.Row.Name == "b" {
+			t.Fatalf("enter adopted neighbor b")
+		}
+	})
+
+	t.Run("generic keep identity through enter after insert", func(t *testing.T) {
 		h := newModelHarness(t)
 		now := time.Now()
 		b := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "b"}, Name: "b", Namespace: "default", Cluster: "dev"}
 		c := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "c"}, Name: "c", Namespace: "default", Cluster: "dev"}
 		aRow := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "a"}, Name: "a", Namespace: "default", Cluster: "dev"}
+		fake := newBlockingGenericBackend()
+		fake.details = cluster.GenericResourceDetails{Row: c, YAML: "kind: Widget"}
+		fake.detailBarrier.Release()
+		h.app.genericBackend = fake
 		h.app.screen = screenResourceList
 		h.app.activeResource = testGenericKind()
 		h.app.applyGenericListRows([]cluster.GenericResourceRow{b, c}, now, testGenericKind().ID)
 		h.app.genericListCacheKey = ""
 		h.app.renderGenericResourceList(now)
 		h.app.resourceTable.SetCursor(1)
-		row, ok := h.app.genericResourceRowAt(h.app.resourceTable.SelectedIndex(), now)
-		if !ok || row.Name != "c" {
-			t.Fatalf("precondition selected=%v", row)
-		}
+		h.app.syncGenericSelectionFromCursor(now)
 		h.app.applyGenericListRows([]cluster.GenericResourceRow{aRow, b, c}, now, testGenericKind().ID)
 		h.app.genericListCacheKey = ""
 		h.app.renderGenericResourceList(now)
-		row, ok = h.app.genericResourceRowAt(h.app.resourceTable.SelectedIndex(), now)
+		row, ok := h.app.genericResourceRowAt(h.app.resourceTable.SelectedIndex(), now)
 		if !ok || row.Name != "c" {
 			t.Fatalf("selected after insert = %q, want c", row.Name)
 		}
+		h.Key(tea.KeyMsg{Type: tea.KeyEnter})
+		if h.app.genericSelectionKey.Name != "c" {
+			t.Fatalf("enter target key=%q, want c", h.app.genericSelectionKey.Name)
+		}
 	})
+
+	t.Run("generic report vanished after selected deletion", func(t *testing.T) {
+		h := newModelHarness(t)
+		now := time.Now()
+		b := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "b"}, Name: "b", Namespace: "default", Cluster: "dev"}
+		c := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "c"}, Name: "c", Namespace: "default", Cluster: "dev"}
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		h.app.applyGenericListRows([]cluster.GenericResourceRow{b, c}, now, testGenericKind().ID)
+		h.app.genericListCacheKey = ""
+		h.app.renderGenericResourceList(now)
+		h.app.resourceTable.SetCursor(1)
+		h.app.syncGenericSelectionFromCursor(now)
+		h.app.applyGenericListRows([]cluster.GenericResourceRow{b}, now, testGenericKind().ID)
+		h.app.genericListCacheKey = ""
+		h.app.renderGenericResourceList(now)
+		h.Key(tea.KeyMsg{Type: tea.KeyEnter})
+		if !strings.Contains(h.app.statusMessage, "vanished") {
+			t.Fatalf("status=%q, want vanished", h.app.statusMessage)
+		}
+	})
+}
+
+type blockingLogBackend struct {
+	enterFirst    chan struct{}
+	releaseFirst  chan struct{}
+	enterSecond   chan struct{}
+	releaseSecond chan struct{}
+	calls         int
+	mu            sync.Mutex
+	lastOpts      cluster.PodLogsOptions
+}
+
+func (b *blockingLogBackend) PodLogsWithOptions(ctx context.Context, details state.PodDetails, options cluster.PodLogsOptions) (string, error) {
+	b.mu.Lock()
+	b.calls++
+	call := b.calls
+	b.lastOpts = options
+	b.mu.Unlock()
+	if call == 1 {
+		select {
+		case b.enterFirst <- struct{}{}:
+		default:
+		}
+		select {
+		case <-b.releaseFirst:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return "2024-01-01T00:00:00Z first\n", nil
+	}
+	select {
+	case b.enterSecond <- struct{}{}:
+	default:
+	}
+	select {
+	case <-b.releaseSecond:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return "2024-01-01T00:00:01Z second\n", nil
+}
+
+func (b *blockingLogBackend) NodeLogWithOptions(ctx context.Context, details state.NodeDetails, options cluster.NodeLogOptions) (string, error) {
+	return "", fmt.Errorf("unused")
+}
+
+func (b *blockingLogBackend) NodeLogEntries(ctx context.Context, details state.NodeDetails, dir string) ([]cluster.NodeLogEntry, error) {
+	return nil, fmt.Errorf("unused")
+}
+
+func (b *blockingLogBackend) DeploymentPodDetails(details state.DeploymentDetails, now time.Time) ([]state.PodDetails, error) {
+	return nil, fmt.Errorf("unused")
+}
+
+func TestForcedLogRefreshCancelsPreviousRequest(t *testing.T) {
+	h := newModelHarness(t)
+	fake := &blockingLogBackend{
+		enterFirst:    make(chan struct{}, 1),
+		releaseFirst:  make(chan struct{}),
+		enterSecond:   make(chan struct{}, 1),
+		releaseSecond: make(chan struct{}),
+	}
+	h.app.logBackend = fake
+	h.app.screen = screenLogs
+	h.app.logTarget = logTargetPod
+	h.app.logRange = logRangeAll
+	h.app.logPod = state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+		},
+	}
+	h.app.logSelectedContainers = map[string]bool{"main": true}
+
+	firstCmd := h.app.refreshLogs(true)
+	if firstCmd == nil {
+		t.Fatal("expected first refresh command")
+	}
+	firstDone := make(chan tea.Msg, 1)
+	go func() { firstDone <- firstCmd() }()
+	select {
+	case <-fake.enterFirst:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first fetch never started")
+	}
+
+	secondCmd := h.app.refreshLogs(true)
+	if secondCmd == nil {
+		t.Fatal("expected forced refresh command")
+	}
+	secondDone := make(chan tea.Msg, 1)
+	go func() { secondDone <- secondCmd() }()
+
+	select {
+	case msg := <-firstDone:
+		res, ok := msg.(logsResultMsg)
+		if !ok {
+			t.Fatalf("first result type %T", msg)
+		}
+		if res.Err == nil {
+			t.Fatal("expected first request canceled")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first request was not canceled by forced refresh")
+	}
+
+	select {
+	case <-fake.enterSecond:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second fetch never started")
+	}
+	close(fake.releaseSecond)
+	secondMsg := <-secondDone
+	// Complete reverse: apply stale canceled first (already done), then second.
+	h.RunAll(func() tea.Msg { return secondMsg })
+	if len(h.app.logEntries) == 0 || !strings.Contains(h.app.logEntries[0].Message, "second") {
+		t.Fatalf("expected second result applied, got %#v", h.app.logEntries)
+	}
+}
+
+func TestModelScenarioMaximumLogRangeIsBounded(t *testing.T) {
+	h := newModelHarness(t)
+	fake := &blockingLogBackend{
+		enterFirst:    make(chan struct{}, 1),
+		releaseFirst:  make(chan struct{}),
+		enterSecond:   make(chan struct{}, 1),
+		releaseSecond: make(chan struct{}),
+	}
+	close(fake.releaseFirst)
+	close(fake.releaseSecond)
+	h.app.logBackend = fake
+	h.app.screen = screenLogs
+	h.app.logTarget = logTargetPod
+	h.app.logRange = logRangeAll
+	h.app.logPod = state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+			Spec: corev1.PodSpec{
+				Containers: func() []corev1.Container {
+					out := make([]corev1.Container, maxLogFetchSources+1)
+					for i := range out {
+						out[i] = corev1.Container{Name: fmt.Sprintf("c%d", i)}
+					}
+					return out
+				}(),
+			},
+		},
+	}
+	h.app.logSelectedContainers = map[string]bool{}
+	for i := 0; i < maxLogFetchSources+1; i++ {
+		h.app.logSelectedContainers[fmt.Sprintf("c%d", i)] = true
+	}
+
+	if got := logRangeAll.menuLabel(); !strings.Contains(got, "1 MiB") {
+		t.Fatalf("menu label=%q, want max 1 MiB", got)
+	}
+	if got := logRangeAll.nodeTailBytes(); got != defaultPodLogBytes {
+		t.Fatalf("nodeTailBytes=%d want %d", got, defaultPodLogBytes)
+	}
+
+	h.RunAll(h.app.refreshLogs(true))
+	if !strings.Contains(h.app.statusMessage, "too many log sources") {
+		t.Fatalf("status=%q, want source limit", h.app.statusMessage)
+	}
+	if len(h.app.logEntries) > maxRetainedLogEntries {
+		t.Fatalf("retained %d entries, max %d", len(h.app.logEntries), maxRetainedLogEntries)
+	}
 }

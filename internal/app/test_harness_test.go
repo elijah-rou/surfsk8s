@@ -25,6 +25,10 @@ type modelHarness struct {
 	manager  *cluster.Manager
 	app      *App
 	deadline time.Duration
+
+	cmdMu      sync.Mutex
+	cmdCancels []context.CancelFunc
+	cmdWG      sync.WaitGroup
 }
 
 func newModelHarness(t *testing.T) *modelHarness {
@@ -33,10 +37,10 @@ func newModelHarness(t *testing.T) *modelHarness {
 		panic("newModelHarness: nil testing.T")
 	}
 
+	// Isolate preferences via XDG_CONFIG_HOME so parallel tests do not race on
+	// the package-global userConfigDir indirection.
 	tempDir := t.TempDir()
-	previousUserConfigDir := userConfigDir
-	userConfigDir = func() (string, error) { return tempDir, nil }
-	t.Cleanup(func() { userConfigDir = previousUserConfigDir })
+	t.Setenv("XDG_CONFIG_HOME", tempDir)
 
 	store := state.NewStore()
 	manager := newTestManagerWithStore(t, store)
@@ -51,6 +55,10 @@ func newModelHarness(t *testing.T) *modelHarness {
 		app:      app,
 		deadline: modelHarnessDefaultDeadline,
 	}
+	t.Cleanup(func() {
+		h.cancelAllCommands()
+		h.cmdWG.Wait()
+	})
 	return h
 }
 
@@ -90,6 +98,23 @@ users:
 	return manager
 }
 
+func (h *modelHarness) cancelAllCommands() {
+	h.cmdMu.Lock()
+	defer h.cmdMu.Unlock()
+	for _, cancel := range h.cmdCancels {
+		if cancel != nil {
+			cancel()
+		}
+	}
+	h.cmdCancels = nil
+}
+
+func (h *modelHarness) trackCancel(cancel context.CancelFunc) {
+	h.cmdMu.Lock()
+	defer h.cmdMu.Unlock()
+	h.cmdCancels = append(h.cmdCancels, cancel)
+}
+
 func (h *modelHarness) Send(msg tea.Msg) tea.Cmd {
 	h.t.Helper()
 	if msg == nil {
@@ -111,11 +136,6 @@ func (h *modelHarness) Keys(keys ...string) {
 			panic("modelHarness.Keys: empty key")
 		}
 		cmd := h.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
-		if len(key) == 1 {
-			h.RunAll(cmd)
-			continue
-		}
-		// Multi-character strings are treated as KeyMsg.String() values via parse.
 		h.RunAll(cmd)
 	}
 }
@@ -139,16 +159,20 @@ func (h *modelHarness) Run(cmd tea.Cmd) tea.Msg {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), h.deadline)
+	h.trackCancel(cancel)
 	defer cancel()
 
 	done := make(chan tea.Msg, 1)
+	h.cmdWG.Add(1)
 	go func() {
+		defer h.cmdWG.Done()
 		done <- cmd()
 	}()
 	select {
 	case msg := <-done:
 		return msg
 	case <-ctx.Done():
+		h.cancelAllCommands()
 		h.t.Fatalf("modelHarness.Run: command exceeded deadline %s", h.deadline)
 		return nil
 	}
@@ -173,9 +197,7 @@ func (h *modelHarness) runAllBounded(cmd tea.Cmd, depth int) {
 		return
 	}
 	if batch, ok := msg.(tea.BatchMsg); ok {
-		for _, nested := range batch {
-			h.runAllBounded(nested, depth+1)
-		}
+		h.runBatchConcurrent(batch, depth+1)
 		return
 	}
 	// SequenceMsg may appear from tea.Sequence; expand via reflection-safe type assert.
@@ -187,6 +209,62 @@ func (h *modelHarness) runAllBounded(cmd tea.Cmd, depth int) {
 	}
 	next := h.Send(msg)
 	h.runAllBounded(next, depth+1)
+}
+
+// runBatchConcurrent starts every batch command concurrently (matching Bubble Tea),
+// then applies results in completion order through Update.
+func (h *modelHarness) runBatchConcurrent(batch tea.BatchMsg, depth int) {
+	h.t.Helper()
+	if len(batch) == 0 {
+		return
+	}
+	type batchResult struct {
+		index int
+		msg   tea.Msg
+	}
+	results := make(chan batchResult, len(batch))
+	ctx, cancel := context.WithTimeout(context.Background(), h.deadline)
+	h.trackCancel(cancel)
+	defer cancel()
+
+	for i, nested := range batch {
+		if nested == nil {
+			results <- batchResult{index: i, msg: nil}
+			continue
+		}
+		h.cmdWG.Add(1)
+		go func(index int, cmd tea.Cmd) {
+			defer h.cmdWG.Done()
+			results <- batchResult{index: index, msg: cmd()}
+		}(i, nested)
+	}
+
+	pending := len(batch)
+	for pending > 0 {
+		select {
+		case result := <-results:
+			pending--
+			if result.msg == nil {
+				continue
+			}
+			if nestedBatch, ok := result.msg.(tea.BatchMsg); ok {
+				h.runBatchConcurrent(nestedBatch, depth+1)
+				continue
+			}
+			if cmds := sequenceCmds(result.msg); cmds != nil {
+				for _, nested := range cmds {
+					h.runAllBounded(nested, depth+1)
+				}
+				continue
+			}
+			next := h.Send(result.msg)
+			h.runAllBounded(next, depth+1)
+		case <-ctx.Done():
+			h.cancelAllCommands()
+			h.t.Fatalf("modelHarness.runBatchConcurrent: exceeded deadline %s", h.deadline)
+			return
+		}
+	}
 }
 
 func sequenceCmds(msg tea.Msg) []tea.Cmd {
@@ -248,4 +326,28 @@ func (b *ReleaseBarrier) Wait(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func TestModelHarnessBatchRunsConcurrently(t *testing.T) {
+	h := newModelHarness(t)
+	startedSecond := make(chan struct{})
+	releaseFirst := make(chan struct{})
+
+	first := func() tea.Msg {
+		select {
+		case <-startedSecond:
+		case <-time.After(2 * time.Second):
+			t.Error("second batch command never started while first waited")
+			return nil
+		}
+		close(releaseFirst)
+		return nil
+	}
+	second := func() tea.Msg {
+		close(startedSecond)
+		<-releaseFirst
+		return nil
+	}
+	// Batch whose first command waits for the second — serial RunAll would deadlock/timeout.
+	h.RunAll(tea.Batch(first, second))
 }

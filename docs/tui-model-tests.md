@@ -4,7 +4,7 @@
 
 ```bash
 # Focused stability regressions
-timeout 90s go test ./internal/app -run 'Test(ModelScenario|Generic.*DoesNotBlock|ForcedLogRefreshCancelsPreviousRequest|ListSelectionPreservesResourceIdentity|HeadlessProgramStartupQuit)' -count=1 -timeout=60s
+timeout 90s go test ./internal/app -run 'Test(ModelScenario|Generic.*DoesNotBlock|GenericListResult|ForcedLogRefreshCancelsPreviousRequest|ListSelectionPreservesResourceIdentity|HeadlessProgramStartupQuit|ModelHarnessBatch)' -count=1 -timeout=60s
 
 timeout 90s go test ./internal/cluster -run 'Test(NodeLogResponseIsBounded|ManagerCloseCompletesWhenDiscoveryStalls)' -count=1 -timeout=60s
 
@@ -13,7 +13,7 @@ timeout 150s go test ./... -count=1 -shuffle=on -timeout=120s
 timeout 240s go test -race ./... -count=1 -shuffle=on -timeout=180s
 ```
 
-Model tests use an offline harness (`modelHarness`) with channels/barriers — no sleeps, no live cluster, no PTY.
+Model tests use an offline harness (`modelHarness`) with channels/barriers — no sleeps, no live cluster, no PTY. Batch commands run concurrently to match Bubble Tea.
 
 ## PTY / expect smoke
 

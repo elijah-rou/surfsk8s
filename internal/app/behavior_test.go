@@ -23,6 +23,30 @@ import (
 	"github.com/elijahrou/surfsk8s/internal/ui/components"
 )
 
+func drainCmd(t *testing.T, app *App, cmd tea.Cmd) {
+	t.Helper()
+	const maxSteps = 64
+	for step := 0; cmd != nil && step < maxSteps; step++ {
+		msg := cmd()
+		if msg == nil {
+			return
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, nested := range batch {
+				drainCmd(t, app, nested)
+			}
+			return
+		}
+		model, next := app.Update(msg)
+		updated, ok := model.(*App)
+		if !ok || updated == nil {
+			t.Fatalf("Update returned %T", model)
+		}
+		*app = *updated
+		cmd = next
+	}
+}
+
 func TestMatchesSearchSupportsWildcardAndExact(t *testing.T) {
 	candidate := "services serving.knative.dev namespaced"
 	if !matchesSearch(candidate, "*serv*knative*") {
@@ -1130,7 +1154,7 @@ func TestResourceDetailPaneSwitchIsExplicit(t *testing.T) {
 	app.screen = screenResourceDetails
 	_ = app.View()
 
-	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	drainCmd(t, app, app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}))
 	if got, want := app.screen, screenActionPicker; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
 	}
@@ -1180,7 +1204,7 @@ func TestPodDetailJumpToOwnerOffersOwnerChain(t *testing.T) {
 	app.activePod = details
 	app.screen = screenPodDetails
 
-	app.updatePodDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	drainCmd(t, app, app.updatePodDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}))
 	if got, want := app.screen, screenActionPicker; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
 	}
@@ -1226,7 +1250,7 @@ func TestDeploymentListJumpToDependentsOpensSelectedPod(t *testing.T) {
 	app.screen = screenResourceList
 	app.refreshResourceList(time.Now())
 
-	app.updateResourceListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	drainCmd(t, app, app.updateResourceListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}))
 	if got, want := app.screen, screenActionPicker; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
 	}
