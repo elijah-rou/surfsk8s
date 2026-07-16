@@ -29,6 +29,8 @@ const (
 	maxRenderedLogRunes          = 8192
 	logLiveRefreshInterval       = time.Second
 	maxLiveLogEntries            = 10000
+	maxLogFetchSources           = 32
+	maxRetainedLogEntries        = 10000
 	logFetchConcurrency          = 4
 )
 
@@ -157,7 +159,7 @@ func (r logRange) menuLabel() string {
 	case logRange1h:
 		return "1 hour"
 	case logRangeAll:
-		return "all time"
+		return "all (max 1 MiB)"
 	default:
 		return "live"
 	}
@@ -195,7 +197,7 @@ func (r logRange) nodeTailBytes() int64 {
 	case logRange1h:
 		return 1024 * 1024
 	case logRangeAll:
-		return 0
+		return defaultPodLogBytes
 	default:
 		return defaultNodeTailBytes
 	}
@@ -253,6 +255,10 @@ func (a *App) updateLogKeys(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (a *App) stopLogsScreen() {
+	if a.logCancel != nil {
+		a.logCancel()
+		a.logCancel = nil
+	}
 	a.logRequestToken = 0
 	a.logLoading = false
 	a.activity = ""
@@ -574,20 +580,31 @@ func (a *App) refreshLogs(force bool) tea.Cmd {
 		replace = true
 	}
 
-	rootCtx := a.context
+	if a.logCancel != nil {
+		a.logCancel()
+		a.logCancel = nil
+	}
+	ctx, cancel := context.WithTimeout(a.context, 15*time.Second)
+	a.logCancel = cancel
+	backend := a.logBackend
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(rootCtx, 15*time.Second)
 		defer cancel()
-		entries, nextCursor, err := a.fetchLogEntries(ctx, fetchTarget, pod, deployment, node, nodePath, selected, fetchRange, sinceTime, tailLines)
+		entries, nextCursor, err := fetchLogEntries(ctx, backend, fetchTarget, pod, deployment, node, nodePath, selected, fetchRange, sinceTime, tailLines)
 		return logsResultMsg{Token: token, Replace: replace, Cursor: nextCursor, Entries: entries, Err: err}
 	}
 }
 
-func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.PodDetails, deployment state.DeploymentDetails, node state.NodeDetails, nodePath string, selected map[string]bool, fetchRange logRange, sinceTime *time.Time, tailLines *int64) ([]logEntry, time.Time, error) {
+func fetchLogEntries(ctx context.Context, backend logBackend, target logTarget, pod state.PodDetails, deployment state.DeploymentDetails, node state.NodeDetails, nodePath string, selected map[string]bool, fetchRange logRange, sinceTime *time.Time, tailLines *int64) ([]logEntry, time.Time, error) {
+	if backend == nil {
+		panic("app.fetchLogEntries: nil backend")
+	}
 	now := time.Now()
-	sources, err := a.buildLogFetchSources(now, target, pod, deployment, node, nodePath, selected)
+	sources, err := buildLogFetchSources(now, backend, target, pod, deployment, node, nodePath, selected)
 	if err != nil {
 		return nil, time.Time{}, err
+	}
+	if len(sources) > maxLogFetchSources {
+		return nil, time.Time{}, fmt.Errorf("too many log sources (%d); narrow containers/pods (max %d)", len(sources), maxLogFetchSources)
 	}
 
 	type logFetchResult struct {
@@ -615,7 +632,7 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 			var fetchErr error
 			switch {
 			case source.Container != "":
-				content, fetchErr = a.logBackend.PodLogsWithOptions(ctx, source.Pod, cluster.PodLogsOptions{
+				content, fetchErr = backend.PodLogsWithOptions(ctx, source.Pod, cluster.PodLogsOptions{
 					Container:  source.Container,
 					Timestamps: true,
 					TailLines:  tailLines,
@@ -624,10 +641,10 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 				})
 			case source.NodeLogPath != "":
 				options := cluster.NodeLogOptions{Path: source.NodeLogPath, TailBytes: fetchRange.nodeTailBytes()}
-				if fetchRange == logRangeAll {
-					options.All = true
+				if options.TailBytes <= 0 {
+					options.TailBytes = defaultPodLogBytes
 				}
-				content, fetchErr = a.logBackend.NodeLogWithOptions(ctx, source.Node, options)
+				content, fetchErr = backend.NodeLogWithOptions(ctx, source.Node, options)
 			default:
 				fetchErr = fmt.Errorf("invalid log source")
 			}
@@ -635,7 +652,11 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 				results[index].err = source.Label + ": " + fetchErr.Error()
 				return
 			}
-			results[index].entries, results[index].cursor = parseLogEntries(content, source.Key, source.Label, index<<20)
+			perSourceBudget := maxRetainedLogEntries / max(1, len(sources))
+			if perSourceBudget <= 0 {
+				perSourceBudget = maxRetainedLogEntries
+			}
+			results[index].entries, results[index].cursor = parseLogEntriesBounded(content, source.Key, source.Label, index<<20, perSourceBudget)
 		}(idx, source)
 	}
 	wg.Wait()
@@ -655,6 +676,9 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 	}
 
 	sort.SliceStable(entries, func(i int, j int) bool { return logEntryLess(entries[i], entries[j]) })
+	if len(entries) > maxRetainedLogEntries {
+		entries = entries[len(entries)-maxRetainedLogEntries:]
+	}
 
 	if cursor.IsZero() {
 		cursor = now
@@ -670,7 +694,7 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 	return entries, cursor, nil
 }
 
-func (a *App) buildLogFetchSources(now time.Time, target logTarget, pod state.PodDetails, deployment state.DeploymentDetails, node state.NodeDetails, nodePath string, selected map[string]bool) ([]logFetchSource, error) {
+func buildLogFetchSources(now time.Time, backend logBackend, target logTarget, pod state.PodDetails, deployment state.DeploymentDetails, node state.NodeDetails, nodePath string, selected map[string]bool) ([]logFetchSource, error) {
 	switch target {
 	case logTargetPod:
 		containers, err := actions.PodContainerNames(pod.Pod)
@@ -704,7 +728,7 @@ func (a *App) buildLogFetchSources(now time.Time, target logTarget, pod state.Po
 		if len(selectedNames) == 0 {
 			return nil, fmt.Errorf("select at least one container")
 		}
-		pods, err := a.logBackend.DeploymentPodDetails(deployment, now)
+		pods, err := backend.DeploymentPodDetails(deployment, now)
 		if err != nil {
 			return nil, err
 		}
@@ -731,9 +755,16 @@ func (a *App) buildLogFetchSources(now time.Time, target logTarget, pod state.Po
 }
 
 func parseLogEntries(content string, sourceKey string, sourceLabel string, orderStart int) ([]logEntry, time.Time) {
+	return parseLogEntriesBounded(content, sourceKey, sourceLabel, orderStart, 0)
+}
+
+func parseLogEntriesBounded(content string, sourceKey string, sourceLabel string, orderStart int, limit int) ([]logEntry, time.Time) {
 	lines := strings.Split(strings.ReplaceAll(strings.TrimRight(content, "\n"), "\r\n", "\n"), "\n")
 	if len(lines) == 1 && lines[0] == "" {
 		return nil, time.Time{}
+	}
+	if limit > 0 && len(lines) > limit {
+		lines = lines[len(lines)-limit:]
 	}
 	entries := make([]logEntry, 0, len(lines))
 	maxTime := time.Time{}
@@ -790,6 +821,10 @@ func (a *App) trimLiveLogEntries() {
 func (a *App) handleLogsResult(msg logsResultMsg) tea.Cmd {
 	if msg.Token != a.logRequestToken {
 		return nil
+	}
+	if a.logCancel != nil {
+		a.logCancel()
+		a.logCancel = nil
 	}
 	follow := a.screen == screenLogs && a.textViewport.AtBottom()
 	a.activity = ""

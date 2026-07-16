@@ -195,6 +195,7 @@ type App struct {
 	logRequestToken       uint64
 	nodeLogPickerToken    uint64
 	nextAsyncToken        uint64
+	logCancel             context.CancelFunc
 	logTarget             logTarget
 	logRange              logRange
 	logShowTimestamps     bool
@@ -1809,28 +1810,19 @@ func (a *App) namespaceListCacheKey(storeVersion uint64, listKind string) string
 }
 
 func (a *App) refreshPods(now time.Time) {
-	total := 0
-	filtered := 0
+	var selectedKey string
+	if idx := a.podTable.SelectedIndex(); idx >= 0 {
+		if row, ok := a.podRowAt(idx, now); ok {
+			selectedKey = row.Key.String()
+		}
+	}
 	storeVersion := a.store.PodVersion()
 	nsKey := a.namespaceListCacheKey(storeVersion, "pods")
 	if nsKey != a.podNamespacesCacheKey {
 		a.namespaces = a.podNamespacesForScope()
 		a.podNamespacesCacheKey = nsKey
 	}
-	if a.podNeedsMaterializedSort() {
-		total, filtered = a.buildSortedPods()
-	} else {
-		a.sortedPods = a.sortedPods[:0]
-		a.store.ForEachPod(func(row state.PodRow) bool {
-			total++
-			if !a.matchPodRowAt(row, now) {
-				return true
-			}
-			filtered++
-			return true
-		})
-	}
-
+	total, filtered := a.buildSortedPods()
 	a.lastDataVersion = storeVersion
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
@@ -1841,6 +1833,19 @@ func (a *App) refreshPods(now time.Time) {
 	a.podTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 		return a.podTableRows(a.podWindow(start, end-start, time.Now()), time.Now())
 	})
+	if selectedKey != "" {
+		restored := false
+		for i, row := range a.sortedPods {
+			if row.Key.String() == selectedKey {
+				a.podTable.SetCursor(i)
+				restored = true
+				break
+			}
+		}
+		if !restored && filtered > 0 {
+			a.podTable.SetCursor(min(a.podTable.SelectedIndex(), filtered-1))
+		}
+	}
 }
 
 func (a *App) refreshResourceList(now time.Time) tea.Cmd {
@@ -2800,30 +2805,7 @@ func (a *App) matchPodRowAt(row state.PodRow, now time.Time) bool {
 }
 
 func (a *App) podWindow(start int, limit int, now time.Time) []state.PodRow {
-	if a.podNeedsMaterializedSort() {
-		return windowRowsFromSlice(a.sortedPods, start, limit, now)
-	}
-	if limit <= 0 {
-		return nil
-	}
-	rows := make([]state.PodRow, 0, limit)
-	matched := 0
-	a.store.ForEachPod(func(row state.PodRow) bool {
-		if !a.matchPodRowAt(row, now) {
-			return true
-		}
-		if matched < start {
-			matched++
-			return true
-		}
-		if len(rows) >= limit {
-			return false
-		}
-		rows = append(rows, row.WithAge(now))
-		matched++
-		return true
-	})
-	return rows
+	return windowRowsFromSlice(a.sortedPods, start, limit, now)
 }
 
 func (a *App) podRowAt(index int, now time.Time) (state.PodRow, bool) {

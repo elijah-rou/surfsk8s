@@ -35,7 +35,6 @@ type PodLogsOptions struct {
 type NodeLogOptions struct {
 	Path      string
 	TailBytes int64
-	All       bool
 }
 
 func (m *Manager) PodLogs(ctx context.Context, details state.PodDetails, container string, tailLines int64, timestamps bool) (string, error) {
@@ -233,7 +232,7 @@ func (m *Manager) NodeLogWithOptions(ctx context.Context, details state.NodeDeta
 	if err != nil {
 		return "", err
 	}
-	if !options.All && options.TailBytes <= 0 {
+	if options.TailBytes <= 0 {
 		return "", fmt.Errorf("tail bytes must be > 0")
 	}
 
@@ -242,12 +241,20 @@ func (m *Manager) NodeLogWithOptions(ctx context.Context, details state.NodeDeta
 		return "", err
 	}
 	request := conn.REST.Get().AbsPath(buildNodeLogProxyPath(details.Row.Name, cleanPath))
-	if !options.All {
-		request = request.SetHeader("Range", fmt.Sprintf("bytes=-%d", options.TailBytes))
-	}
-	data, err := request.DoRaw(ctx)
+	request = request.SetHeader("Range", fmt.Sprintf("bytes=-%d", options.TailBytes))
+	stream, err := request.Stream(ctx)
 	if err != nil {
 		return "", err
+	}
+	defer stream.Close()
+
+	limited := io.LimitReader(stream, options.TailBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(data)) > options.TailBytes {
+		return "", fmt.Errorf("node log exceeded %d byte limit", options.TailBytes)
 	}
 	return string(data), nil
 }

@@ -166,3 +166,39 @@ func TestCleanNodeLogPathRejectsTraversal(t *testing.T) {
 		t.Fatalf("expected traversal error")
 	}
 }
+
+func TestNodeLogResponseIsBounded(t *testing.T) {
+	var gotRange string
+	manager := &Manager{
+		conns: map[string]*ClusterConn{
+			"dev": {
+				Name: "dev",
+				REST: &fake.RESTClient{
+					GroupVersion:         schema.GroupVersion{Version: "v1"},
+					NegotiatedSerializer: scheme.Codecs.WithoutConversion(),
+					VersionedAPIPath:     "/",
+					Client: fake.CreateHTTPClient(func(req *http.Request) (*http.Response, error) {
+						gotRange = req.Header.Get("Range")
+						// Ignore Range and stream more than the requested limit.
+						body := strings.Repeat("x", 64)
+						return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+					}),
+				},
+			},
+		},
+	}
+
+	content, err := manager.NodeLogWithOptions(context.Background(), state.NodeDetails{
+		Row:  state.NodeRow{Cluster: "dev", Name: "node-a"},
+		Node: &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}},
+	}, NodeLogOptions{Path: "cloud-init.log", TailBytes: 16})
+	if err == nil || !strings.Contains(err.Error(), "exceeded 16 byte limit") {
+		t.Fatalf("err = %v, want size-limit error", err)
+	}
+	if content != "" {
+		t.Fatalf("content = %q, want empty on limit error", content)
+	}
+	if got, want := gotRange, "bytes=-16"; got != want {
+		t.Fatalf("range = %q, want %q", got, want)
+	}
+}
