@@ -101,6 +101,17 @@ func TestPodLogsRejectsNonPositiveLimitBytes(t *testing.T) {
 	}
 }
 
+func TestReadLogStreamIsBounded(t *testing.T) {
+	limit := int64(16)
+	content, err := readLogStream(strings.NewReader(strings.Repeat("x", 64)), &limit)
+	if err == nil || !strings.Contains(err.Error(), "exceeded 16 byte limit") {
+		t.Fatalf("err = %v, want size-limit error", err)
+	}
+	if content != "" {
+		t.Fatalf("content = %q, want empty on limit error", content)
+	}
+}
+
 func TestNodeLogUsesRangeHeaderAndPath(t *testing.T) {
 	var gotPath string
 	var gotRange string

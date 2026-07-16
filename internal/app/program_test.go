@@ -40,4 +40,15 @@ func TestHeadlessProgramStartupQuit(t *testing.T) {
 		program.Kill()
 		t.Fatalf("program did not quit before deadline")
 	}
+
+	closed := make(chan struct{})
+	go func() {
+		h.manager.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manager.Close did not complete after headless quit")
+	}
 }

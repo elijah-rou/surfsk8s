@@ -173,11 +173,7 @@ func lookupResourceByGroupAndResource(catalog []cluster.ResourceGroup, apiGroup 
 func (a *App) currentJumpSource(now time.Time) (resourceJumpSource, error) {
 	switch a.screen {
 	case screenPods:
-		row, ok := a.podRowAt(a.podTable.SelectedIndex(), now)
-		if !ok {
-			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
-		}
-		details, ok := a.store.PodDetailsByKey(row.Key, now)
+		details, ok := a.selectedPodDetails(now)
 		if !ok || details.Pod == nil {
 			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
 		}
@@ -272,37 +268,29 @@ func jumpSourceFromGenericDetails(resource cluster.ResourceKind, details cluster
 func (a *App) currentResourceListJumpSource(now time.Time) (resourceJumpSource, error) {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
-		}
-		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
+		details, ok := a.selectedDeploymentDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok || details.Deployment == nil {
 			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
 		}
 		return jumpSourceFromDeploymentDetails(details), nil
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
-		}
-		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
+		details, ok := a.selectedServiceDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok || details.Service == nil {
 			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
 		}
 		return jumpSourceFromServiceDetails(details), nil
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		row, ok := a.nodeRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
-		}
-		details, ok := a.store.NodeDetailsByKey(row.Key, now)
+		details, ok := a.selectedNodeDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok || details.Node == nil {
 			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
 		}
 		return jumpSourceFromNodeDetails(details), nil
 	default:
-		row, ok := a.genericResourceRowAt(a.resourceTable.SelectedIndex(), now)
+		key, ok := a.resolveGenericSelectionKey(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
+		}
+		row, ok := a.genericVisibleOrCachedRow(key)
 		if !ok {
 			return resourceJumpSource{}, fmt.Errorf("resource vanished during refresh")
 		}
@@ -661,17 +649,20 @@ func (a *App) beginJumpDiscovery(kind jumpDiscoveryKind, now time.Time) (tea.Cmd
 		return nil, true
 	}
 	token := a.nextAsyncTokenValue()
+	fingerprint := jumpSourceFingerprint(a.screen, a.activeResource.ID, source)
 	a.genericJumpToken = token
+	a.genericJumpFingerprint = fingerprint
 	a.genericJumpLoading = true
 	a.activity = "resolving jump targets"
 
 	backend := a.genericBackend
 	rootCtx := a.context
 	catalog := a.manager.Catalog()
-	walker := a
+	store := a.store
 	capturedSource := source
 	capturedKind := kind
 	capturedNow := now
+	capturedFingerprint := fingerprint
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(rootCtx, genericRequestTimeout)
 		defer cancel()
@@ -683,10 +674,11 @@ func (a *App) beginJumpDiscovery(kind jumpDiscoveryKind, now time.Time) (tea.Cmd
 				Name:      resolved.Name,
 			}, capturedNow)
 			if fetchErr != nil || details.Object == nil {
-				return resourceJumpDiscoveryResultMsg{Token: token, Kind: capturedKind, Err: fmt.Errorf("resource vanished during refresh")}
+				return resourceJumpDiscoveryResultMsg{Token: token, Fingerprint: capturedFingerprint, Kind: capturedKind, Err: fmt.Errorf("resource vanished during refresh")}
 			}
 			resolved = jumpSourceFromGenericDetails(resolved.Resource, details)
 		}
+		walker := &App{store: store}
 		var targets []resourceJumpTarget
 		switch capturedKind {
 		case jumpDiscoverOwners:
@@ -694,10 +686,26 @@ func (a *App) beginJumpDiscovery(kind jumpDiscoveryKind, now time.Time) (tea.Cmd
 		case jumpDiscoverChildren:
 			targets = walker.childJumpTargets(ctx, backend, catalog, resolved, capturedNow)
 		default:
-			return resourceJumpDiscoveryResultMsg{Token: token, Kind: capturedKind, Err: fmt.Errorf("unsupported jump discovery")}
+			return resourceJumpDiscoveryResultMsg{Token: token, Fingerprint: capturedFingerprint, Kind: capturedKind, Err: fmt.Errorf("unsupported jump discovery")}
 		}
-		return resourceJumpDiscoveryResultMsg{Token: token, Kind: capturedKind, Targets: targets}
+		return resourceJumpDiscoveryResultMsg{Token: token, Fingerprint: capturedFingerprint, Kind: capturedKind, Targets: targets}
 	}, true
+}
+
+func jumpSourceFingerprint(screen screen, resourceID string, source resourceJumpSource) string {
+	return fmt.Sprintf("%d|%s|%s|%s|%s|%s", screen, resourceID, source.Resource.ID, source.Cluster, source.Namespace, source.Name)
+}
+
+func (a *App) invalidatePendingJump() {
+	if a.genericJumpToken == 0 && a.genericJumpFingerprint == "" && !a.genericJumpLoading {
+		return
+	}
+	a.genericJumpToken = a.nextAsyncTokenValue()
+	a.genericJumpFingerprint = ""
+	a.genericJumpLoading = false
+	if a.activity == "resolving jump targets" || a.activity == "loading jump target" {
+		a.activity = ""
+	}
 }
 
 func isBuiltinJumpResource(resource cluster.ResourceKind) bool {
@@ -788,7 +796,14 @@ func (a *App) openResourceJumpTarget(target resourceJumpTarget, now time.Time) t
 		return a.maybeRefreshResourceUsageCmd(now)
 	default:
 		token := a.nextAsyncTokenValue()
+		fingerprint := jumpSourceFingerprint(a.screen, target.Resource.ID, resourceJumpSource{
+			Resource:  target.Resource,
+			Cluster:   target.Cluster,
+			Namespace: target.Namespace,
+			Name:      target.Name,
+		})
 		a.genericJumpToken = token
+		a.genericJumpFingerprint = fingerprint
 		a.genericJumpLoading = true
 		a.activity = "loading jump target"
 		backend := a.genericBackend
@@ -796,11 +811,12 @@ func (a *App) openResourceJumpTarget(target resourceJumpTarget, now time.Time) t
 		resource := target.Resource
 		key := cluster.GenericResourceKey{Cluster: target.Cluster, Namespace: target.Namespace, Name: target.Name}
 		capturedTarget := target
+		capturedFingerprint := fingerprint
 		return func() tea.Msg {
 			ctx, cancel := context.WithTimeout(rootCtx, genericRequestTimeout)
 			defer cancel()
 			details, err := backend.GenericResourceDetails(ctx, resource, key, time.Now())
-			return resourceJumpResultMsg{Token: token, Target: capturedTarget, Details: details, Err: err, Resource: resource}
+			return resourceJumpResultMsg{Token: token, Fingerprint: capturedFingerprint, Target: capturedTarget, Details: details, Err: err, Resource: resource}
 		}
 	}
 }

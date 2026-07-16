@@ -2291,8 +2291,17 @@ func TestSaveLogsToPathWritesRenderedLogs(t *testing.T) {
 	app.width = 120
 	app.logEntries = []logEntry{{UniqueKey: "1", Message: "saved line"}}
 	path := t.TempDir() + "/logs.txt"
-	if cmd := app.saveLogsToPath(path); cmd != nil {
-		t.Fatalf("expected nil cmd")
+	cmd := app.saveLogsToPath(path)
+	if cmd == nil {
+		t.Fatalf("expected async save command")
+	}
+	msg := cmd()
+	res, ok := msg.(actionResultMsg)
+	if !ok {
+		t.Fatalf("msg type %T", msg)
+	}
+	if res.err != nil {
+		t.Fatalf("save error: %v", res.err)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {

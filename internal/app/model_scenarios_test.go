@@ -350,6 +350,80 @@ func TestListSelectionPreservesResourceIdentity(t *testing.T) {
 			t.Fatalf("status=%q, want vanished", h.app.statusMessage)
 		}
 	})
+
+	t.Run("generic delete reports vanished not neighbor", func(t *testing.T) {
+		h := newModelHarness(t)
+		now := time.Now()
+		b := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "b"}, Name: "b", Namespace: "default", Cluster: "dev"}
+		c := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "c"}, Name: "c", Namespace: "default", Cluster: "dev"}
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		h.app.applyGenericListRows([]cluster.GenericResourceRow{b, c}, now, testGenericKind().ID)
+		h.app.genericListCacheKey = ""
+		h.app.renderGenericResourceList(now)
+		h.app.resourceTable.SetCursor(1)
+		h.app.syncGenericSelectionFromCursor(now)
+		h.app.applyGenericListRows([]cluster.GenericResourceRow{b}, now, testGenericKind().ID)
+		h.app.genericListCacheKey = ""
+		h.app.renderGenericResourceList(now)
+		h.Key(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+		if h.app.screen == screenConfirmAction {
+			t.Fatalf("delete opened confirmation for neighbor; desc=%q active=%q", h.app.confirmDescription, h.app.activeGenericDetails.Row.Name)
+		}
+		if !strings.Contains(h.app.statusMessage, "vanished") {
+			t.Fatalf("status=%q, want vanished", h.app.statusMessage)
+		}
+		if h.app.activeGenericDetails.Row.Name == "b" {
+			t.Fatalf("delete adopted neighbor b")
+		}
+	})
+
+	t.Run("pods filtered out rebind to visible row", func(t *testing.T) {
+		h := newModelHarness(t)
+		store := h.store
+		now := time.Now()
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "other", CreationTimestamp: metav1.NewTime(now)}})
+		h.app.screen = screenPods
+		h.app.refreshPods(now)
+		// Select c (other namespace); sorted by name → b then c.
+		h.app.podTable.SetCursor(1)
+		h.app.syncPodSelectionFromCursor(now)
+		if h.app.podSelectionKey.Name != "c" {
+			t.Fatalf("precondition selection=%q", h.app.podSelectionKey.Name)
+		}
+		h.app.namespace = "default"
+		h.app.refreshPods(now)
+		h.Key(tea.KeyMsg{Type: tea.KeyEnter})
+		if h.app.screen != screenPodDetails {
+			t.Fatalf("screen=%d want pod details for visible row", h.app.screen)
+		}
+		if h.app.activePod.Row.Name != "b" {
+			t.Fatalf("detail target=%q want visible b, not filtered sticky c", h.app.activePod.Row.Name)
+		}
+	})
+
+	t.Run("deployments keep identity through enter after insert", func(t *testing.T) {
+		h := newModelHarness(t)
+		store := h.store
+		now := time.Now()
+		store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		h.app.screen = screenResourceList
+		h.app.activeResource = builtinDeploymentResourceKind()
+		h.app.refreshResourceList(now)
+		h.app.resourceTable.SetCursor(1)
+		h.app.syncResourceSelectionFromCursor(now)
+		store.UpsertDeployment("dev", &appsv1.Deployment{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		h.app.refreshResourceList(now)
+		h.Key(tea.KeyMsg{Type: tea.KeyEnter})
+		if h.app.screen != screenResourceDetails {
+			t.Fatalf("screen=%d want resource details", h.app.screen)
+		}
+		if h.app.activeDeployment.Row.Name != "c" {
+			t.Fatalf("detail target=%q want c", h.app.activeDeployment.Row.Name)
+		}
+	})
 }
 
 type blockingLogBackend struct {
@@ -472,51 +546,107 @@ func TestForcedLogRefreshCancelsPreviousRequest(t *testing.T) {
 }
 
 func TestModelScenarioMaximumLogRangeIsBounded(t *testing.T) {
-	h := newModelHarness(t)
-	fake := &blockingLogBackend{
-		enterFirst:    make(chan struct{}, 1),
-		releaseFirst:  make(chan struct{}),
-		enterSecond:   make(chan struct{}, 1),
-		releaseSecond: make(chan struct{}),
-	}
-	close(fake.releaseFirst)
-	close(fake.releaseSecond)
-	h.app.logBackend = fake
-	h.app.screen = screenLogs
-	h.app.logTarget = logTargetPod
-	h.app.logRange = logRangeAll
-	h.app.logPod = state.PodDetails{
-		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
-		Pod: &corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
-			Spec: corev1.PodSpec{
-				Containers: func() []corev1.Container {
-					out := make([]corev1.Container, maxLogFetchSources+1)
-					for i := range out {
-						out[i] = corev1.Container{Name: fmt.Sprintf("c%d", i)}
-					}
-					return out
-				}(),
+	t.Run("rejects too many sources", func(t *testing.T) {
+		h := newModelHarness(t)
+		fake := &blockingLogBackend{
+			enterFirst:    make(chan struct{}, 1),
+			releaseFirst:  make(chan struct{}),
+			enterSecond:   make(chan struct{}, 1),
+			releaseSecond: make(chan struct{}),
+		}
+		close(fake.releaseFirst)
+		close(fake.releaseSecond)
+		h.app.logBackend = fake
+		h.app.screen = screenLogs
+		h.app.logTarget = logTargetPod
+		h.app.logRange = logRangeAll
+		h.app.logPod = state.PodDetails{
+			Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+			Pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+				Spec: corev1.PodSpec{
+					Containers: func() []corev1.Container {
+						out := make([]corev1.Container, maxLogFetchSources+1)
+						for i := range out {
+							out[i] = corev1.Container{Name: fmt.Sprintf("c%d", i)}
+						}
+						return out
+					}(),
+				},
 			},
-		},
-	}
-	h.app.logSelectedContainers = map[string]bool{}
-	for i := 0; i < maxLogFetchSources+1; i++ {
-		h.app.logSelectedContainers[fmt.Sprintf("c%d", i)] = true
-	}
+		}
+		h.app.logSelectedContainers = map[string]bool{}
+		for i := 0; i < maxLogFetchSources+1; i++ {
+			h.app.logSelectedContainers[fmt.Sprintf("c%d", i)] = true
+		}
 
-	if got := logRangeAll.menuLabel(); !strings.Contains(got, "1 MiB") {
-		t.Fatalf("menu label=%q, want max 1 MiB", got)
-	}
-	if got := logRangeAll.nodeTailBytes(); got != defaultPodLogBytes {
-		t.Fatalf("nodeTailBytes=%d want %d", got, defaultPodLogBytes)
-	}
+		if got := logRangeAll.menuLabel(); !strings.Contains(got, "1 MiB") {
+			t.Fatalf("menu label=%q, want max 1 MiB", got)
+		}
+		if got := logRangeAll.nodeTailBytes(); got != defaultPodLogBytes {
+			t.Fatalf("nodeTailBytes=%d want %d", got, defaultPodLogBytes)
+		}
 
-	h.RunAll(h.app.refreshLogs(true))
-	if !strings.Contains(h.app.statusMessage, "too many log sources") {
-		t.Fatalf("status=%q, want source limit", h.app.statusMessage)
+		h.RunAll(h.app.refreshLogs(true))
+		if !strings.Contains(h.app.statusMessage, "too many log sources") {
+			t.Fatalf("status=%q, want source limit", h.app.statusMessage)
+		}
+		if len(h.app.logEntries) > maxRetainedLogEntries {
+			t.Fatalf("retained %d entries, max %d", len(h.app.logEntries), maxRetainedLogEntries)
+		}
+	})
+
+	t.Run("caps per-source bytes and retained entries", func(t *testing.T) {
+		h := newModelHarness(t)
+		fake := &oversizedLogBackend{lines: maxRetainedLogEntries + 500}
+		h.app.logBackend = fake
+		h.app.screen = screenLogs
+		h.app.logTarget = logTargetPod
+		h.app.logRange = logRangeAll
+		h.app.logPod = state.PodDetails{
+			Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+			Pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+			},
+		}
+		h.app.logSelectedContainers = map[string]bool{"main": true}
+
+		h.RunAll(h.app.refreshLogs(true))
+		if fake.lastLimit == nil || *fake.lastLimit != defaultPodLogBytes {
+			t.Fatalf("LimitBytes=%v want %d", fake.lastLimit, defaultPodLogBytes)
+		}
+		if got := len(h.app.logEntries); got != maxRetainedLogEntries {
+			t.Fatalf("retained %d entries, want exactly %d", got, maxRetainedLogEntries)
+		}
+		if !strings.Contains(h.app.statusMessage, "truncated") {
+			t.Fatalf("status=%q, want truncation note", h.app.statusMessage)
+		}
+	})
+}
+
+type oversizedLogBackend struct {
+	lines     int
+	lastLimit *int64
+}
+
+func (b *oversizedLogBackend) PodLogsWithOptions(ctx context.Context, details state.PodDetails, options cluster.PodLogsOptions) (string, error) {
+	b.lastLimit = options.LimitBytes
+	var sb strings.Builder
+	for i := 0; i < b.lines; i++ {
+		fmt.Fprintf(&sb, "2024-01-01T00:00:00Z line-%d\n", i)
 	}
-	if len(h.app.logEntries) > maxRetainedLogEntries {
-		t.Fatalf("retained %d entries, max %d", len(h.app.logEntries), maxRetainedLogEntries)
-	}
+	return sb.String(), nil
+}
+
+func (b *oversizedLogBackend) NodeLogWithOptions(ctx context.Context, details state.NodeDetails, options cluster.NodeLogOptions) (string, error) {
+	return "", fmt.Errorf("unused")
+}
+
+func (b *oversizedLogBackend) NodeLogEntries(ctx context.Context, details state.NodeDetails, dir string) ([]cluster.NodeLogEntry, error) {
+	return nil, fmt.Errorf("unused")
+}
+
+func (b *oversizedLogBackend) DeploymentPodDetails(details state.DeploymentDetails, now time.Time) ([]state.PodDetails, error) {
+	return nil, fmt.Errorf("unused")
 }

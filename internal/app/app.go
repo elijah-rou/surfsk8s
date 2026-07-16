@@ -307,6 +307,7 @@ type App struct {
 	genericListToken              uint64
 	genericDetailToken            uint64
 	genericJumpToken              uint64
+	genericJumpFingerprint        string
 	genericActionToken            uint64
 
 	visibleCommands      []commandItem
@@ -345,12 +346,15 @@ type App struct {
 	serviceSort    listSortState
 	nodeSort       listSortState
 
-	sortedPods          []state.PodRow
-	podSelectionKey     state.PodKey
-	genericSelectionKey cluster.GenericResourceKey
-	sortedDeployments   []state.DeploymentRow
-	sortedServices      []state.ServiceRow
-	sortedNodes         []state.NodeRow
+	sortedPods             []state.PodRow
+	podSelectionKey        state.PodKey
+	genericSelectionKey    cluster.GenericResourceKey
+	sortedDeployments      []state.DeploymentRow
+	deploymentSelectionKey state.DeploymentKey
+	sortedServices         []state.ServiceRow
+	serviceSelectionKey    state.ServiceKey
+	sortedNodes            []state.NodeRow
+	nodeSelectionKey       state.NodeKey
 
 	resumeOnStart bool
 	resumeSession sessionPreference
@@ -1218,16 +1222,7 @@ func (a *App) updatePodKeys(msg tea.KeyMsg) tea.Cmd {
 
 func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 	syncGeneric := func() {
-		if a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps" {
-			return
-		}
-		if a.activeResource.Resource == "services" && a.activeResource.APIGroup == "" {
-			return
-		}
-		if a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "" {
-			return
-		}
-		a.syncGenericSelectionFromCursor(time.Now())
+		a.syncResourceSelectionFromCursor(time.Now())
 	}
 	switch msg.String() {
 	case "j", "down":
@@ -1557,9 +1552,34 @@ func (a *App) syncPodSelectionFromCursor(now time.Time) {
 	}
 }
 
+func (a *App) syncResourceSelectionFromCursor(now time.Time) {
+	switch {
+	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		if row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now); ok {
+			a.deploymentSelectionKey = row.Key
+		}
+	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		if row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now); ok {
+			a.serviceSelectionKey = row.Key
+		}
+	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		if row, ok := a.nodeRowAt(a.resourceTable.SelectedIndex(), now); ok {
+			a.nodeSelectionKey = row.Key
+		}
+	default:
+		a.syncGenericSelectionFromCursor(now)
+	}
+}
+
 func (a *App) selectedPodDetails(now time.Time) (state.PodDetails, bool) {
 	if a.podSelectionKey.Name != "" {
-		return a.store.PodDetailsByKey(a.podSelectionKey, now)
+		if a.podKeyVisible(a.podSelectionKey) {
+			return a.store.PodDetailsByKey(a.podSelectionKey, now)
+		}
+		if _, ok := a.store.PodObjectByKey(a.podSelectionKey); !ok {
+			return state.PodDetails{}, false
+		}
+		// Sticky key left the visible snapshot via filter/scope; use highlighted row.
 	}
 	row, ok := a.podRowAt(a.podTable.SelectedIndex(), now)
 	if !ok {
@@ -1567,6 +1587,40 @@ func (a *App) selectedPodDetails(now time.Time) (state.PodDetails, bool) {
 	}
 	a.podSelectionKey = row.Key
 	return a.store.PodDetailsByKey(row.Key, now)
+}
+
+func (a *App) podKeyVisible(key state.PodKey) bool {
+	want := key.String()
+	for _, row := range a.sortedPods {
+		if row.Key.String() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) restorePodSelection(selectedKey string, now time.Time) {
+	if selectedKey == "" {
+		return
+	}
+	for i, row := range a.sortedPods {
+		if row.Key.String() == selectedKey {
+			a.podTable.SetCursor(i)
+			a.podSelectionKey = row.Key
+			return
+		}
+	}
+	if a.podSelectionKey.Name == "" {
+		return
+	}
+	if _, ok := a.store.PodObjectByKey(a.podSelectionKey); ok {
+		a.podSelectionKey = state.PodKey{}
+		if row, ok := a.podRowAt(a.podTable.SelectedIndex(), now); ok {
+			a.podSelectionKey = row.Key
+		}
+		return
+	}
+	// Object truly vanished: retain sticky identity for Enter/delete vanished messaging.
 }
 
 func (a *App) openSelectedDetailPod(now time.Time) bool {
@@ -1733,6 +1787,7 @@ func (a *App) openContextPicker(mode pickerMode) {
 }
 
 func (a *App) openResourceList(resource cluster.ResourceKind) tea.Cmd {
+	a.invalidatePendingJump()
 	a.activeResource = resource
 	switch {
 	case isCorePods(resource):
@@ -1835,6 +1890,7 @@ func (a *App) refreshGroupResources() {
 }
 
 func (a *App) backToResourceOrigin() {
+	a.invalidatePendingJump()
 	if strings.TrimSpace(a.activeGroup.Name) == "" || len(a.activeGroup.Resources) == 0 {
 		a.screen = screenCatalog
 		a.refreshCatalog()
@@ -1882,20 +1938,7 @@ func (a *App) refreshPods(now time.Time) {
 	a.podTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 		return a.podTableRows(a.podWindow(start, end-start, time.Now()), time.Now())
 	})
-	if selectedKey != "" {
-		restored := false
-		for i, row := range a.sortedPods {
-			if row.Key.String() == selectedKey {
-				a.podTable.SetCursor(i)
-				a.podSelectionKey = row.Key
-				restored = true
-				break
-			}
-		}
-		if !restored {
-			// Keep vanished identity for Enter/delete; do not adopt neighbor cursor identity.
-		}
-	}
+	a.restorePodSelection(selectedKey, now)
 }
 
 func (a *App) refreshResourceList(now time.Time) tea.Cmd {
@@ -1903,6 +1946,15 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 	a.lastTick = now
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		var selectedKey string
+		if a.deploymentSelectionKey.Name != "" {
+			selectedKey = a.deploymentSelectionKey.String()
+		} else if idx := a.resourceTable.SelectedIndex(); idx >= 0 {
+			if row, ok := a.deploymentRowAt(idx, now); ok {
+				selectedKey = row.Key.String()
+				a.deploymentSelectionKey = row.Key
+			}
+		}
 		storeVersion := a.store.DeploymentVersion()
 		a.lastDataVersion = storeVersion
 		nsKey := a.namespaceListCacheKey(storeVersion, "deployments")
@@ -1910,14 +1962,7 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 			a.namespaces = a.deploymentNamespacesForScope()
 			a.deploymentNamespacesCacheKey = nsKey
 		}
-		total := 0
-		filtered := 0
-		if a.deploymentNeedsMaterializedSort() {
-			total, filtered = a.buildSortedDeployments()
-		} else {
-			a.sortedDeployments = a.sortedDeployments[:0]
-			total, filtered = a.countDeployments()
-		}
+		total, filtered := a.buildSortedDeployments()
 		a.visibleRows = filtered
 		a.totalRows = total
 		a.resourceTable.SetColumns(a.currentResourceColumns())
@@ -1925,7 +1970,17 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.deploymentTableRows(a.deploymentWindow(start, end-start, time.Now()), time.Now())
 		})
+		a.restoreDeploymentSelection(selectedKey, now)
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		var selectedKey string
+		if a.serviceSelectionKey.Name != "" {
+			selectedKey = a.serviceSelectionKey.String()
+		} else if idx := a.resourceTable.SelectedIndex(); idx >= 0 {
+			if row, ok := a.serviceRowAt(idx, now); ok {
+				selectedKey = row.Key.String()
+				a.serviceSelectionKey = row.Key
+			}
+		}
 		storeVersion := a.store.ServiceVersion()
 		a.lastDataVersion = storeVersion
 		nsKey := a.namespaceListCacheKey(storeVersion, "services")
@@ -1933,14 +1988,7 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 			a.namespaces = a.serviceNamespacesForScope()
 			a.serviceNamespacesCacheKey = nsKey
 		}
-		total := 0
-		filtered := 0
-		if a.serviceNeedsMaterializedSort() {
-			total, filtered = a.buildSortedServices()
-		} else {
-			a.sortedServices = a.sortedServices[:0]
-			total, filtered = a.countServices()
-		}
+		total, filtered := a.buildSortedServices()
 		a.visibleRows = filtered
 		a.totalRows = total
 		a.resourceTable.SetColumns(a.currentResourceColumns())
@@ -1948,18 +1996,21 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.serviceTableRows(a.serviceWindow(start, end-start, time.Now()), time.Now())
 		})
+		a.restoreServiceSelection(selectedKey, now)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		var selectedKey string
+		if a.nodeSelectionKey.Name != "" {
+			selectedKey = a.nodeSelectionKey.String()
+		} else if idx := a.resourceTable.SelectedIndex(); idx >= 0 {
+			if row, ok := a.nodeRowAt(idx, now); ok {
+				selectedKey = row.Key.String()
+				a.nodeSelectionKey = row.Key
+			}
+		}
 		storeVersion := a.store.NodeVersion()
 		a.lastDataVersion = storeVersion
 		a.namespaces = []string{""}
-		total := 0
-		filtered := 0
-		if a.nodeNeedsMaterializedSort() {
-			total, filtered = a.buildSortedNodes()
-		} else {
-			a.sortedNodes = a.sortedNodes[:0]
-			total, filtered = a.countNodes()
-		}
+		total, filtered := a.buildSortedNodes()
 		a.visibleRows = filtered
 		a.totalRows = total
 		a.resourceTable.SetColumns(a.currentResourceColumns())
@@ -1967,6 +2018,7 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 		a.resourceTable.SetWindowProvider(filtered, func(start int, end int) [][]string {
 			return a.nodeTableRows(a.nodeWindow(start, end-start, time.Now()), time.Now())
 		})
+		a.restoreNodeSelection(selectedKey, now)
 	default:
 		return a.refreshGenericResourceList(now)
 	}
@@ -2098,34 +2150,25 @@ func (a *App) refreshCurrentDetailAge(now time.Time) {
 func (a *App) openCurrentResourceSelection(index int, now time.Time) tea.Cmd {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		row, ok := a.deploymentRowAt(index, now)
+		details, ok := a.selectedDeploymentDetails(index, now)
 		if !ok {
-			return nil
-		}
-		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
-		if !ok {
+			a.statusMessage = "resource vanished during refresh"
 			return nil
 		}
 		a.activeDeployment = details
 		a.activeDeploymentPods = a.deploymentAssociatedPods(now)
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		row, ok := a.serviceRowAt(index, now)
+		details, ok := a.selectedServiceDetails(index, now)
 		if !ok {
-			return nil
-		}
-		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
-		if !ok {
+			a.statusMessage = "resource vanished during refresh"
 			return nil
 		}
 		a.activeService = details
 		a.activeServicePods = a.serviceAssociatedPods(now)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		row, ok := a.nodeRowAt(index, now)
+		details, ok := a.selectedNodeDetails(index, now)
 		if !ok {
-			return nil
-		}
-		details, ok := a.store.NodeDetailsByKey(row.Key, now)
-		if !ok {
+			a.statusMessage = "resource vanished during refresh"
 			return nil
 		}
 		a.activeNode = details
@@ -2142,6 +2185,156 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) tea.Cmd {
 	a.lastTick = now
 	a.resetTextViewport()
 	return nil
+}
+
+func (a *App) selectedDeploymentDetails(index int, now time.Time) (state.DeploymentDetails, bool) {
+	if a.deploymentSelectionKey.Name != "" {
+		if a.deploymentKeyVisible(a.deploymentSelectionKey) {
+			return a.store.DeploymentDetailsByKey(a.deploymentSelectionKey, now)
+		}
+		if _, ok := a.store.DeploymentDetailsByKey(a.deploymentSelectionKey, now); !ok {
+			return state.DeploymentDetails{}, false
+		}
+	}
+	row, ok := a.deploymentRowAt(index, now)
+	if !ok {
+		return state.DeploymentDetails{}, false
+	}
+	a.deploymentSelectionKey = row.Key
+	return a.store.DeploymentDetailsByKey(row.Key, now)
+}
+
+func (a *App) selectedServiceDetails(index int, now time.Time) (state.ServiceDetails, bool) {
+	if a.serviceSelectionKey.Name != "" {
+		if a.serviceKeyVisible(a.serviceSelectionKey) {
+			return a.store.ServiceDetailsByKey(a.serviceSelectionKey, now)
+		}
+		if _, ok := a.store.ServiceDetailsByKey(a.serviceSelectionKey, now); !ok {
+			return state.ServiceDetails{}, false
+		}
+	}
+	row, ok := a.serviceRowAt(index, now)
+	if !ok {
+		return state.ServiceDetails{}, false
+	}
+	a.serviceSelectionKey = row.Key
+	return a.store.ServiceDetailsByKey(row.Key, now)
+}
+
+func (a *App) selectedNodeDetails(index int, now time.Time) (state.NodeDetails, bool) {
+	if a.nodeSelectionKey.Name != "" {
+		if a.nodeKeyVisible(a.nodeSelectionKey) {
+			return a.store.NodeDetailsByKey(a.nodeSelectionKey, now)
+		}
+		if _, ok := a.store.NodeDetailsByKey(a.nodeSelectionKey, now); !ok {
+			return state.NodeDetails{}, false
+		}
+	}
+	row, ok := a.nodeRowAt(index, now)
+	if !ok {
+		return state.NodeDetails{}, false
+	}
+	a.nodeSelectionKey = row.Key
+	return a.store.NodeDetailsByKey(row.Key, now)
+}
+
+func (a *App) deploymentKeyVisible(key state.DeploymentKey) bool {
+	want := key.String()
+	for _, row := range a.sortedDeployments {
+		if row.Key.String() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) serviceKeyVisible(key state.ServiceKey) bool {
+	want := key.String()
+	for _, row := range a.sortedServices {
+		if row.Key.String() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) nodeKeyVisible(key state.NodeKey) bool {
+	want := key.String()
+	for _, row := range a.sortedNodes {
+		if row.Key.String() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) restoreDeploymentSelection(selectedKey string, now time.Time) {
+	if selectedKey == "" {
+		return
+	}
+	for i, row := range a.sortedDeployments {
+		if row.Key.String() == selectedKey {
+			a.resourceTable.SetCursor(i)
+			a.deploymentSelectionKey = row.Key
+			return
+		}
+	}
+	if a.deploymentSelectionKey.Name == "" {
+		return
+	}
+	if _, ok := a.store.DeploymentDetailsByKey(a.deploymentSelectionKey, now); ok {
+		a.deploymentSelectionKey = state.DeploymentKey{}
+		if row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now); ok {
+			a.deploymentSelectionKey = row.Key
+		}
+		return
+	}
+}
+
+func (a *App) restoreServiceSelection(selectedKey string, now time.Time) {
+	if selectedKey == "" {
+		return
+	}
+	for i, row := range a.sortedServices {
+		if row.Key.String() == selectedKey {
+			a.resourceTable.SetCursor(i)
+			a.serviceSelectionKey = row.Key
+			return
+		}
+	}
+	if a.serviceSelectionKey.Name == "" {
+		return
+	}
+	if _, ok := a.store.ServiceDetailsByKey(a.serviceSelectionKey, now); ok {
+		a.serviceSelectionKey = state.ServiceKey{}
+		if row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now); ok {
+			a.serviceSelectionKey = row.Key
+		}
+		return
+	}
+}
+
+func (a *App) restoreNodeSelection(selectedKey string, now time.Time) {
+	if selectedKey == "" {
+		return
+	}
+	for i, row := range a.sortedNodes {
+		if row.Key.String() == selectedKey {
+			a.resourceTable.SetCursor(i)
+			a.nodeSelectionKey = row.Key
+			return
+		}
+	}
+	if a.nodeSelectionKey.Name == "" {
+		return
+	}
+	if _, ok := a.store.NodeDetailsByKey(a.nodeSelectionKey, now); ok {
+		a.nodeSelectionKey = state.NodeKey{}
+		if row, ok := a.nodeRowAt(a.resourceTable.SelectedIndex(), now); ok {
+			a.nodeSelectionKey = row.Key
+		}
+		return
+	}
 }
 
 func (a *App) setNavTable(title string, rows [][]string) {
@@ -2890,39 +3083,7 @@ func (a *App) countDeployments() (int, int) {
 }
 
 func (a *App) deploymentWindow(start int, limit int, now time.Time) []state.DeploymentRow {
-	if a.deploymentNeedsMaterializedSort() {
-		return windowRowsFromSlice(a.sortedDeployments, start, limit, now)
-	}
-	if limit <= 0 {
-		return nil
-	}
-	rows := make([]state.DeploymentRow, 0, limit)
-	matched := 0
-	a.store.ForEachDeployment(func(row state.DeploymentRow) bool {
-		if !a.contextMatches(row.Cluster) {
-			return true
-		}
-		if a.namespace != "" && row.Namespace != a.namespace {
-			return true
-		}
-		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
-			return true
-		}
-		if !a.matchesDeploymentColumnFilters(row, now) {
-			return true
-		}
-		if matched < start {
-			matched++
-			return true
-		}
-		if len(rows) >= limit {
-			return false
-		}
-		rows = append(rows, row.WithAge(now))
-		matched++
-		return true
-	})
-	return rows
+	return windowRowsFromSlice(a.sortedDeployments, start, limit, now)
 }
 
 func (a *App) deploymentRowAt(index int, now time.Time) (state.DeploymentRow, bool) {
@@ -2957,39 +3118,7 @@ func (a *App) countServices() (int, int) {
 }
 
 func (a *App) serviceWindow(start int, limit int, now time.Time) []state.ServiceRow {
-	if a.serviceNeedsMaterializedSort() {
-		return windowRowsFromSlice(a.sortedServices, start, limit, now)
-	}
-	if limit <= 0 {
-		return nil
-	}
-	rows := make([]state.ServiceRow, 0, limit)
-	matched := 0
-	a.store.ForEachService(func(row state.ServiceRow) bool {
-		if !a.contextMatches(row.Cluster) {
-			return true
-		}
-		if a.namespace != "" && row.Namespace != a.namespace {
-			return true
-		}
-		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
-			return true
-		}
-		if !a.matchesServiceColumnFilters(row, now) {
-			return true
-		}
-		if matched < start {
-			matched++
-			return true
-		}
-		if len(rows) >= limit {
-			return false
-		}
-		rows = append(rows, row.WithAge(now))
-		matched++
-		return true
-	})
-	return rows
+	return windowRowsFromSlice(a.sortedServices, start, limit, now)
 }
 
 func (a *App) serviceRowAt(index int, now time.Time) (state.ServiceRow, bool) {
@@ -3021,36 +3150,7 @@ func (a *App) countNodes() (int, int) {
 }
 
 func (a *App) nodeWindow(start int, limit int, now time.Time) []state.NodeRow {
-	if a.nodeNeedsMaterializedSort() {
-		return windowRowsFromSlice(a.sortedNodes, start, limit, now)
-	}
-	if limit <= 0 {
-		return nil
-	}
-	rows := make([]state.NodeRow, 0, limit)
-	matched := 0
-	a.store.ForEachNode(func(row state.NodeRow) bool {
-		if !a.contextMatches(row.Cluster) {
-			return true
-		}
-		if !matchesSearch(row.SearchText(), a.resourceQuery2) {
-			return true
-		}
-		if !a.matchesNodeColumnFilters(row, now) {
-			return true
-		}
-		if matched < start {
-			matched++
-			return true
-		}
-		if len(rows) >= limit {
-			return false
-		}
-		rows = append(rows, row.WithAge(now))
-		matched++
-		return true
-	})
-	return rows
+	return windowRowsFromSlice(a.sortedNodes, start, limit, now)
 }
 
 func (a *App) nodeRowAt(index int, now time.Time) (state.NodeRow, bool) {

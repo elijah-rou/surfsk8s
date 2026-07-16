@@ -88,11 +88,33 @@ func (m *Manager) PodLogsWithOptions(ctx context.Context, details state.PodDetai
 	}
 	defer stream.Close()
 
-	content, err := io.ReadAll(stream)
+	return readLogStream(stream, options.LimitBytes)
+}
+
+// readLogStream consumes a log body with an optional hard client-side byte cap.
+// When limitBytes is set, the reader is capped at limit+1 and oversized bodies are rejected
+// even if the server ignored LimitBytes.
+func readLogStream(stream io.Reader, limitBytes *int64) (string, error) {
+	if stream == nil {
+		panic("cluster.readLogStream: nil stream")
+	}
+	reader := stream
+	limit := int64(-1)
+	if limitBytes != nil {
+		if *limitBytes <= 0 {
+			panic("cluster.readLogStream: non-positive limitBytes")
+		}
+		limit = *limitBytes
+		reader = io.LimitReader(stream, limit+1)
+	}
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return "", err
 	}
-	return string(content), nil
+	if limit >= 0 && int64(len(data)) > limit {
+		return "", fmt.Errorf("pod log exceeded %d byte limit", limit)
+	}
+	return string(data), nil
 }
 
 func (m *Manager) DeploymentPodDetails(details state.DeploymentDetails, now time.Time) ([]state.PodDetails, error) {

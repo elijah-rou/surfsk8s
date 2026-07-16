@@ -1218,10 +1218,11 @@ func (a *App) saveLogsToPath(path string) tea.Cmd {
 		a.statusMessage = "no logs to save"
 		return nil
 	}
-	if err := writeTextFile(path, []byte(value+"\n"), 0o644); err != nil {
-		a.statusMessage = err.Error()
-		return nil
+	content := []byte(value + "\n")
+	return func() tea.Msg {
+		if err := writeTextFile(path, content, 0o644); err != nil {
+			return actionResultMsg{description: "save logs", err: err}
+		}
+		return actionResultMsg{description: "logs saved to " + path}
 	}
-	a.statusMessage = "logs saved to " + path
-	return nil
 }

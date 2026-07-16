@@ -25,6 +25,7 @@ type modelHarness struct {
 	manager  *cluster.Manager
 	app      *App
 	deadline time.Duration
+	cancel   context.CancelFunc
 
 	cmdMu      sync.Mutex
 	cmdCancels []context.CancelFunc
@@ -42,9 +43,10 @@ func newModelHarness(t *testing.T) *modelHarness {
 	tempDir := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", tempDir)
 
+	rootCtx, rootCancel := context.WithCancel(context.Background())
 	store := state.NewStore()
 	manager := newTestManagerWithStore(t, store)
-	app := New(store, manager, Config{})
+	app := New(store, manager, Config{Context: rootCtx})
 	app.width = 80
 	app.height = 24
 
@@ -54,8 +56,10 @@ func newModelHarness(t *testing.T) *modelHarness {
 		manager:  manager,
 		app:      app,
 		deadline: modelHarnessDefaultDeadline,
+		cancel:   rootCancel,
 	}
 	t.Cleanup(func() {
+		rootCancel()
 		h.cancelAllCommands()
 		h.cmdWG.Wait()
 	})
@@ -158,7 +162,7 @@ func (h *modelHarness) Run(cmd tea.Cmd) tea.Msg {
 	if cmd == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), h.deadline)
+	ctx, cancel := context.WithTimeout(h.app.context, h.deadline)
 	h.trackCancel(cancel)
 	defer cancel()
 
@@ -172,6 +176,9 @@ func (h *modelHarness) Run(cmd tea.Cmd) tea.Msg {
 	case msg := <-done:
 		return msg
 	case <-ctx.Done():
+		if h.cancel != nil {
+			h.cancel()
+		}
 		h.cancelAllCommands()
 		h.t.Fatalf("modelHarness.Run: command exceeded deadline %s", h.deadline)
 		return nil

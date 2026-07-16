@@ -434,22 +434,14 @@ func (a *App) runEditResource() tea.Cmd {
 func (a *App) selectCurrentResourceActionTarget(now time.Time) bool {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
+		details, ok := a.selectedDeploymentDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeDeployment = details
 		return true
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
+		details, ok := a.selectedServiceDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
@@ -550,40 +542,32 @@ func (a *App) deleteSelectedResource(now time.Time) tea.Cmd {
 func (a *App) selectCurrentResourceDeleteTarget(now time.Time) bool {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
+		details, ok := a.selectedDeploymentDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeDeployment = details
 		return true
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
+		details, ok := a.selectedServiceDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeService = details
 		return true
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		row, ok := a.nodeRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.NodeDetailsByKey(row.Key, now)
+		details, ok := a.selectedNodeDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeNode = details
 		return true
 	default:
-		row, ok := a.genericResourceRowAt(a.resourceTable.SelectedIndex(), now)
+		key, ok := a.resolveGenericSelectionKey(a.resourceTable.SelectedIndex(), now)
+		if !ok {
+			return false
+		}
+		row, ok := a.genericVisibleOrCachedRow(key)
 		if !ok {
 			return false
 		}

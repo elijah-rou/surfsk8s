@@ -59,11 +59,12 @@ type genericActionResultMsg struct {
 }
 
 type resourceJumpResultMsg struct {
-	Token    uint64
-	Target   resourceJumpTarget
-	Details  cluster.GenericResourceDetails
-	Err      error
-	Resource cluster.ResourceKind
+	Token       uint64
+	Fingerprint string
+	Target      resourceJumpTarget
+	Details     cluster.GenericResourceDetails
+	Err         error
+	Resource    cluster.ResourceKind
 }
 
 type jumpDiscoveryKind uint8
@@ -74,10 +75,11 @@ const (
 )
 
 type resourceJumpDiscoveryResultMsg struct {
-	Token   uint64
-	Kind    jumpDiscoveryKind
-	Targets []resourceJumpTarget
-	Err     error
+	Token       uint64
+	Fingerprint string
+	Kind        jumpDiscoveryKind
+	Targets     []resourceJumpTarget
+	Err         error
 }
 
 func (a *App) supportsGenericResourceList(resource cluster.ResourceKind) bool {
@@ -261,7 +263,7 @@ func (a *App) applyGenericResourceDelta(now time.Time) bool {
 				}
 			}
 		}
-		if newRow.Namespace != "" {
+		if newRow.Namespace != "" && (!hadOld || oldRow.Namespace != newRow.Namespace) {
 			if a.genericNamespaceCounts[newRow.Namespace] == 0 {
 				namespaceSetChanged = true
 			}
@@ -304,16 +306,15 @@ func (a *App) genericListCacheState() string {
 }
 
 func (a *App) applyGenericListRows(rows []cluster.GenericResourceRow, now time.Time, resourceID string) {
-	if len(rows) != 0 {
-		a.genericRows = rows
-		a.genericRowsByKey = buildGenericRowIndex(rows)
-		a.genericNamespaceCounts = buildGenericNamespaceCounts(rows)
-		a.genericNamespaces = namespacesFromCounts(a.genericNamespaceCounts)
-	} else if a.genericRowsResourceID != resourceID {
-		a.genericRows = nil
+	a.genericRows = rows
+	if len(rows) == 0 {
 		a.genericRowsByKey = nil
 		a.genericNamespaceCounts = nil
 		a.genericNamespaces = nil
+	} else {
+		a.genericRowsByKey = buildGenericRowIndex(rows)
+		a.genericNamespaceCounts = buildGenericNamespaceCounts(rows)
+		a.genericNamespaces = namespacesFromCounts(a.genericNamespaceCounts)
 	}
 	a.genericRowsResourceID = resourceID
 	a.lastGenericFetchAt = now
@@ -400,21 +401,32 @@ func (a *App) renderGenericResourceList(now time.Time) tea.Cmd {
 	a.resourceTable.SetWindowProvider(a.visibleRows, func(start int, end int) [][]string {
 		return a.genericTableRows(start, end-start, time.Now())
 	})
-	if selectedKey != "" {
-		restored := false
-		for i, row := range a.sortedGenericRows {
-			if row.Key.String() == selectedKey {
-				a.resourceTable.SetCursor(i)
-				a.genericSelectionKey = row.Key
-				restored = true
-				break
-			}
-		}
-		if !restored {
-			// Keep vanished identity for Enter/delete; do not adopt neighbor cursor identity.
+	a.restoreGenericSelection(selectedKey, now)
+	return nil
+}
+
+func (a *App) restoreGenericSelection(selectedKey string, now time.Time) {
+	if selectedKey == "" {
+		return
+	}
+	for i, row := range a.sortedGenericRows {
+		if row.Key.String() == selectedKey {
+			a.resourceTable.SetCursor(i)
+			a.genericSelectionKey = row.Key
+			return
 		}
 	}
-	return nil
+	if a.genericSelectionKey.Name == "" {
+		return
+	}
+	if _, ok := a.genericRowsByKey[a.genericSelectionKey.String()]; ok {
+		a.genericSelectionKey = cluster.GenericResourceKey{}
+		if row, ok := a.genericResourceRowAt(a.resourceTable.SelectedIndex(), now); ok {
+			a.genericSelectionKey = row.Key
+		}
+		return
+	}
+	// Object truly vanished from cache: retain sticky identity for vanished messaging.
 }
 
 func (a *App) refreshGenericResourceList(now time.Time) tea.Cmd {
@@ -518,22 +530,43 @@ func (a *App) syncGenericSelectionFromCursor(now time.Time) {
 	}
 }
 
-func (a *App) openCurrentGenericResourceSelection(index int, now time.Time) tea.Cmd {
-	var key cluster.GenericResourceKey
+func (a *App) resolveGenericSelectionKey(index int, now time.Time) (cluster.GenericResourceKey, bool) {
 	if a.genericSelectionKey.Name != "" {
-		key = a.genericSelectionKey
-		if _, ok := a.genericRowsByKey[key.String()]; !ok {
-			a.statusMessage = "resource vanished during refresh"
-			return nil
+		want := a.genericSelectionKey.String()
+		for _, row := range a.sortedGenericRows {
+			if row.Key.String() == want {
+				return a.genericSelectionKey, true
+			}
 		}
-	} else {
-		row, ok := a.genericResourceRowAt(index, now)
-		if !ok {
-			a.statusMessage = "resource vanished during refresh"
-			return nil
+		if _, ok := a.genericRowsByKey[want]; !ok {
+			return cluster.GenericResourceKey{}, false
 		}
-		key = row.Key
-		a.genericSelectionKey = key
+		// Sticky key left the visible snapshot via filter/scope; use highlighted row.
+	}
+	row, ok := a.genericResourceRowAt(index, now)
+	if !ok {
+		return cluster.GenericResourceKey{}, false
+	}
+	a.genericSelectionKey = row.Key
+	return row.Key, true
+}
+
+func (a *App) genericVisibleOrCachedRow(key cluster.GenericResourceKey) (cluster.GenericResourceRow, bool) {
+	want := key.String()
+	for _, row := range a.sortedGenericRows {
+		if row.Key.String() == want {
+			return row, true
+		}
+	}
+	row, ok := a.genericRowsByKey[want]
+	return row, ok
+}
+
+func (a *App) openCurrentGenericResourceSelection(index int, now time.Time) tea.Cmd {
+	key, ok := a.resolveGenericSelectionKey(index, now)
+	if !ok {
+		a.statusMessage = "resource vanished during refresh"
+		return nil
 	}
 	a.genericDetailLoading = true
 	a.statusMessage = ""
@@ -611,7 +644,7 @@ func (a *App) handleGenericActionResult(msg genericActionResultMsg) tea.Cmd {
 }
 
 func (a *App) handleResourceJumpResult(msg resourceJumpResultMsg) tea.Cmd {
-	if msg.Token != a.genericJumpToken {
+	if msg.Token != a.genericJumpToken || msg.Fingerprint != a.genericJumpFingerprint {
 		return nil
 	}
 	a.genericJumpLoading = false
@@ -635,7 +668,7 @@ func (a *App) handleResourceJumpResult(msg resourceJumpResultMsg) tea.Cmd {
 }
 
 func (a *App) handleResourceJumpDiscoveryResult(msg resourceJumpDiscoveryResultMsg) tea.Cmd {
-	if msg.Token != a.genericJumpToken {
+	if msg.Token != a.genericJumpToken || msg.Fingerprint != a.genericJumpFingerprint {
 		return nil
 	}
 	a.genericJumpLoading = false
