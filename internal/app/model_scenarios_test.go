@@ -15,6 +15,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/elijahrou/surfsk8s/internal/cluster"
 	"github.com/elijahrou/surfsk8s/internal/state"
 )
@@ -476,6 +478,207 @@ func (b *blockingLogBackend) NodeLogEntries(ctx context.Context, details state.N
 
 func (b *blockingLogBackend) DeploymentPodDetails(details state.DeploymentDetails, now time.Time) ([]state.PodDetails, error) {
 	return nil, fmt.Errorf("unused")
+}
+
+func applyResizeSequence(h *modelHarness) {
+	h.t.Helper()
+	for _, size := range []struct {
+		width  int
+		height int
+	}{
+		{20, 10},
+		{40, 15},
+		{80, 24},
+	} {
+		h.Resize(size.width, size.height)
+		if h.app.width != size.width || h.app.height != size.height {
+			h.t.Fatalf("size after Resize = %dx%d, want %dx%d", h.app.width, h.app.height, size.width, size.height)
+		}
+		_ = h.app.View()
+	}
+}
+
+func TestModelScenarioResizePreservesTransientUIState(t *testing.T) {
+	t.Run("generic list loading keeps token selection and screen", func(t *testing.T) {
+		h := newModelHarness(t)
+		fake := newBlockingGenericBackend()
+		row := cluster.GenericResourceRow{
+			Key:       cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "w1"},
+			Name:      "w1",
+			Namespace: "default",
+			Cluster:   "dev",
+		}
+		fake.rows = []cluster.GenericResourceRow{row}
+		h.app.genericBackend = fake
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		h.app.genericSelectionKey = row.Key
+		h.app.lastManagerVersion = 0
+		h.app.genericRowsResourceID = ""
+		h.app.lastGenericFetchAt = time.Time{}
+		t.Cleanup(fake.listBarrier.Release)
+
+		fetchCmd := h.app.fetchGenericResourceListCmd(h.app.activeResource)
+		if fetchCmd == nil {
+			t.Fatal("expected async generic list command")
+		}
+		if !h.app.genericListLoading {
+			t.Fatal("expected generic list loading")
+		}
+		tokenBefore := h.app.genericListToken
+		if tokenBefore == 0 {
+			t.Fatal("expected non-zero genericListToken")
+		}
+
+		done := make(chan tea.Msg, 1)
+		go func() { done <- fetchCmd() }()
+		fake.listBarrier.WaitEntered(t, 2*time.Second)
+
+		applyResizeSequence(h)
+
+		if got, want := h.app.screen, screenResourceList; got != want {
+			t.Fatalf("screen = %d, want %d", got, want)
+		}
+		if !h.app.genericListLoading {
+			t.Fatal("resize cleared generic list loading")
+		}
+		if got, want := h.app.genericListToken, tokenBefore; got != want {
+			t.Fatalf("genericListToken = %d, want %d (resize must not retarget in-flight fetch)", got, want)
+		}
+		if got, want := h.app.genericSelectionKey, row.Key; got != want {
+			t.Fatalf("genericSelectionKey = %#v, want %#v", got, want)
+		}
+		if h.app.filter.Active() {
+			t.Fatal("resize activated filter unexpectedly")
+		}
+
+		fake.listBarrier.Release()
+		msg := <-done
+		h.RunAll(func() tea.Msg { return msg })
+		if h.app.genericListLoading {
+			t.Fatal("loading stuck after matching result")
+		}
+		if len(h.app.sortedGenericRows) != 1 || h.app.sortedGenericRows[0].Name != "w1" {
+			t.Fatalf("expected w1 applied after resize, got %#v", h.app.sortedGenericRows)
+		}
+	})
+
+	t.Run("confirmation modal keeps screen description and cancel path", func(t *testing.T) {
+		h := newModelHarness(t)
+		obj := &unstructured.Unstructured{}
+		obj.SetName("w1")
+		obj.SetNamespace("default")
+		row := cluster.GenericResourceRow{
+			Key:       cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "w1"},
+			Name:      "w1",
+			Namespace: "default",
+			Cluster:   "dev",
+		}
+		details := cluster.GenericResourceDetails{Row: row, YAML: "kind: Widget\n", Object: obj}
+		h.app.screen = screenResourceDetails
+		h.app.activeResource = testGenericKind()
+		h.app.activeGenericDetails = details
+		h.app.detailFocus = detailFocusContent
+
+		h.RunAll(h.app.runDeleteGenericResource())
+		if h.app.screen != screenConfirmAction {
+			t.Fatalf("expected confirm screen, got %d", h.app.screen)
+		}
+		if h.app.confirmRun == nil || h.app.confirmDescription == "" {
+			t.Fatal("expected confirm description and run")
+		}
+		descBefore := h.app.confirmDescription
+		returnBefore := h.app.actionReturnScreen
+
+		applyResizeSequence(h)
+
+		if got, want := h.app.screen, screenConfirmAction; got != want {
+			t.Fatalf("screen = %d, want %d", got, want)
+		}
+		if got, want := h.app.confirmDescription, descBefore; got != want {
+			t.Fatalf("confirmDescription = %q, want %q", got, want)
+		}
+		if h.app.confirmRun == nil {
+			t.Fatal("confirmRun cleared by resize")
+		}
+		if got, want := h.app.actionReturnScreen, returnBefore; got != want {
+			t.Fatalf("actionReturnScreen = %d, want %d", got, want)
+		}
+		if got, want := h.app.detailFocus, detailFocusContent; got != want {
+			t.Fatalf("detailFocus = %d, want %d", got, want)
+		}
+
+		h.Key(tea.KeyMsg{Type: tea.KeyEsc})
+		if got, want := h.app.screen, screenResourceDetails; got != want {
+			t.Fatalf("esc after resize screen = %d, want %d", got, want)
+		}
+	})
+
+	t.Run("in-flight log request keeps token and cancel handle", func(t *testing.T) {
+		h := newModelHarness(t)
+		fake := &blockingLogBackend{
+			enterFirst:    make(chan struct{}, 1),
+			releaseFirst:  make(chan struct{}),
+			enterSecond:   make(chan struct{}, 1),
+			releaseSecond: make(chan struct{}),
+		}
+		h.app.logBackend = fake
+		h.app.screen = screenLogs
+		h.app.logTarget = logTargetPod
+		h.app.logRange = logRangeAll
+		h.app.logPod = state.PodDetails{
+			Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+			Pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+			},
+		}
+		h.app.logSelectedContainers = map[string]bool{"main": true}
+
+		cmd := h.app.refreshLogs(true)
+		if cmd == nil {
+			t.Fatal("expected log refresh command")
+		}
+		tokenBefore := h.app.logRequestToken
+		if tokenBefore == 0 {
+			t.Fatal("expected non-zero logRequestToken")
+		}
+		if h.app.logCancel == nil {
+			t.Fatal("expected logCancel handle")
+		}
+		done := make(chan tea.Msg, 1)
+		go func() { done <- cmd() }()
+		select {
+		case <-fake.enterFirst:
+		case <-time.After(2 * time.Second):
+			t.Fatal("log fetch never started")
+		}
+
+		applyResizeSequence(h)
+
+		if got, want := h.app.screen, screenLogs; got != want {
+			t.Fatalf("screen = %d, want %d", got, want)
+		}
+		if !h.app.logLoading {
+			t.Fatal("resize cleared logLoading")
+		}
+		if got, want := h.app.logRequestToken, tokenBefore; got != want {
+			t.Fatalf("logRequestToken = %d, want %d", got, want)
+		}
+		if h.app.logCancel == nil {
+			t.Fatal("logCancel cleared by resize")
+		}
+		if h.app.filter.Active() {
+			t.Fatal("resize activated filter unexpectedly")
+		}
+
+		close(fake.releaseFirst)
+		msg := <-done
+		h.RunAll(func() tea.Msg { return msg })
+		if len(h.app.logEntries) == 0 || !strings.Contains(h.app.logEntries[0].Message, "first") {
+			t.Fatalf("expected first log result after resize, got %#v", h.app.logEntries)
+		}
+	})
 }
 
 func TestForcedLogRefreshCancelsPreviousRequest(t *testing.T) {

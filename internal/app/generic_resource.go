@@ -98,6 +98,9 @@ func (a *App) genericResourceVersion() uint64 {
 }
 
 func (a *App) genericNeedsFetch(_ time.Time) bool {
+	if a.genericListLoading {
+		return false
+	}
 	if a.genericRowsResourceID != a.activeResource.ID {
 		return true
 	}

@@ -13,7 +13,7 @@ timeout 150s go test ./... -count=1 -shuffle=on -timeout=120s
 timeout 240s go test -race ./... -count=1 -shuffle=on -timeout=180s
 ```
 
-Model tests use an offline harness (`modelHarness`) with channels/barriers — no sleeps, no live cluster, no PTY. Batch commands run concurrently to match Bubble Tea.
+Model tests use an offline harness (`modelHarness`) with channels/barriers — no sleeps, no live cluster, no PTY. Batch commands run concurrently to match Bubble Tea. `modelHarness.Resize` is exercised during generic-list loading, confirmation modals, and in-flight log requests (`TestModelScenarioResizePreservesTransientUIState`).
 
 ## PTY / expect smoke
 
