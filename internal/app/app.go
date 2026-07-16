@@ -25,6 +25,25 @@ type Config struct {
 	InitialNamespace string
 	KubeconfigPath   string
 	Resume           bool
+	Context          context.Context
+}
+
+// genericResourceBackend is the narrow cluster surface used by generic list/detail/jump effects.
+type genericResourceBackend interface {
+	ListGenericResource(ctx context.Context, resource cluster.ResourceKind) ([]cluster.GenericResourceRow, error)
+	GenericResourceDetails(ctx context.Context, resource cluster.ResourceKind, key cluster.GenericResourceKey, now time.Time) (cluster.GenericResourceDetails, error)
+	GenericResourceVersion(resourceID string) uint64
+	GenericResourceDelta(resourceID string, sinceVersion uint64) (uint64, []cluster.GenericResourceChange, bool)
+	GenericResourceObjectVersion(resource cluster.ResourceKind, key cluster.GenericResourceKey) (string, bool)
+	ForEachGenericResourceRow(ctx context.Context, resource cluster.ResourceKind, visit func(cluster.GenericResourceRow) bool) error
+}
+
+// logBackend is the narrow cluster surface used by log fetch effects.
+type logBackend interface {
+	PodLogsWithOptions(ctx context.Context, details state.PodDetails, options cluster.PodLogsOptions) (string, error)
+	NodeLogWithOptions(ctx context.Context, details state.NodeDetails, options cluster.NodeLogOptions) (string, error)
+	NodeLogEntries(ctx context.Context, details state.NodeDetails, dir string) ([]cluster.NodeLogEntry, error)
+	DeploymentPodDetails(details state.DeploymentDetails, now time.Time) ([]state.PodDetails, error)
 }
 
 type tickMsg time.Time
@@ -123,6 +142,9 @@ type commandItem struct {
 type App struct {
 	store            *state.Store
 	manager          *cluster.Manager
+	genericBackend   genericResourceBackend
+	logBackend       logBackend
+	context          context.Context
 	clusterStatusBuf []components.ClusterStatus
 	executor         *actions.Executor
 
@@ -331,6 +353,10 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	if manager == nil {
 		panic("app.New: nil manager")
 	}
+	rootCtx := cfg.Context
+	if rootCtx == nil {
+		rootCtx = context.Background()
+	}
 
 	podsView := views.NewPodsView()
 	deploymentsView := views.NewDeploymentsView()
@@ -362,6 +388,9 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 		namespace:              cfg.InitialNamespace,
 		store:                  store,
 		manager:                manager,
+		genericBackend:         manager,
+		logBackend:             manager,
+		context:                rootCtx,
 		executor:               actions.NewExecutor(cfg.KubeconfigPath),
 		podsView:               podsView,
 		deploymentsView:        deploymentsView,

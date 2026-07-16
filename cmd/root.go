@@ -53,7 +53,12 @@ func Execute() error {
 	defer closeManagerWithTimeout(manager, 5*time.Second)
 
 	program := tea.NewProgram(
-		app.New(store, manager, app.Config{InitialNamespace: *namespace, KubeconfigPath: *kubeconfig, Resume: resume}),
+		app.New(store, manager, app.Config{
+			InitialNamespace: *namespace,
+			KubeconfigPath:   *kubeconfig,
+			Resume:           resume,
+			Context:          ctx,
+		}),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 		tea.WithContext(ctx),

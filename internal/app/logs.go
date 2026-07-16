@@ -458,10 +458,12 @@ func (a *App) openNodeLogPicker(dir string) tea.Cmd {
 	a.activity = "loading node logs"
 	details := a.activeNode
 	title := buildNodeLogPickerTitle(dir)
+	rootCtx := a.context
+	backend := a.logBackend
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		ctx, cancel := context.WithTimeout(rootCtx, 8*time.Second)
 		defer cancel()
-		entries, err := a.manager.NodeLogEntries(ctx, details, dir)
+		entries, err := backend.NodeLogEntries(ctx, details, dir)
 		return nodeLogPickerResultMsg{Token: token, Key: details.Row.Key, Dir: dir, Title: title, Entries: entries, Err: err}
 	}
 }
@@ -572,8 +574,9 @@ func (a *App) refreshLogs(force bool) tea.Cmd {
 		replace = true
 	}
 
+	rootCtx := a.context
 	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(rootCtx, 15*time.Second)
 		defer cancel()
 		entries, nextCursor, err := a.fetchLogEntries(ctx, fetchTarget, pod, deployment, node, nodePath, selected, fetchRange, sinceTime, tailLines)
 		return logsResultMsg{Token: token, Replace: replace, Cursor: nextCursor, Entries: entries, Err: err}
@@ -612,7 +615,7 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 			var fetchErr error
 			switch {
 			case source.Container != "":
-				content, fetchErr = a.manager.PodLogsWithOptions(ctx, source.Pod, cluster.PodLogsOptions{
+				content, fetchErr = a.logBackend.PodLogsWithOptions(ctx, source.Pod, cluster.PodLogsOptions{
 					Container:  source.Container,
 					Timestamps: true,
 					TailLines:  tailLines,
@@ -624,7 +627,7 @@ func (a *App) fetchLogEntries(ctx context.Context, target logTarget, pod state.P
 				if fetchRange == logRangeAll {
 					options.All = true
 				}
-				content, fetchErr = a.manager.NodeLogWithOptions(ctx, source.Node, options)
+				content, fetchErr = a.logBackend.NodeLogWithOptions(ctx, source.Node, options)
 			default:
 				fetchErr = fmt.Errorf("invalid log source")
 			}
@@ -701,7 +704,7 @@ func (a *App) buildLogFetchSources(now time.Time, target logTarget, pod state.Po
 		if len(selectedNames) == 0 {
 			return nil, fmt.Errorf("select at least one container")
 		}
-		pods, err := a.manager.DeploymentPodDetails(deployment, now)
+		pods, err := a.logBackend.DeploymentPodDetails(deployment, now)
 		if err != nil {
 			return nil, err
 		}

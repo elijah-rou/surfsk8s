@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"sort"
 	"strings"
 	"time"
@@ -24,7 +23,7 @@ func (a *App) genericResourceTitle() string {
 }
 
 func (a *App) genericResourceVersion() uint64 {
-	return a.manager.GenericResourceVersion(a.activeResource.ID)
+	return a.genericBackend.GenericResourceVersion(a.activeResource.ID)
 }
 
 func (a *App) genericNeedsFetch(_ time.Time) bool {
@@ -146,7 +145,7 @@ func (a *App) genericRowMatchesScope(row cluster.GenericResourceRow, now time.Ti
 }
 
 func (a *App) applyGenericResourceDelta(now time.Time) bool {
-	currentVersion, changes, ok := a.manager.GenericResourceDelta(a.activeResource.ID, a.lastManagerVersion)
+	currentVersion, changes, ok := a.genericBackend.GenericResourceDelta(a.activeResource.ID, a.lastManagerVersion)
 	if !ok {
 		return false
 	}
@@ -224,7 +223,7 @@ func (a *App) applyGenericResourceDelta(now time.Time) bool {
 }
 
 func (a *App) loadGenericResourceRows(now time.Time) {
-	rows, err := a.manager.ListGenericResource(context.Background(), a.activeResource)
+	rows, err := a.genericBackend.ListGenericResource(a.context, a.activeResource)
 	if err != nil {
 		a.statusMessage = err.Error()
 	}
@@ -300,14 +299,14 @@ func (a *App) refreshGenericResourceDetails(now time.Time) {
 		a.lastTick = now
 		return
 	}
-	currentObjectVersion, ok := a.manager.GenericResourceObjectVersion(a.activeResource, a.activeGenericDetails.Row.Key)
+	currentObjectVersion, ok := a.genericBackend.GenericResourceObjectVersion(a.activeResource, a.activeGenericDetails.Row.Key)
 	if ok && currentObjectVersion == a.activeGenericDetails.Row.ResourceVersion {
 		a.activeGenericDetails.Row = a.activeGenericDetails.Row.WithAge(now)
 		a.lastManagerVersion = currentVersion
 		a.lastTick = now
 		return
 	}
-	details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, a.activeGenericDetails.Row.Key, now)
+	details, err := a.genericBackend.GenericResourceDetails(a.context, a.activeResource, a.activeGenericDetails.Row.Key, now)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return
@@ -323,7 +322,7 @@ func (a *App) openCurrentGenericResourceSelection(index int, now time.Time) bool
 	if !ok {
 		return false
 	}
-	details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, row.Key, now)
+	details, err := a.genericBackend.GenericResourceDetails(a.context, a.activeResource, row.Key, now)
 	if err != nil {
 		a.statusMessage = err.Error()
 		return false
