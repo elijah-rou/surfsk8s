@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -424,20 +423,10 @@ func (a *App) runEditResource() tea.Cmd {
 			a.statusMessage = err.Error()
 			return nil
 		}
+		resource := a.activeResource
+		key := a.activeGenericDetails.Row.Key
 		return a.openConfirmAction(description, func() tea.Cmd {
-			details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, a.activeGenericDetails.Row.Key, time.Now())
-			if err != nil {
-				a.statusMessage = err.Error()
-				a.refreshCurrentScreen(time.Now())
-				return nil
-			}
-			a.activeGenericDetails = details
-			cmd, description, err := a.executor.EditGenericResource(a.activeResource, details)
-			if err != nil {
-				a.statusMessage = err.Error()
-				return nil
-			}
-			return runProcessCommand(cmd, description)
+			return a.fetchGenericActionRevalidateCmd(resource, key, genericActionEdit, a.actionReturnScreen)
 		})
 	}
 }
@@ -603,12 +592,7 @@ func (a *App) selectCurrentResourceDeleteTarget(now time.Time) bool {
 		if !ok {
 			return false
 		}
-		details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, row.Key, now)
-		if err != nil {
-			a.statusMessage = err.Error()
-			return false
-		}
-		a.activeGenericDetails = details
+		a.activeGenericDetails = cluster.GenericResourceDetails{Row: row, Object: row.Object}
 		return true
 	}
 }
@@ -751,23 +735,10 @@ func (a *App) runDeleteGenericResource() tea.Cmd {
 	returnScreen := a.screen
 	kind := genericDeleteKind(a.activeResource)
 	confirmation := deleteConfirmationDescription(description, kind, a.activeGenericDetails.Row.Cluster, a.activeGenericDetails.Row.Namespace, a.activeGenericDetails.Row.Name)
+	resource := a.activeResource
+	key := a.activeGenericDetails.Row.Key
 	return a.openConfirmAction(confirmation, func() tea.Cmd {
-		details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, a.activeGenericDetails.Row.Key, time.Now())
-		if err != nil {
-			a.statusMessage = err.Error()
-			a.refreshCurrentScreen(time.Now())
-			return nil
-		}
-		a.activeGenericDetails = details
-		cmd, description, err := a.executor.DeleteGenericResource(a.activeResource, details)
-		if err != nil {
-			a.statusMessage = err.Error()
-			return nil
-		}
-		if returnScreen == screenResourceDetails {
-			a.screen = screenResourceList
-		}
-		return runProcessCommand(cmd, description)
+		return a.fetchGenericActionRevalidateCmd(resource, key, genericActionDelete, returnScreen)
 	})
 }
 

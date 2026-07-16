@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -210,6 +211,7 @@ func sequenceCmds(msg tea.Msg) []tea.Cmd {
 type ReleaseBarrier struct {
 	entered chan struct{}
 	release chan struct{}
+	once    sync.Once
 }
 
 func NewReleaseBarrier() *ReleaseBarrier {
@@ -236,7 +238,7 @@ func (b *ReleaseBarrier) WaitEntered(t *testing.T, deadline time.Duration) {
 }
 
 func (b *ReleaseBarrier) Release() {
-	close(b.release)
+	b.once.Do(func() { close(b.release) })
 }
 
 func (b *ReleaseBarrier) Wait(ctx context.Context) error {

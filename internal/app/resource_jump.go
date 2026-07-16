@@ -720,19 +720,20 @@ func (a *App) openResourceJumpTarget(target resourceJumpTarget, now time.Time) t
 		a.resetTextViewport()
 		return a.maybeRefreshResourceUsageCmd(now)
 	default:
-		details, err := a.manager.GenericResourceDetails(context.Background(), target.Resource, cluster.GenericResourceKey{Cluster: target.Cluster, Namespace: target.Namespace, Name: target.Name}, now)
-		if err != nil {
-			a.statusMessage = err.Error()
-			return nil
+		token := a.nextAsyncTokenValue()
+		a.genericJumpToken = token
+		a.genericJumpLoading = true
+		a.activity = "loading jump target"
+		backend := a.genericBackend
+		rootCtx := a.context
+		resource := target.Resource
+		key := cluster.GenericResourceKey{Cluster: target.Cluster, Namespace: target.Namespace, Name: target.Name}
+		capturedTarget := target
+		return func() tea.Msg {
+			ctx, cancel := context.WithTimeout(rootCtx, genericRequestTimeout)
+			defer cancel()
+			details, err := backend.GenericResourceDetails(ctx, resource, key, time.Now())
+			return resourceJumpResultMsg{Token: token, Target: capturedTarget, Details: details, Err: err, Resource: resource}
 		}
-		a.activeResource = target.Resource
-		a.activeGenericDetails = details
-		a.genericDetailFetchedAt = now
-		a.lastManagerVersion = a.genericResourceVersion()
-		a.lastTick = now
-		a.screen = screenResourceDetails
-		a.detailFocus = detailFocusContent
-		a.resetTextViewport()
-		return a.maybeRefreshResourceUsageCmd(now)
 	}
 }

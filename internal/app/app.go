@@ -300,6 +300,13 @@ type App struct {
 	genericListCacheKey           string
 	lastGenericFetchAt            time.Time
 	genericDetailFetchedAt        time.Time
+	genericListLoading            bool
+	genericDetailLoading          bool
+	genericJumpLoading            bool
+	genericListToken              uint64
+	genericDetailToken            uint64
+	genericJumpToken              uint64
+	genericActionToken            uint64
 
 	visibleCommands      []commandItem
 	commandQuery         string
@@ -626,8 +633,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = typed.Width
 		a.height = typed.Height
 		a.resizeTables()
-		a.refreshCurrentScreen(time.Now())
-		return a, nil
+		return a, a.refreshCurrentScreen(time.Now())
 
 	case tea.KeyMsg:
 		if typed.String() == "ctrl+c" {
@@ -643,10 +649,11 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickMsg:
 		now := time.Time(typed)
+		var refreshCmd tea.Cmd
 		if a.shouldRefresh(now) {
-			a.refreshCurrentScreen(now)
+			refreshCmd = a.refreshCurrentScreen(now)
 		}
-		return a, tea.Batch(tickCmd(), a.maybeRefreshCatalogOverviewCmd(now), a.maybeRefreshResourceUsageCmd(now), a.maybeRefreshLogsCmd(now))
+		return a, tea.Batch(refreshCmd, tickCmd(), a.maybeRefreshCatalogOverviewCmd(now), a.maybeRefreshResourceUsageCmd(now), a.maybeRefreshLogsCmd(now))
 
 	case connectResultMsg:
 		a.connecting = false
@@ -682,6 +689,18 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case logsResultMsg:
 		return a, a.handleLogsResult(typed)
+
+	case genericListResultMsg:
+		return a, a.handleGenericListResult(typed)
+
+	case genericDetailResultMsg:
+		return a, a.handleGenericDetailResult(typed)
+
+	case genericActionResultMsg:
+		return a, a.handleGenericActionResult(typed)
+
+	case resourceJumpResultMsg:
+		return a, a.handleResourceJumpResult(typed)
 
 	case nodeLogPickerResultMsg:
 		return a, a.handleNodeLogPickerResult(typed)
@@ -1290,11 +1309,12 @@ func (a *App) updateResourceListKeys(msg tea.KeyMsg) tea.Cmd {
 			return a.runRestartResource()
 		}
 	case "enter":
-		if !a.openCurrentResourceSelection(a.resourceTable.SelectedIndex(), time.Now()) {
+		cmd := a.openCurrentResourceSelection(a.resourceTable.SelectedIndex(), time.Now())
+		if cmd == nil && a.screen != screenResourceDetails && !a.genericDetailLoading {
 			a.statusMessage = "resource vanished during refresh"
 			return nil
 		}
-		return a.maybeRefreshResourceUsageCmd(time.Now())
+		return tea.Batch(cmd, a.maybeRefreshResourceUsageCmd(time.Now()))
 	case "esc", "backspace":
 		if a.resourceQuery2 != "" {
 			a.resourceQuery2 = ""
@@ -1665,27 +1685,29 @@ func (a *App) openContextPicker(mode pickerMode) {
 	a.refreshContextRows()
 }
 
-func (a *App) openResourceList(resource cluster.ResourceKind) {
+func (a *App) openResourceList(resource cluster.ResourceKind) tea.Cmd {
 	a.activeResource = resource
 	switch {
 	case isCorePods(resource):
 		a.screen = screenPods
 		a.podQuery = ""
 		a.refreshPods(time.Now())
+		return nil
 	case isBuiltInResourceList(resource):
 		a.screen = screenResourceList
 		a.resourceQuery2 = ""
-		a.refreshResourceList(time.Now())
+		return a.refreshResourceList(time.Now())
 	case a.supportsGenericResourceList(resource):
 		a.screen = screenResourceList
 		a.resourceQuery2 = ""
-		a.refreshResourceList(time.Now())
+		return a.refreshResourceList(time.Now())
 	default:
 		a.screen = screenResourceDetails
+		return nil
 	}
 }
 
-func (a *App) refreshCurrentScreen(now time.Time) {
+func (a *App) refreshCurrentScreen(now time.Time) tea.Cmd {
 	switch a.screen {
 	case screenContexts:
 		a.refreshContextRows()
@@ -1696,11 +1718,11 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 	case screenPods:
 		a.refreshPods(now)
 	case screenResourceList:
-		a.refreshResourceList(now)
+		return a.refreshResourceList(now)
 	case screenPodDetails:
 		a.refreshActivePodDetails(now)
 	case screenResourceDetails:
-		a.refreshActiveResourceDetails(now)
+		return a.refreshActiveResourceDetails(now)
 	case screenCommands:
 		a.refreshCommands()
 	case screenResourceFinder:
@@ -1710,9 +1732,9 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 	case screenActionPicker:
 		a.refreshActionPicker()
 	case screenConfirmAction:
-		return
+		return nil
 	case screenLogs:
-		return
+		return nil
 	case screenTableFilterColumnPicker:
 		a.refreshTableFilterColumnPicker()
 	case screenTableFilterManager:
@@ -1724,6 +1746,7 @@ func (a *App) refreshCurrentScreen(now time.Time) {
 	case screenTableSortManager:
 		a.refreshTableSortManager()
 	}
+	return nil
 }
 
 func (a *App) refreshContextRows() {
@@ -1820,7 +1843,7 @@ func (a *App) refreshPods(now time.Time) {
 	})
 }
 
-func (a *App) refreshResourceList(now time.Time) {
+func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
 	switch {
@@ -1890,8 +1913,9 @@ func (a *App) refreshResourceList(now time.Time) {
 			return a.nodeTableRows(a.nodeWindow(start, end-start, time.Now()), time.Now())
 		})
 	default:
-		a.refreshGenericResourceList(now)
+		return a.refreshGenericResourceList(now)
 	}
+	return nil
 }
 
 func (a *App) refreshCommands() {
@@ -1936,14 +1960,14 @@ func (a *App) refreshActivePodDetails(now time.Time) {
 	a.lastTick = now
 }
 
-func (a *App) refreshActiveResourceDetails(now time.Time) {
+func (a *App) refreshActiveResourceDetails(now time.Time) tea.Cmd {
 	if isBuiltInResourceList(a.activeResource) {
 		storeVersion := a.builtInResourceDataVersion()
 		if storeVersion == a.lastDataVersion {
 			a.refreshCurrentDetailAge(now)
 			a.refreshAssociatedPods(now)
 			a.lastTick = now
-			return
+			return nil
 		}
 		if !a.refreshCurrentDetail(now) {
 			a.statusMessage = "resource vanished during refresh"
@@ -1951,11 +1975,12 @@ func (a *App) refreshActiveResourceDetails(now time.Time) {
 		a.lastDataVersion = storeVersion
 		a.lastManagerVersion = a.manager.Version()
 		a.lastTick = now
-		return
+		return nil
 	}
 	if a.supportsGenericResourceList(a.activeResource) {
-		a.refreshGenericResourceDetails(now)
+		return a.refreshGenericResourceDetails(now)
 	}
+	return nil
 }
 
 func (a *App) refreshCurrentDetail(now time.Time) bool {
@@ -2015,38 +2040,38 @@ func (a *App) refreshCurrentDetailAge(now time.Time) {
 	}
 }
 
-func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
+func (a *App) openCurrentResourceSelection(index int, now time.Time) tea.Cmd {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
 		row, ok := a.deploymentRowAt(index, now)
 		if !ok {
-			return false
+			return nil
 		}
 		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
 		if !ok {
-			return false
+			return nil
 		}
 		a.activeDeployment = details
 		a.activeDeploymentPods = a.deploymentAssociatedPods(now)
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		row, ok := a.serviceRowAt(index, now)
 		if !ok {
-			return false
+			return nil
 		}
 		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
 		if !ok {
-			return false
+			return nil
 		}
 		a.activeService = details
 		a.activeServicePods = a.serviceAssociatedPods(now)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
 		row, ok := a.nodeRowAt(index, now)
 		if !ok {
-			return false
+			return nil
 		}
 		details, ok := a.store.NodeDetailsByKey(row.Key, now)
 		if !ok {
-			return false
+			return nil
 		}
 		a.activeNode = details
 		a.activeNodePods = a.nodeAssociatedPods(now)
@@ -2061,7 +2086,7 @@ func (a *App) openCurrentResourceSelection(index int, now time.Time) bool {
 	a.lastDataVersion = a.builtInResourceDataVersion()
 	a.lastTick = now
 	a.resetTextViewport()
-	return true
+	return nil
 }
 
 func (a *App) setNavTable(title string, rows [][]string) {
