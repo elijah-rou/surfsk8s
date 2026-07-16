@@ -748,6 +748,109 @@ func TestForcedLogRefreshCancelsPreviousRequest(t *testing.T) {
 	}
 }
 
+func TestQuitCancelsInFlightLogFetch(t *testing.T) {
+	h := newModelHarness(t)
+	fake := &blockingLogBackend{
+		enterFirst:    make(chan struct{}, 1),
+		releaseFirst:  make(chan struct{}),
+		enterSecond:   make(chan struct{}, 1),
+		releaseSecond: make(chan struct{}),
+	}
+	h.app.logBackend = fake
+	h.app.screen = screenLogs
+	h.app.logTarget = logTargetPod
+	h.app.logRange = logRangeAll
+	h.app.logsReturnScreen = screenPods
+	h.app.logPod = state.PodDetails{
+		Row: state.PodRow{Cluster: "dev", Namespace: "default", Name: "api"},
+		Pod: &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "api", Namespace: "default"},
+			Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+		},
+	}
+	h.app.logSelectedContainers = map[string]bool{"main": true}
+
+	cmd := h.app.refreshLogs(true)
+	if cmd == nil {
+		t.Fatal("expected log refresh command")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	select {
+	case <-fake.enterFirst:
+	case <-time.After(2 * time.Second):
+		t.Fatal("log fetch never started")
+	}
+
+	quitCmd := h.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if quitCmd == nil {
+		t.Fatal("expected tea.Quit from q")
+	}
+	select {
+	case msg := <-done:
+		res, ok := msg.(logsResultMsg)
+		if !ok {
+			t.Fatalf("result type %T", msg)
+		}
+		if res.Err == nil {
+			t.Fatal("expected in-flight log fetch canceled on quit")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight log fetch was not canceled on quit")
+	}
+	if h.app.context.Err() == nil {
+		t.Fatal("expected app context canceled on quit")
+	}
+	msg := quitCmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("got %T, want tea.QuitMsg", msg)
+	}
+}
+
+func TestCtrlCCancelsInFlightGenericListFetch(t *testing.T) {
+	h := newModelHarness(t)
+	fake := newBlockingGenericBackend()
+	h.app.genericBackend = fake
+	h.app.screen = screenResourceList
+	h.app.activeResource = cluster.ResourceKind{
+		Display:  "Widgets",
+		Resource: "widgets",
+		APIGroup: "example.com",
+	}
+
+	cmd := h.app.fetchGenericResourceListCmd(h.app.activeResource)
+	if cmd == nil {
+		t.Fatal("expected generic list command")
+	}
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }()
+	fake.listBarrier.WaitEntered(t, 2*time.Second)
+
+	quitCmd := h.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if quitCmd == nil {
+		t.Fatal("expected tea.Quit from ctrl+c")
+	}
+	select {
+	case msg := <-done:
+		res, ok := msg.(genericListResultMsg)
+		if !ok {
+			t.Fatalf("result type %T", msg)
+		}
+		if res.Err == nil {
+			t.Fatal("expected in-flight generic list fetch canceled on ctrl+c")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight generic list fetch was not canceled on ctrl+c")
+	}
+	if h.app.context.Err() == nil {
+		t.Fatal("expected app context canceled on ctrl+c")
+	}
+	msg := quitCmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("got %T, want tea.QuitMsg", msg)
+	}
+}
+
 func TestModelScenarioMaximumLogRangeIsBounded(t *testing.T) {
 	t.Run("rejects too many sources", func(t *testing.T) {
 		h := newModelHarness(t)

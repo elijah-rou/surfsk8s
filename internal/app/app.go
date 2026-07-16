@@ -145,6 +145,7 @@ type App struct {
 	genericBackend   genericResourceBackend
 	logBackend       logBackend
 	context          context.Context
+	cancel           context.CancelFunc
 	clusterStatusBuf []components.ClusterStatus
 	executor         *actions.Executor
 
@@ -371,6 +372,7 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	if rootCtx == nil {
 		rootCtx = context.Background()
 	}
+	rootCtx, rootCancel := context.WithCancel(rootCtx)
 
 	podsView := views.NewPodsView()
 	deploymentsView := views.NewDeploymentsView()
@@ -405,6 +407,7 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 		genericBackend:         manager,
 		logBackend:             manager,
 		context:                rootCtx,
+		cancel:                 rootCancel,
 		executor:               actions.NewExecutor(cfg.KubeconfigPath),
 		podsView:               podsView,
 		deploymentsView:        deploymentsView,
@@ -454,6 +457,23 @@ func New(store *state.Store, manager *cluster.Manager, cfg Config) *App {
 	}
 	app.refreshContextRows()
 	return app
+}
+
+// requestShutdown cancels in-flight app effects before tea.Quit so streams and
+// backend calls observe ctx.Done before manager.Close.
+func (a *App) requestShutdown() {
+	if a == nil {
+		panic("app.requestShutdown: nil App")
+	}
+	if a.logCancel != nil {
+		a.logCancel()
+		a.logCancel = nil
+	}
+	a.logRequestToken = 0
+	a.logLoading = false
+	if a.cancel != nil {
+		a.cancel()
+	}
 }
 
 func (a *App) Init() tea.Cmd {
@@ -644,6 +664,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		if typed.String() == "ctrl+c" {
+			a.requestShutdown()
 			return a, tea.Quit
 		}
 		if a.filter.Active() {
@@ -912,9 +933,11 @@ func (a *App) updateKey(msg tea.KeyMsg) tea.Cmd {
 
 	switch msg.String() {
 	case "ctrl+c":
+		a.requestShutdown()
 		return tea.Quit
 	case "q":
 		a.persistSession()
+		a.requestShutdown()
 		return tea.Quit
 	case ":":
 		if a.screen != screenContexts && a.screen != screenResourceFinder && a.screen != screenScopePicker && a.screen != screenActionPicker && a.screen != screenConfirmAction && a.screen != screenLogs {

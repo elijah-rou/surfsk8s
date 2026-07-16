@@ -162,7 +162,7 @@ func (h *modelHarness) Run(cmd tea.Cmd) tea.Msg {
 	if cmd == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(h.app.context, h.deadline)
+	ctx, cancel := context.WithTimeout(context.Background(), h.deadline)
 	h.trackCancel(cancel)
 	defer cancel()
 
@@ -178,6 +178,9 @@ func (h *modelHarness) Run(cmd tea.Cmd) tea.Msg {
 	case <-ctx.Done():
 		if h.cancel != nil {
 			h.cancel()
+		}
+		if h.app != nil && h.app.cancel != nil {
+			h.app.cancel()
 		}
 		h.cancelAllCommands()
 		h.t.Fatalf("modelHarness.Run: command exceeded deadline %s", h.deadline)
