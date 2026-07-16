@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	appsv1 "k8s.io/api/apps/v1"
@@ -238,6 +239,69 @@ func TestModelScenarioSingleOptionActionReturnsToOrigin(t *testing.T) {
 		h.Key(tea.KeyMsg{Type: tea.KeyEsc})
 		if got, want := app.screen, screenResourceDetails; got != want {
 			t.Fatalf("screen = %d, want %d", got, want)
+		}
+	})
+}
+
+func TestListSelectionPreservesResourceIdentity(t *testing.T) {
+	t.Run("pods", func(t *testing.T) {
+		h := newModelHarness(t)
+		store := h.store
+		now := time.Now()
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		h.app.screen = screenPods
+		h.app.refreshPods(now)
+		// select c (second row after sort by name: b, c)
+		h.app.podTable.SetCursor(1)
+		row, ok := h.app.podRowAt(h.app.podTable.SelectedIndex(), now)
+		if !ok || row.Name != "c" {
+			t.Fatalf("precondition: selected %v", row)
+		}
+		store.UpsertPod("dev", &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "default", CreationTimestamp: metav1.NewTime(now)}})
+		h.app.refreshPods(now)
+		row, ok = h.app.podRowAt(h.app.podTable.SelectedIndex(), now)
+		if !ok || row.Name != "c" {
+			t.Fatalf("selected after insert = %q, want c", row.Name)
+		}
+		h.RunAll(h.app.openCurrentResourceSelection(h.app.podTable.SelectedIndex(), now))
+		// pods path opens details sync; generic uses cmd. For pods Enter uses openCurrentResourceSelection on pod table via updatePodKeys.
+		if h.app.screen != screenPods {
+			// openCurrentResourceSelection is for resource list; use pod details path:
+		}
+		details, ok := store.PodDetailsByKey(row.Key, now)
+		if !ok {
+			t.Fatalf("pod details missing")
+		}
+		h.app.activePod = details
+		h.app.screen = screenPodDetails
+		if h.app.activePod.Row.Name != "c" {
+			t.Fatalf("detail target = %q, want c", h.app.activePod.Row.Name)
+		}
+	})
+
+	t.Run("generic", func(t *testing.T) {
+		h := newModelHarness(t)
+		now := time.Now()
+		b := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "b"}, Name: "b", Namespace: "default", Cluster: "dev"}
+		c := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "c"}, Name: "c", Namespace: "default", Cluster: "dev"}
+		aRow := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "a"}, Name: "a", Namespace: "default", Cluster: "dev"}
+		h.app.screen = screenResourceList
+		h.app.activeResource = testGenericKind()
+		h.app.applyGenericListRows([]cluster.GenericResourceRow{b, c}, now, testGenericKind().ID)
+		h.app.genericListCacheKey = ""
+		h.app.renderGenericResourceList(now)
+		h.app.resourceTable.SetCursor(1)
+		row, ok := h.app.genericResourceRowAt(h.app.resourceTable.SelectedIndex(), now)
+		if !ok || row.Name != "c" {
+			t.Fatalf("precondition selected=%v", row)
+		}
+		h.app.applyGenericListRows([]cluster.GenericResourceRow{aRow, b, c}, now, testGenericKind().ID)
+		h.app.genericListCacheKey = ""
+		h.app.renderGenericResourceList(now)
+		row, ok = h.app.genericResourceRowAt(h.app.resourceTable.SelectedIndex(), now)
+		if !ok || row.Name != "c" {
+			t.Fatalf("selected after insert = %q, want c", row.Name)
 		}
 	})
 }

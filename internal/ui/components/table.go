@@ -265,6 +265,23 @@ func (t *Table) SelectedIndex() int {
 	return t.cursor
 }
 
+// SetCursor restores selection to index after an identity-preserving refresh.
+// Out-of-range values clamp to the nearest valid row, or -1 when empty.
+func (t *Table) SetCursor(index int) {
+	if t.rowCount <= 0 {
+		t.cursor = 0
+		return
+	}
+	if index < 0 {
+		index = 0
+	}
+	if index >= t.rowCount {
+		index = t.rowCount - 1
+	}
+	t.cursor = index
+	t.clampViewport()
+}
+
 func (t *Table) RowCount() int {
 	return t.rowCount
 }

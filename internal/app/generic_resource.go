@@ -350,6 +350,12 @@ func (a *App) handleGenericListResult(msg genericListResultMsg) tea.Cmd {
 }
 
 func (a *App) renderGenericResourceList(now time.Time) tea.Cmd {
+	var selectedKey string
+	if idx := a.resourceTable.SelectedIndex(); idx >= 0 {
+		if row, ok := a.genericResourceRowAt(idx, now); ok {
+			selectedKey = row.Key.String()
+		}
+	}
 	a.ensureGenericCompiledColumns()
 	a.lastTick = now
 	if a.activeResource.Namespaced {
@@ -376,6 +382,19 @@ func (a *App) renderGenericResourceList(now time.Time) tea.Cmd {
 	a.resourceTable.SetWindowProvider(a.visibleRows, func(start int, end int) [][]string {
 		return a.genericTableRows(start, end-start, time.Now())
 	})
+	if selectedKey != "" {
+		restored := false
+		for i, row := range a.sortedGenericRows {
+			if row.Key.String() == selectedKey {
+				a.resourceTable.SetCursor(i)
+				restored = true
+				break
+			}
+		}
+		if !restored && a.visibleRows > 0 {
+			a.resourceTable.SetCursor(min(a.resourceTable.SelectedIndex(), a.visibleRows-1))
+		}
+	}
 	return nil
 }
 
