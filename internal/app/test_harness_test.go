@@ -38,11 +38,6 @@ func newModelHarness(t *testing.T) *modelHarness {
 		panic("newModelHarness: nil testing.T")
 	}
 
-	// Isolate preferences via XDG_CONFIG_HOME so parallel tests do not race on
-	// the package-global userConfigDir indirection.
-	tempDir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", tempDir)
-
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	store := state.NewStore()
 	manager := newTestManagerWithStore(t, store)
