@@ -536,6 +536,7 @@ class SemanticWalkthrough:
                 observation.state == ScreenState.GROUP_RESOURCES
                 or (
                     observation.state == ScreenState.CATALOG
+                    and "discovery-partial" not in observation.canonical_screen
                     and "2 Running" in observation.canonical_screen
                     and "1 Running" in observation.canonical_screen
                     and re.search(r"(?m)^\s*CRDs(?:\s|$)", observation.canonical_screen) is not None

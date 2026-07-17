@@ -199,14 +199,24 @@ class SemanticDriverContractTest(unittest.TestCase):
                         ("clear_filter",),
                     )
 
-    def test_connect_catalog_predicate_does_not_depend_on_crd_count(self):
+    def test_connect_catalog_waits_for_discovery_convergence_without_crd_count_dependency(self):
         before = self.semantic.observe(
             "surfsk8s · select contexts\n[x] ctx\nenter connect  q quit", "ctx"
         )
+        partial = (
+            "surfsk8s · resource catalog\nGROUPS\n2 Running\n1 Running\nCRDs  (999 resources)\n"
+            "discovery-partial\nr resource-find  enter open group  : commands"
+        )
+        converged = partial.replace("discovery-partial\n", "")
 
         class FakeDriver:
             context = "ctx"
             session = "session"
+
+            def __init__(self, artifacts):
+                self.artifacts = artifacts
+                self.screens = [partial, partial, partial, converged, converged, converged]
+                self.capture_count = 0
 
             def tmux(self, *args, **kwargs):
                 return types.SimpleNamespace(returncode=0)
@@ -214,20 +224,25 @@ class SemanticDriverContractTest(unittest.TestCase):
             def key(self, value):
                 self.key_sent = value
 
-        walk = self.semantic.SemanticWalkthrough(FakeDriver(), 1)
-        predicate = walk._execute(self.semantic.Action("connect"), before)
-        catalog = self.semantic.observe(
-            "surfsk8s · resource catalog\nGROUPS\n2 Running\n1 Running\nCRDs  (999 resources)\n"
-            "r resource-find  enter open group  : commands",
-            "ctx",
-        )
-        no_crds = self.semantic.observe(
-            "surfsk8s · resource catalog\nGROUPS\n2 Running\n1 Running\n"
-            "r resource-find  enter open group  : commands",
-            "ctx",
-        )
-        self.assertTrue(predicate(catalog))
-        self.assertFalse(predicate(no_crds))
+            def capture(self):
+                self.capture_count += 1
+                return self.screens.pop(0) if self.screens else converged
+
+        with tempfile.TemporaryDirectory() as temporary:
+            driver = FakeDriver(pathlib.Path(temporary))
+            walk = self.semantic.SemanticWalkthrough(driver, 1)
+            walk.deadline = time.monotonic() + 2
+            predicate = walk._execute(self.semantic.Action("connect"), before)
+            old_interval = self.semantic.POLL_INTERVAL_SECONDS
+            self.semantic.POLL_INTERVAL_SECONDS = 0
+            try:
+                result = walk._poll_transition(before, predicate, 0)
+            finally:
+                self.semantic.POLL_INTERVAL_SECONDS = old_interval
+
+        self.assertEqual(driver.key_sent, "Enter")
+        self.assertEqual(driver.capture_count, 6)
+        self.assertNotIn("discovery-partial", result.canonical_screen)
 
     def test_no_candidates_and_destructive_replay_actions_fail_closed(self):
         observation = self.semantic.observe(
