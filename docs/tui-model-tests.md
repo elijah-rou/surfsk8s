@@ -1,24 +1,36 @@
-# TUI model tests and live E2E
+# TUI test layers
 
-## Deterministic model tests (CI / agents)
+surfsk8s keeps three distinct automated layers plus a manual protocol.
+
+## 1. Deterministic model, policy, and static tests
 
 ```bash
-# Focused stability regressions
-timeout 90s go test ./internal/app -run 'Test(ModelScenario|Generic.*DoesNotBlock|GenericListResult|ForcedLogRefreshCancelsPreviousRequest|QuitCancelsInFlightLogFetch|CtrlCCancelsInFlightGenericListFetch|ListSelectionPreservesResourceIdentity|HeadlessProgramStartupQuit|ModelHarnessBatch)' -count=1 -timeout=60s
-
-timeout 90s go test ./internal/cluster -run 'Test(NodeLogResponseIsBounded|ManagerCloseCompletesWhenDiscoveryStalls)' -count=1 -timeout=60s
-
-# Full suite
 timeout 150s go test ./... -count=1 -shuffle=on -timeout=120s
-timeout 240s go test -race ./... -count=1 -shuffle=on -timeout=180s
+python3 -m unittest discover -s scripts/e2e -p 'test_*.py'
+bash -n scripts/e2e/run.sh scripts/e2e/agentic.sh
 ```
 
-Model tests use an offline harness (`modelHarness`) with channels/barriers — no sleeps, no live cluster, no PTY. Batch commands run concurrently to match Bubble Tea. `modelHarness.Resize` is exercised during generic-list loading, confirmation modals, and in-flight log requests (`TestModelScenarioResizePreservesTransientUIState`). Quit/`ctrl+c` cancel the app root context and any active log request (`TestQuitCancelsInFlightLogFetch`, `TestCtrlCCancelsInFlightGenericListFetch`) so in-flight fetches observe `ctx.Done` before shutdown.
+Go model tests use offline channels and barriers, not sleeps, a cluster, or a PTY. Python tests cover PTY helpers and semantic classification, safe policy, seeds, bounds, trace validation, and strict replay contracts. This is the fast feedback layer.
 
-## Live Kubernetes / real-PTY layer
+## 2. Fixed live Kubernetes / PTY replay
 
 ```bash
 ./scripts/e2e/run.sh
 ```
 
-This separate acceptance layer uses a pinned k3d install, isolated kubeconfig/config state, deterministic fixtures, and a real tmux PTY. It validates terminal behavior and live API integration that the model harness intentionally does not simulate. See [`live-e2e.md`](live-e2e.md) for scenarios, safety boundaries, artifacts, CI, and agentic exploration.
+This acceptance layer uses pinned k3d, isolated kubeconfig/XDG state, deterministic fixtures, and a real tmux PTY. Its route is intentionally fixed and checks specific terminal and API behavior.
+
+## 3. Seeded semantic live walkthrough
+
+```bash
+./scripts/e2e/run.sh --semantic --seed 743389
+./scripts/e2e/run.sh --semantic --replay /path/to/semantic-decisions.jsonl
+```
+
+This layer observes normalized live screens, classifies mutually exclusive semantic states, extracts visible allowlisted affordances and fixture targets, combines them with recorded environment capabilities such as tmux resize, derives sorted candidates, selects with a local seeded PRNG weighted toward unmet goals, performs one safe action, and polls for a semantic result. It has no model/API credentials, coordinates, arbitrary synchronization delays, or destructive TUI actions. Strict JSONL replay works across fresh generated clusters with bounded structured fingerprints that canonicalize generated context, Pod, timestamp, and age data, and fails at the first divergence.
+
+The three layers are reported independently in CI. See [`live-e2e.md`](live-e2e.md) for safety policy, resource and time bounds, trace schema, artifacts, cleanup guarantees, and Docker blast radius.
+
+## Manual agentic exploration
+
+`scripts/e2e/agentic.sh` remains a bounded manual environment for humans or agents. It is not the automated semantic policy and is the only mode where explicit cluster preservation is permitted.

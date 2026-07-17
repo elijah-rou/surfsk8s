@@ -80,6 +80,32 @@ class ScriptedLaunchTest(unittest.TestCase):
             self.assertIn(pty_driver.shell_quote(str(binary.resolve())), launch)
             self.assertIn(pty_driver.shell_quote(str(kubeconfig.resolve())), launch)
 
+    def test_semantic_mode_can_select_a_distinct_safe_capture_basename(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            args = argparse.Namespace(
+                binary=str(root / "surfsk8s"), kubeconfig=str(root / "kubeconfig"),
+                xdg_config=str(root / "xdg"), context="k3d-surfsk8s-e2e-test",
+                namespace="surfsk8s-e2e", cluster="surfsk8s-e2e-test",
+                session="surfsk8s-e2e-session", tmux_socket="surfsk8s-e2e-socket",
+                artifacts=str(root / "artifacts"), raw_capture_name="semantic-raw-terminal.log",
+            )
+            driver = pty_driver.Driver(args)
+            self.assertEqual(driver.raw_capture_name, "semantic-raw-terminal.log")
+
+    def test_rejects_unsafe_capture_basename(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            args = argparse.Namespace(
+                binary=str(root / "surfsk8s"), kubeconfig=str(root / "kubeconfig"),
+                xdg_config=str(root / "xdg"), context="k3d-surfsk8s-e2e-test",
+                namespace="surfsk8s-e2e", cluster="surfsk8s-e2e-test",
+                session="surfsk8s-e2e-session", tmux_socket="surfsk8s-e2e-socket",
+                artifacts=str(root / "artifacts"), raw_capture_name="../escape.log",
+            )
+            with self.assertRaises(ValueError):
+                pty_driver.Driver(args)
+
     def test_raw_capture_command_uses_explicit_byte_cap(self):
         command = pty_driver.bounded_capture_command(
             pathlib.Path("/tmp/raw terminal.log"), pathlib.Path("/tmp/capture helper.py"), 4096

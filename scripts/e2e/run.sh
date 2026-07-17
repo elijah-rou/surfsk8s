@@ -9,16 +9,57 @@ readonly K3S_IMAGE="rancher/k3s:${K3S_VERSION}@sha256:634920385dc89133d80060b3a3
 readonly TOTAL_TIMEOUT_SECONDS=420
 readonly DEFAULT_RAW_CAPTURE_MAX_BYTES=$((16 * 1024 * 1024))
 mode="scripted"
-if [[ "${1:-}" == "--agentic" ]]; then
+semantic_seed=""
+semantic_replay=""
+if [[ "${1:-}" == "--agentic" && $# -eq 1 ]]; then
   mode="agentic"
+elif [[ "${1:-}" == "--semantic" ]]; then
+  mode="semantic"
+  shift
+  case "${1:-}" in
+    "") ;;
+    --seed)
+      [[ $# -eq 2 ]] || { echo "usage: $0 --semantic [--seed UINT64 | --replay PATH]" >&2; exit 2; }
+      semantic_seed=$2
+      [[ "$semantic_seed" =~ ^(0|[1-9][0-9]{0,19})$ ]] || { echo "--seed must be a decimal uint64" >&2; exit 2; }
+      python3 -c 'import sys; value=int(sys.argv[1]); sys.exit(0 if value <= (1 << 64) - 1 else 1)' "$semantic_seed" \
+        || { echo "--seed must be a decimal uint64" >&2; exit 2; }
+      ;;
+    --replay)
+      [[ $# -eq 2 ]] || { echo "usage: $0 --semantic [--seed UINT64 | --replay PATH]" >&2; exit 2; }
+      semantic_replay=$2
+      [[ -f "$semantic_replay" ]] || { echo "--replay must name an existing regular file" >&2; exit 2; }
+      ;;
+    *) echo "usage: $0 --semantic [--seed UINT64 | --replay PATH]" >&2; exit 2 ;;
+  esac
 elif [[ $# -ne 0 ]]; then
-  echo "usage: $0 [--agentic]" >&2
+  echo "usage: $0 [--agentic | --semantic [--seed UINT64 | --replay PATH]]" >&2
   exit 2
 fi
 
-for command in docker flock kubectl go tmux python3 sha256sum timeout; do
+keep_cluster=0
+if [[ "${SURFSK8S_E2E_KEEP_CLUSTER:-0}" == "1" ]]; then
+  [[ "$mode" == "agentic" ]] || { echo "cluster preservation is allowed only in --agentic mode" >&2; exit 2; }
+  keep_cluster=1
+elif [[ "${SURFSK8S_E2E_KEEP_CLUSTER:-0}" != "0" ]]; then
+  echo "SURFSK8S_E2E_KEEP_CLUSTER must be exactly 0 or 1" >&2
+  exit 2
+fi
+
+for command in docker flock kubectl go tmux python3 realpath sha256sum timeout; do
   command -v "$command" >/dev/null 2>&1 || { echo "required command missing: $command" >&2; exit 2; }
 done
+if [[ -n "$semantic_replay" ]]; then
+  semantic_replay=$(realpath -- "$semantic_replay")
+  [[ $(stat -c '%s' -- "$semantic_replay") -le 1048576 ]] || { echo "--replay exceeds 1 MiB" >&2; exit 2; }
+  python3 - "$ROOT_DIR/scripts/e2e" "$semantic_replay" <<'PY' || { echo "--replay failed schema preflight" >&2; exit 2; }
+import pathlib
+import sys
+sys.path.insert(0, sys.argv[1])
+import semantic_driver
+semantic_driver.read_trace(pathlib.Path(sys.argv[2]))
+PY
+fi
 timeout 15s docker info >/dev/null 2>&1 || { echo "Docker daemon is unavailable" >&2; exit 2; }
 
 umask 077
@@ -85,7 +126,6 @@ mkdir -p "$xdg_config"
 chmod 700 "$state_root" "$xdg_config"
 export XDG_CONFIG_HOME="$xdg_config"
 export KUBECONFIG="$kubeconfig"
-keep_cluster=0
 raw_capture_max_bytes=${SURFSK8S_E2E_RAW_CAPTURE_MAX_BYTES:-$DEFAULT_RAW_CAPTURE_MAX_BYTES}
 if [[ ! "$raw_capture_max_bytes" =~ ^[1-9][0-9]{0,9}$ ]] || (( raw_capture_max_bytes > 1024 * 1024 * 1024 )); then
   echo "SURFSK8S_E2E_RAW_CAPTURE_MAX_BYTES must be 1..1073741824" >&2
@@ -93,14 +133,6 @@ if [[ ! "$raw_capture_max_bytes" =~ ^[1-9][0-9]{0,9}$ ]] || (( raw_capture_max_b
 fi
 capture_helper="$ROOT_DIR/scripts/e2e/bounded_capture.py"
 [[ -x "$capture_helper" ]] || { echo "bounded capture helper is not executable: $capture_helper" >&2; exit 2; }
-
-if [[ "${SURFSK8S_E2E_KEEP_CLUSTER:-0}" == "1" ]]; then
-  [[ "$mode" == "agentic" ]] || { echo "cluster preservation is allowed only in --agentic mode" >&2; exit 2; }
-  keep_cluster=1
-elif [[ "${SURFSK8S_E2E_KEEP_CLUSTER:-0}" != "0" ]]; then
-  echo "SURFSK8S_E2E_KEEP_CLUSTER must be exactly 0 or 1" >&2
-  exit 2
-fi
 
 k3d_bin=$("$ROOT_DIR/scripts/e2e/bootstrap-k3d.sh" | tail -n 1)
 [[ -x "$k3d_bin" ]] || { echo "bootstrap did not return an executable k3d path" >&2; exit 1; }
@@ -275,13 +307,24 @@ timeout 120s go build -trimpath -o "$binary" "$ROOT_DIR"
   echo "mode=$mode"
 } >"$artifact_root/environment.txt"
 
+driver_args=(
+  --binary "$binary" --kubeconfig "$kubeconfig" --xdg-config "$xdg_config"
+  --context "$context_name" --namespace "$NAMESPACE" --cluster "$cluster_name"
+  --session "$session" --tmux-socket "$tmux_socket" --artifacts "$artifact_root"
+  --capture-helper "$capture_helper" --raw-capture-max-bytes "$raw_capture_max_bytes"
+  --process-state-dir "$state_root"
+)
 if [[ "$mode" == "scripted" ]]; then
-  timeout "$TOTAL_TIMEOUT_SECONDS" python3 "$ROOT_DIR/scripts/e2e/pty_driver.py" \
-    --binary "$binary" --kubeconfig "$kubeconfig" --xdg-config "$xdg_config" \
-    --context "$context_name" --namespace "$NAMESPACE" --cluster "$cluster_name" \
-    --session "$session" --tmux-socket "$tmux_socket" --artifacts "$artifact_root" \
-    --capture-helper "$capture_helper" --raw-capture-max-bytes "$raw_capture_max_bytes" \
-    --process-state-dir "$state_root"
+  timeout "$TOTAL_TIMEOUT_SECONDS" python3 "$ROOT_DIR/scripts/e2e/pty_driver.py" "${driver_args[@]}"
+elif [[ "$mode" == "semantic" ]]; then
+  semantic_args=()
+  if [[ -n "$semantic_seed" ]]; then
+    semantic_args=(--seed "$semantic_seed")
+  elif [[ -n "$semantic_replay" ]]; then
+    semantic_args=(--replay "$semantic_replay")
+  fi
+  timeout "$TOTAL_TIMEOUT_SECONDS" python3 "$ROOT_DIR/scripts/e2e/semantic_driver.py" \
+    "${semantic_args[@]}" "${driver_args[@]}"
 else
   ttl="${SURFSK8S_AGENTIC_TTL_SECONDS:-1800}"
   if [[ ! "$ttl" =~ ^[1-9][0-9]{0,4}$ ]] || (( ttl > 86400 )); then

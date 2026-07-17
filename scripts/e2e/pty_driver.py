@@ -72,6 +72,10 @@ class Driver:
         self.raw_capture_max_bytes = getattr(args, "raw_capture_max_bytes", 16 * 1024 * 1024)
         if self.raw_capture_max_bytes <= 0:
             raise ValueError("raw capture maximum must be positive")
+        self.raw_capture_name = getattr(args, "raw_capture_name", "raw-terminal.log")
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", self.raw_capture_name) is None:
+            raise ValueError(f"unsafe raw capture basename: {self.raw_capture_name!r}")
+        self.expected_preferences_query = getattr(args, "expected_preferences_query", "=scalable")
         self.capture_helper = pathlib.Path(
             getattr(args, "capture_helper", pathlib.Path(__file__).with_name("bounded_capture.py"))
         ).resolve()
@@ -188,8 +192,10 @@ class Driver:
         last_session = preferences.get("last_session")
         if not isinstance(last_session, dict):
             raise ScenarioFailure(f"isolated preferences have no last_session: {path}")
-        if last_session.get("namespace") != self.namespace or last_session.get("query") != "=scalable":
-            raise ScenarioFailure(f"unexpected isolated last_session in {path}: {last_session!r}")
+        if last_session.get("namespace") != self.namespace:
+            raise ScenarioFailure(f"unexpected isolated last_session namespace in {path}: {last_session!r}")
+        if self.expected_preferences_query is not None and last_session.get("query") != self.expected_preferences_query:
+            raise ScenarioFailure(f"unexpected isolated last_session query in {path}: {last_session!r}")
         print(f"isolated preferences verified: {path}", flush=True)
 
     def record_owned_process_identity(self, name: str, pid: int) -> None:
@@ -224,7 +230,7 @@ class Driver:
         tmux_pane_pid = int(self.tmux("display-message", "-p", "-t", self.session, "#{pane_pid}").stdout.strip())
         self.record_owned_process_identity("tmux-server", tmux_server_pid)
         self.record_owned_process_identity("tmux-pane", tmux_pane_pid)
-        raw = self.artifacts / "raw-terminal.log"
+        raw = self.artifacts / self.raw_capture_name
         capture_command = bounded_capture_command(raw, self.capture_helper, self.raw_capture_max_bytes)
         self.tmux("pipe-pane", "-t", self.session, "-o", capture_command)
 

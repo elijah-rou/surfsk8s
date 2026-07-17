@@ -1,50 +1,65 @@
 # Live k3d + real-PTY E2E
 
-The live layer validates surfsk8s against a real Kubernetes API through a real terminal. It complements, and does not replace, the deterministic model tests in [`tui-model-tests.md`](tui-model-tests.md).
+surfsk8s has three complementary test layers:
 
-## Why the old smoke was retired
+1. Fast Go model, Python policy, and static checks. These do not need Docker.
+2. `scripts/e2e/run.sh`, a fixed real-k3d/PTY acceptance replay.
+3. `scripts/e2e/run.sh --semantic`, a credential-free semantic observation-action walk. It classifies each live capture, derives safe UI actions from visible evidence plus explicitly recorded environment capabilities such as resize, chooses with a seeded local PRNG, executes one action, and waits for a semantic outcome.
 
-The previous `smoke.sh`/Expect path could inspect an existing context, read the default kubeconfig, create or reuse a fixed cluster, switch between fake and live behavior, and synchronize with fixed delays. Expect was not installed in the supported environment. Those properties made a pass environment-dependent and made its blast radius unclear. The replacement always owns one uniquely named k3d cluster, one kubeconfig, one config directory, and one tmux session.
+The manual `scripts/e2e/agentic.sh` protocol remains available for humans and agents. It is not the automated semantic policy and can retain a cluster only when explicitly requested.
 
-## Prerequisites and warning
+## Prerequisites and blast radius
 
-Required: a healthy Docker daemon, Linux amd64 or arm64, `kubectl`, Go, tmux, Python 3, `timeout`, `flock` (from util-linux), and either curl or wget. CI validates `flock` before running tests. k3d is downloaded at the pinned version into `${SURFSK8S_E2E_CACHE:-$XDG_CACHE_HOME/surfsk8s-e2e}`. The bootstrap checks both the release checksum manifest and a checksum pinned in the script. Set `K3D_BIN=/absolute/path/to/k3d` to use an already installed executable.
+Required: a healthy Docker daemon, Linux amd64 or arm64, `kubectl`, Go, tmux, Python 3, `timeout`, `flock`, and either curl or wget. k3d is downloaded at a pinned version into `${SURFSK8S_E2E_CACHE:-$XDG_CACHE_HOME/surfsk8s-e2e}`. Set `K3D_BIN=/absolute/path/to/k3d` to use an installed executable.
 
-The cluster image is `rancher/k3s:v1.35.1-k3s1@sha256:634920385dc89133d80060b3a3b2b547e734d711ef8c050e6b5c6341800d53fd`. This is the OCI multi-architecture index digest reported by Docker Hub; `docker buildx imagetools inspect rancher/k3s:v1.35.1-k3s1` verifies that the index includes both `linux/amd64` and `linux/arm64` manifests.
+The pinned cluster image is `rancher/k3s:v1.35.1-k3s1@sha256:634920385dc89133d80060b3a3b2b547e734d711ef8c050e6b5c6341800d53fd`.
 
-**Docker access is effectively host-root access.** The harness creates containers and a Docker network. Run it only against a Docker daemon where that is acceptable. It never runs `k3d cluster delete --all`, does not use the default kubeconfig, and fixtures use no privileged containers, host mounts, host networking, host ports, or Secrets.
+**Docker access is effectively host-root access.** Run this harness only against a Docker daemon where creating containers, a network, and a volume is acceptable. It never deletes all k3d clusters, reads or changes the default kubeconfig, uses host ports/mounts/networking, or creates Secrets. Every run owns a random validated cluster, kubeconfig, XDG tree, tmux socket/session, and cleanup state.
 
-## Scripted acceptance run
+## Fixed scripted run
 
 ```bash
 ./scripts/e2e/bootstrap-k3d.sh
 ./scripts/e2e/run.sh
 ```
 
-`run.sh` has per-operation deadlines and a bounded PTY run. It creates a random validated `surfsk8s-e2e-*` cluster, disables k3d's default-kubeconfig update and context switch, writes a mode-0600 temporary kubeconfig, passes the isolated `XDG_CONFIG_HOME` explicitly to the TUI, builds once, applies fixtures, and waits on API readiness conditions. Every kubectl invocation supplies that kubeconfig and context explicitly. The harness fingerprints the host preferences and default kubeconfig/context before and after each run. EXIT, ERR, INT, and TERM paths invoke the generated cleanup helper under a kernel-released `flock`. Cleanup distinguishes a failed k3d probe from confirmed absence, stops only the dedicated tmux socket/session, deletes only the exact cluster, and post-verifies the cluster plus exact Docker containers, network, image volume, tmux identities, and state. Any ambiguous or partial cleanup retains the kubeconfig, helper, and state and prints a shell-quoted retry command.
+The scripted driver follows a fixed scenario. It covers connection, resize, Pods and logs, generic Widget discovery/detail/watch churn, Deployment scale cancellation and mutation, API verification, preferences, quit, and `SURFSK8S_SHELL_RESTORED rc=0`.
 
-The tmux driver polls interpreted screen text at semantic checkpoints through a collision-resistant dedicated tmux socket. It records each screen plus the raw terminal stream. It checks startup selection and connection, catalog rendering, small/large resizes, Pod navigation and a stable log marker, CRD discovery/list/detail and printer columns, watch add/delete churn, a visible Deployment scale hint at 160 columns, cancelled then confirmed scaling, an independent API replica/rollout assertion, isolated preference persistence, bounded quit, and a shell-restoration marker after alternate-screen exit.
+## Automated semantic run and replay
 
-Artifacts are written under `artifacts/e2e/<run-id>/`. On failure they include the last screen, Kubernetes resources/events, CRD schema, bounded container logs, and cluster lifecycle logs. Raw terminal capture retains the first 16 MiB by default in both scripted and agentic modes and then drains without writing more; a sibling `.truncated` marker records truncation. Set `SURFSK8S_E2E_RAW_CAPTURE_MAX_BYTES` to an explicit value from 1 through 1 GiB. The isolated kubeconfig and XDG state remain in the temporary state directory and are never copied into artifacts. Avoid adding Secrets to fixtures or diagnostic collection.
+```bash
+./scripts/e2e/run.sh --semantic --seed 743389
+./scripts/e2e/run.sh --semantic --replay /path/to/semantic-decisions.jsonl
+```
 
-## Agentic exploratory protocol
+The seed is a validated decimal uint64. The default is `743389`. Replay and seed are mutually exclusive. Replay provisions a fresh isolated cluster and fails at the first state, fingerprint, affordance, target, candidate, action, result, schema, or ordering divergence. Generated context names and volatile ages are canonicalized. A divergence writes a bounded diagnostic screen.
 
-This mode provisions the same isolated cluster and fixture set, then leaves a bounded real tmux PTY for semantic exploration:
+The classifier uses stable titles, prompts, footers, and fixture rows. It rejects unknown or ambiguous screens. Candidate actions are rebuilt from each observation and sorted before PRNG selection. UI actions require a currently visible affordance and target; resize is modeled separately as an explicit tmux environment capability recorded in the trace. Finder selection first filters to one exact allowlisted resource, then permits Enter only when that resource is the sole visible resource target. The allowlist covers context selection/connection, command and resource finders, fixture-backed visible resource selection, visible-row details, Pod logs, filter/back/Escape, terminal resize, confirmation cancellation, transient Widget watch churn, and quit/restoration. Delete, edit, exec, port-forward, restart, scale, and arbitrary external actions are unrepresentable. The only mutation is an explicit-kubeconfig, seed-named transient Widget used to prove watch behavior. The driver asserts prior absence, creates rather than applies, captures its UID, deletes with a UID precondition, proves post-absence, and independently snapshots baseline fixture UIDs/values and Deployment replicas.
+
+No screen coordinates, fixed-delay synchronization, hidden fixed route, model call, network API credential, or host preference is used. Polling is semantic at 200 ms. Bounds are 48 actions, five minutes wall time, 30 seconds per transition/watch outcome, 2 MiB per interpreted capture, six repeated identical states, eight decisions without a new goal, 64 trace records, 1 MiB JSONL, 16 MiB raw terminal by default, and live tmux checks before capture/input. Semantic mode rejects `SURFSK8S_E2E_KEEP_CLUSTER=1`.
+
+Required goals include connection, at least three post-connect states, a route chosen from visible candidates, a visible-row detail, back navigation, resize, the fixture log marker, generic Widget watch observation, resource finder coverage, at least ten actions, unchanged API fixtures, clean quit, and shell restoration.
+
+## Isolation, cleanup, and artifacts
+
+`run.sh` is the sole cluster, kubeconfig, XDG, tmux, and cleanup boundary. Every kubectl command passes the isolated kubeconfig and context. The wrapper fingerprints host preferences and the default kubeconfig/current context before and after a run. EXIT, ERR, INT, and TERM invoke ownership-scoped cleanup under `flock`, then verify exact cluster, Docker, tmux, and state absence. Ambiguous cleanup retains recovery state and prints an exact retry command.
+
+Artifacts are under `artifacts/e2e/<run-id>/` or `SURFSK8S_E2E_ARTIFACTS`. Semantic success includes `semantic-decisions.jsonl`, `semantic-goals.json`, bounded screens/raw terminal, `kubectl-assertions.log`, environment, cleanup, and host-restoration evidence. Trace records contain schema, seed, step, a bounded structured canonical fingerprint, sorted visible affordances/targets, environment capabilities, candidates, chosen action, result state/fingerprint, and new goals. Canonical semantic rows preserve meaningful titles, rows, values, and warnings while normalizing generated contexts, Pod names, timestamps, and ages. Records exclude full screens, kubeconfig, credentials, environment values, and volatile paths. Never add Secrets to fixtures or diagnostics.
+
+## Manual agentic protocol
 
 ```bash
 SURFSK8S_AGENTIC_TTL_SECONDS=1800 ./scripts/e2e/agentic.sh
 ```
 
-The command prints shell-quoted kubeconfig, context, namespace, state, XDG, artifacts, tmux socket/session, explicit `kubectl`, `tmux capture-pane`, `tmux send-keys`, attach, quit, and full cleanup commands. Inspect interpreted state with `capture-pane`; send literal queries with `send-keys -l`; send keys such as `Enter`, `Escape`, `Up`, or `C-c` by name. The default TTL is 30 minutes and the maximum is 24 hours. Exiting the UI, signals, errors, and TTL expiry run the same ownership-scoped cleanup helper.
-
-Preservation is opt-in only:
+This provisions the same boundary and prints explicit tmux/kubectl/cleanup commands for manual exploration. TTL defaults to 30 minutes and is capped at 24 hours. Only this mode permits explicit preservation:
 
 ```bash
 SURFSK8S_E2E_KEEP_CLUSTER=1 SURFSK8S_AGENTIC_TTL_SECONDS=1800 ./scripts/e2e/agentic.sh
 ```
 
-The final output and `KEEP.txt` print the exact kubeconfig, config-state, and cleanup-helper command. This leaves credentials on disk and a running cluster; execute the printed helper when finished. It removes the dedicated tmux server, exact cluster, and exact state tree. Scripted CI never enables keep mode.
+Preservation leaves credentials and a cluster on disk. Run the printed cleanup helper when finished.
 
 ## CI
 
-`.github/workflows/live-e2e.yml` runs model tests and the live suite on pull requests and manual dispatch. It pins action commits, Go, kubectl, k3d, and the k3s multi-arch digest; bounds the live phase to 14 minutes inside the 20-minute job so TERM cleanup has reserved time; serializes redundant branch runs; and attempts failure/cancellation artifact upload with `always()` where GitHub still schedules steps. Kubeconfigs and Secrets are excluded by design and artifact patterns.
+`.github/workflows/live-e2e.yml` reports `deterministic-tests`, `scripted-live`, and `semantic-live` separately. The two live jobs depend on deterministic tests and then run in parallel on independent runners/clusters. Actions, Go, kubectl, k3d, and k3s are pinned. Live commands have a 14-minute outer timeout inside a 20-minute job, reserving cleanup time. Semantic CI uses seed `743389`, no secrets or model environment, and keep mode disabled. Failure diagnostics and short-retention semantic success evidence exclude kubeconfig, XDG, and Secret material.
