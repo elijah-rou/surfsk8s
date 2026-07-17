@@ -135,6 +135,100 @@ class SemanticDriverContractTest(unittest.TestCase):
             ("open_resource:widgets",),
         )
 
+    def test_open_detail_exact_filters_each_named_row_before_enter(self):
+        mixed_screen = (
+            "surfsk8s · ns:surfsk8s-e2e · widgets · surfsk8s.dev · 2 rows\n"
+            "alpha blue Stable\nscalable 1/1 Available\nenter open  / filter  esc back"
+        )
+
+        class FakeDriver:
+            context = "ctx"
+            session = "session"
+
+            def __init__(self, artifacts, target):
+                self.artifacts = artifacts
+                self.target = target
+                self.events = []
+
+            def tmux(self, *args, **kwargs):
+                return types.SimpleNamespace(returncode=0)
+
+            def literal(self, value):
+                self.events.append(("literal", value))
+
+            def key(self, value):
+                self.events.append(("key", value))
+
+            def capture(self):
+                self.events.append(("capture", self.target))
+                return (
+                    "surfsk8s · ns:surfsk8s-e2e · widgets · surfsk8s.dev · 1 row\n"
+                    f"{self.target} selected\n/={self.target}\nenter open  / filter  esc back"
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            for target in ("alpha", "scalable"):
+                with self.subTest(target=target):
+                    driver = FakeDriver(pathlib.Path(temporary), target)
+                    walk = self.semantic.SemanticWalkthrough(driver, 1)
+                    walk.deadline = time.monotonic() + 2
+                    before = self.semantic.observe(mixed_screen, driver.context)
+                    old_interval = self.semantic.POLL_INTERVAL_SECONDS
+                    self.semantic.POLL_INTERVAL_SECONDS = 0
+                    try:
+                        predicate = walk._execute(self.semantic.Action(f"open_detail:{target}"), before)
+                    finally:
+                        self.semantic.POLL_INTERVAL_SECONDS = old_interval
+                    actions = [event for event in driver.events if event[0] != "capture"]
+                    self.assertEqual(
+                        actions,
+                        [("literal", "/"), ("literal", f"={target}"), ("key", "Enter"), ("key", "Enter")],
+                    )
+                    expected = self.semantic.observe(
+                        f"surfsk8s · resource details\nName: {target}\nesc back", driver.context
+                    )
+                    wrong = self.semantic.observe(
+                        "surfsk8s · resource details\nName: other\nesc back", driver.context
+                    )
+                    self.assertTrue(predicate(expected))
+                    self.assertFalse(predicate(wrong))
+                    filtered = self.semantic.observe(driver.capture(), driver.context)
+                    after_detail = frozenset({"visible_detail"})
+                    self.assertEqual(
+                        tuple(action.id for action in self.semantic.candidates(filtered, after_detail)),
+                        ("clear_filter",),
+                    )
+
+    def test_connect_catalog_predicate_does_not_depend_on_crd_count(self):
+        before = self.semantic.observe(
+            "surfsk8s · select contexts\n[x] ctx\nenter connect  q quit", "ctx"
+        )
+
+        class FakeDriver:
+            context = "ctx"
+            session = "session"
+
+            def tmux(self, *args, **kwargs):
+                return types.SimpleNamespace(returncode=0)
+
+            def key(self, value):
+                self.key_sent = value
+
+        walk = self.semantic.SemanticWalkthrough(FakeDriver(), 1)
+        predicate = walk._execute(self.semantic.Action("connect"), before)
+        catalog = self.semantic.observe(
+            "surfsk8s · resource catalog\nGROUPS\n2 Running\n1 Running\nCRDs  (999 resources)\n"
+            "r resource-find  enter open group  : commands",
+            "ctx",
+        )
+        no_crds = self.semantic.observe(
+            "surfsk8s · resource catalog\nGROUPS\n2 Running\n1 Running\n"
+            "r resource-find  enter open group  : commands",
+            "ctx",
+        )
+        self.assertTrue(predicate(catalog))
+        self.assertFalse(predicate(no_crds))
+
     def test_no_candidates_and_destructive_replay_actions_fail_closed(self):
         observation = self.semantic.observe(
             "surfsk8s · resource details\nalpha blue\nd delete", "k3d-surfsk8s-e2e-one"

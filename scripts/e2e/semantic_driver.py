@@ -119,7 +119,7 @@ class Progress:
 
 
 SAFE_BASE_ACTIONS = frozenset({
-    "select_context", "connect", "open_commands", "open_resource_finder", "back",
+    "select_context", "connect", "open_commands", "open_resource_finder", "back", "clear_filter",
     "open_logs", "resize_small", "resize_large", "cancel_confirmation", "cancel_input",
     "widget_watch", "quit",
 })
@@ -251,6 +251,17 @@ def validate_action_id(action_id: str) -> str:
     raise SemanticFailure(f"unknown semantic action: {action_id}")
 
 
+def exact_detail_filter_target(observation: Observation) -> str | None:
+    match = re.search(r"(?m)^\s*/=(alpha|scalable|log-marker)\s*$", observation.canonical_screen)
+    if match is None:
+        return None
+    target = match.group(1)
+    detail_targets = {"alpha", "scalable", "log-marker"}
+    if set(observation.targets) & detail_targets != {target}:
+        return None
+    return target
+
+
 def candidates(observation: Observation, goals: frozenset[str]) -> tuple[Action, ...]:
     state = observation.state
     visible = set(observation.targets)
@@ -295,22 +306,30 @@ def candidates(observation: Observation, goals: frozenset[str]) -> tuple[Action,
         if not result and "back" in affordances:
             result.append(Action("back", 1))
     elif state == ScreenState.PODS_LIST:
-        if "log-marker" in visible and "open" in affordances and ({"visible_detail", "log_marker"} - goals):
-            result.append(Action("open_detail:log-marker", 20))
-        if "visible_detail" in goals and "back" in affordances:
-            result.append(Action("back", 5))
-        if not result and "back" not in affordances and "resize" in capabilities:
-            result.append(Action("resize_large", 30))
+        if exact_detail_filter_target(observation) is not None:
+            if "back" in affordances:
+                result.append(Action("clear_filter", 30))
+        else:
+            if "log-marker" in visible and "open" in affordances and ({"visible_detail", "log_marker"} - goals):
+                result.append(Action("open_detail:log-marker", 20))
+            if "visible_detail" in goals and "back" in affordances:
+                result.append(Action("back", 5))
+            if not result and "back" not in affordances and "resize" in capabilities:
+                result.append(Action("resize_large", 30))
     elif state == ScreenState.RESOURCE_LIST:
-        if "alpha" in visible and "widget_watch" not in goals:
-            result.append(Action("widget_watch", 25))
-        for target in ("alpha", "scalable"):
-            if target in visible and "open" in affordances and "visible_detail" not in goals:
-                result.append(Action(f"open_detail:{target}", 10))
-        if "widget_watch" in goals and "back" in affordances:
-            result.append(Action("back", 8))
-        if not result and "back" not in affordances and "resize" in capabilities:
-            result.append(Action("resize_large", 30))
+        if exact_detail_filter_target(observation) is not None:
+            if "back" in affordances:
+                result.append(Action("clear_filter", 30))
+        else:
+            if "alpha" in visible and "widget_watch" not in goals:
+                result.append(Action("widget_watch", 25))
+            for target in ("alpha", "scalable"):
+                if target in visible and "open" in affordances and "visible_detail" not in goals:
+                    result.append(Action(f"open_detail:{target}", 10))
+            if "visible_detail" in goals and "back" in affordances:
+                result.append(Action("back", 8))
+            if not result and "back" not in affordances and "resize" in capabilities:
+                result.append(Action("resize_large", 30))
     elif state == ScreenState.POD_DETAIL:
         if "logs" in affordances and "log_marker" not in goals:
             result.append(Action("open_logs", 30))
@@ -519,7 +538,7 @@ class SemanticWalkthrough:
                     observation.state == ScreenState.CATALOG
                     and "2 Running" in observation.canonical_screen
                     and "1 Running" in observation.canonical_screen
-                    and "CRDs  (73 resources)" in observation.canonical_screen
+                    and re.search(r"(?m)^\s*CRDs(?:\s|$)", observation.canonical_screen) is not None
                 )
             )
         elif action_id == "open_commands":
@@ -548,10 +567,27 @@ class SemanticWalkthrough:
             target = action_id.split(":", 1)[1]
             if target not in before.targets:
                 raise SemanticFailure(f"visible target disappeared before action: {target}")
+            self.driver.literal("/")
+            self.driver.literal(f"={target}")
+            selected = self._poll_unique_detail_target(before, target, len(self.records))
+            self.driver.key("Enter")
+            self._poll_unique_detail_target(selected, target, len(self.records))
             self.driver.key("Enter")
             expected = ScreenState.POD_DETAIL if target == "log-marker" else ScreenState.RESOURCE_DETAIL
-            return lambda observation: observation.state == expected
-        elif action_id in {"back", "cancel_confirmation", "cancel_input"}:
+            return lambda observation: observation.state == expected and target in observation.targets
+        elif action_id == "back":
+            self.driver.key("Escape")
+            return lambda observation: observation.state != before.state
+        elif action_id == "clear_filter":
+            if exact_detail_filter_target(before) is None:
+                raise SemanticFailure("clear_filter requires a unique exact-filtered detail row")
+            self.driver.key("Escape")
+            return lambda observation: (
+                observation.state == before.state
+                and observation.fingerprint != before.fingerprint
+                and exact_detail_filter_target(observation) is None
+            )
+        elif action_id in {"cancel_confirmation", "cancel_input"}:
             self.driver.key("Escape")
             return lambda observation: observation.state != before.state
         elif action_id == "open_logs":
@@ -570,6 +606,21 @@ class SemanticWalkthrough:
         else:
             raise AssertionError(f"safe action has no executor: {action_id}")
         return lambda observation: observation.fingerprint != before.fingerprint or observation.state != before.state
+
+    def _poll_unique_detail_target(self, before: Observation, target: str, step: int) -> Observation:
+        detail_targets = {"alpha", "scalable", "log-marker"}
+        if target not in detail_targets:
+            raise SemanticFailure(f"unsupported detail target: {target}")
+        exact_filter = f"={target}"
+        return self._poll_transition(
+            before,
+            lambda observation: (
+                observation.state == before.state
+                and set(observation.targets) & detail_targets == {target}
+                and exact_filter in observation.canonical_screen
+            ),
+            step,
+        )
 
     def _poll_transition(self, before: Observation, predicate: Callable[[Observation], bool], step: int) -> Observation:
         deadline = min(self.deadline, self.monotonic() + TRANSITION_DEADLINE_SECONDS)
