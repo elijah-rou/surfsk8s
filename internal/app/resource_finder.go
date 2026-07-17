@@ -225,6 +225,7 @@ func (a *App) openSelectedResourceFinderItem() tea.Cmd {
 	}
 	a.inputMode = inputModeSearch
 	a.filter.Deactivate()
-	a.openResourceList(resource)
-	return a.maybeRefreshResourceUsageCmd(time.Now())
+	openCmd := a.openResourceList(resource)
+	usageCmd := a.maybeRefreshResourceUsageCmd(time.Now())
+	return tea.Batch(openCmd, usageCmd)
 }

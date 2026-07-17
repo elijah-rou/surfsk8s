@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: surfsk8s-e2e
+---
+apiVersion: surfsk8s.dev/v1alpha1
+kind: Widget
+metadata:
+  name: alpha
+  namespace: surfsk8s-e2e
+spec:
+  color: blue
+status:
+  phase: Stable
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: log-marker
+  namespace: surfsk8s-e2e
+  labels:
+    app: log-marker
+spec:
+  automountServiceAccountToken: false
+  containers:
+    - name: logger
+      image: busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+      imagePullPolicy: IfNotPresent
+      command: ["sh", "-c"]
+      args:
+        - "touch /tmp/ready; echo SURFSK8S_E2E_LOG_MARKER_7d9f3a; exec sleep 3600"
+      readinessProbe:
+        exec:
+          command: ["test", "-f", "/tmp/ready"]
+        periodSeconds: 1
+        timeoutSeconds: 1
+      resources:
+        requests:
+          cpu: 5m
+          memory: 4Mi
+        limits:
+          cpu: 100m
+          memory: 32Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scalable
+  namespace: surfsk8s-e2e
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scalable
+  template:
+    metadata:
+      labels:
+        app: scalable
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: worker
+          image: busybox:1.36.1@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "touch /tmp/ready; exec sleep 3600"]
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/tmp/ready"]
+            periodSeconds: 1
+            timeoutSeconds: 1
+          resources:
+            requests:
+              cpu: 5m
+              memory: 4Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scalable
+  namespace: surfsk8s-e2e
+spec:
+  selector:
+    app: scalable
+  ports:
+    - name: status
+      port: 8080
+      targetPort: 8080

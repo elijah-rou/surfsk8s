@@ -1,4 +1,4 @@
-# TUI model tests and smoke
+# TUI model tests and live E2E
 
 ## Deterministic model tests (CI / agents)
 
@@ -15,6 +15,10 @@ timeout 240s go test -race ./... -count=1 -shuffle=on -timeout=180s
 
 Model tests use an offline harness (`modelHarness`) with channels/barriers — no sleeps, no live cluster, no PTY. Batch commands run concurrently to match Bubble Tea. `modelHarness.Resize` is exercised during generic-list loading, confirmation modals, and in-flight log requests (`TestModelScenarioResizePreservesTransientUIState`). Quit/`ctrl+c` cancel the app root context and any active log request (`TestQuitCancelsInFlightLogFetch`, `TestCtrlCCancelsInFlightGenericListFetch`) so in-flight fetches observe `ctx.Done` before shutdown.
 
-## PTY / expect smoke
+## Live Kubernetes / real-PTY layer
 
-`scripts/smoke.expect` is optional. This environment may lack `expect`, and the script is delay/cluster dependent. Prefer `TestHeadlessProgramStartupQuit` for CI-safe Bubble Tea loop coverage.
+```bash
+./scripts/e2e/run.sh
+```
+
+This separate acceptance layer uses a pinned k3d install, isolated kubeconfig/config state, deterministic fixtures, and a real tmux PTY. It validates terminal behavior and live API integration that the model harness intentionally does not simulate. See [`live-e2e.md`](live-e2e.md) for scenarios, safety boundaries, artifacts, CI, and agentic exploration.

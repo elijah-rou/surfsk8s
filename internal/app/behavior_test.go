@@ -1828,8 +1828,11 @@ func TestOpenSelectedResourceFinderItemOpensResource(t *testing.T) {
 	app.filter.Activate()
 
 	cmd := app.openSelectedResourceFinderItem()
-	if cmd != nil {
-		t.Fatalf("expected open resource command nil")
+	if cmd == nil {
+		t.Fatal("expected generic resource list fetch command")
+	}
+	if !app.genericListLoading {
+		t.Fatal("expected generic resource list loading state")
 	}
 	if got, want := app.screen, screenResourceList; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
@@ -2377,6 +2380,36 @@ func TestGenericResourceListIgnoresUnrelatedManagerChurn(t *testing.T) {
 	manager.BumpVersionForTest()
 	if app.shouldRefresh(time.Now()) {
 		t.Fatalf("generic list should ignore unrelated manager churn")
+	}
+}
+
+func TestGenericResourceListAppliesChurnWhenCatalogAndGenericVersionsCoincide(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	resource := cluster.ResourceKind{ID: "surfsk8s.dev/widgets", Display: "Widgets", Resource: "widgets", APIGroup: "surfsk8s.dev", Version: "v1alpha1", Kind: "Widget", Namespaced: true, Custom: true}
+	app.activeResource = resource
+	app.screen = screenResourceList
+	now := time.Now()
+	alpha := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "alpha"}, Cluster: "dev", Namespace: "default", Name: "alpha"}
+	app.applyGenericListRows([]cluster.GenericResourceRow{alpha}, now, resource.ID)
+	app.lastManagerVersion = 0
+
+	beta := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "surfsk8s.dev/v1alpha1",
+		"kind":       "Widget",
+		"metadata": map[string]interface{}{
+			"name": "beta", "namespace": "default", "resourceVersion": "2",
+		},
+	}}
+	manager.SetGenericResourceFixtureForTest(resource.ID, "dev", beta)
+	manager.BumpVersionForTest()
+	if got, want := manager.Version(), manager.GenericResourceVersion(resource.ID); got != want {
+		t.Fatalf("test requires coincident versions: catalog=%d generic=%d", got, want)
+	}
+
+	app.refreshResourceList(now.Add(time.Second))
+	if _, ok := app.genericRowsByKey[(cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "beta"}).String()]; !ok {
+		t.Fatal("matching generic churn was skipped when catalog and generic versions coincided")
 	}
 }
 

@@ -140,6 +140,24 @@ func assertUpdateDoesNotBlock(t *testing.T, done <-chan tea.Cmd) tea.Cmd {
 	}
 }
 
+func TestResourceFinderGenericSelectionStartsListFetch(t *testing.T) {
+	h := newModelHarness(t)
+	fake := newBlockingGenericBackend()
+	h.app.genericBackend = fake
+	resource := testGenericKind()
+	h.app.visibleResourceItems = []resourceFinderItem{{resource: resource, label: "Widgets"}}
+	h.app.setNavTable("RESOURCES", [][]string{{"Widgets"}})
+	t.Cleanup(fake.listBarrier.Release)
+
+	cmd := h.app.openSelectedResourceFinderItem()
+	if cmd == nil {
+		t.Fatal("generic resource finder selection did not return list fetch command")
+	}
+	if !h.app.genericListLoading {
+		t.Fatal("generic resource finder selection did not mark list loading")
+	}
+}
+
 func TestGenericListUpdateDoesNotBlock(t *testing.T) {
 	h := newModelHarness(t)
 	fake := newBlockingGenericBackend()

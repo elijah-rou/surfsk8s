@@ -16,7 +16,7 @@ Working, daily-usable build. Current scope includes:
 - quick resource finder, namespace picker, context scope picker
 - resource details, manifest editing, exec, pod/deployment/node logs, port-forward, scale, restart
 - pod/node resource usage in details and tables
-- live smoke coverage against real clusters plus fixture-based smoke tooling
+- deterministic model coverage plus isolated live k3d/real-PTY acceptance testing
 
 See `docs/POC.md` for original goals. See `docs/ROADMAP.md` for next-step improvements and pod-specific needs. See `docs/PERFORMANCE-PLAN.md` for the focused performance work plan.
 
@@ -235,19 +235,21 @@ Needed for richer metrics:
 - kubelet node proxy summary access for ephemeral usage
 - advertised GPU resources on pods/nodes for GPU allocation display
 
-## Smoke / Verification
+## Verification layers
 
-Main commands:
+Fast deterministic layer:
 
 ```bash
 go test ./...
-./scripts/smoke.sh aws-dev-virginia
 ```
 
-Smoke setup:
-- live smoke against explicit contexts is read-only
-- fixture smoke exists for richer action flows
-- local kind/fixture path currently depends on working Docker runtime
+Live Kubernetes and real-PTY acceptance layer:
+
+```bash
+./scripts/e2e/run.sh
+```
+
+The model suite stays offline and fast. The live suite creates an isolated, uniquely named k3d cluster and never reads or changes the default kubeconfig. Docker access has host-level security impact. Read [`docs/live-e2e.md`](docs/live-e2e.md) for prerequisites, blast-radius details, failure artifacts, CI behavior, and the separate bounded agentic protocol.
 
 ## Known Limits
 
@@ -255,7 +257,7 @@ Smoke setup:
 - ephemeral usage depends on kubelet summary reachability
 - actions shell out through `kubectl`, not direct API exec/port-forward streams yet
 - list usage bars are intentionally compact; exact formatting may still evolve
-- fixture smoke requires local Docker/orbstack health
+- live E2E requires a healthy local Docker daemon and supported Linux architecture
 
 ## License
 

@@ -1965,10 +1965,10 @@ func (a *App) refreshPods(now time.Time) {
 }
 
 func (a *App) refreshResourceList(now time.Time) tea.Cmd {
-	a.lastManagerVersion = a.manager.Version()
 	a.lastTick = now
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
+		a.lastManagerVersion = a.manager.Version()
 		var selectedKey string
 		if a.deploymentSelectionKey.Name != "" {
 			selectedKey = a.deploymentSelectionKey.String()
@@ -1995,6 +1995,7 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 		})
 		a.restoreDeploymentSelection(selectedKey, now)
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
+		a.lastManagerVersion = a.manager.Version()
 		var selectedKey string
 		if a.serviceSelectionKey.Name != "" {
 			selectedKey = a.serviceSelectionKey.String()
@@ -2021,6 +2022,7 @@ func (a *App) refreshResourceList(now time.Time) tea.Cmd {
 		})
 		a.restoreServiceSelection(selectedKey, now)
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
+		a.lastManagerVersion = a.manager.Version()
 		var selectedKey string
 		if a.nodeSelectionKey.Name != "" {
 			selectedKey = a.nodeSelectionKey.String()
