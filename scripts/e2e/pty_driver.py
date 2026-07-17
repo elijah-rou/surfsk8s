@@ -36,6 +36,19 @@ def context_is_selected(screen: str, context: str) -> bool:
     return re.search(r"(?m)^\s*\[x\]\s+" + re.escape(context) + r"(?:\s|$)", screen) is not None
 
 
+def scale_prompt_cancelled(screen: str) -> bool:
+    return "surfsk8s · resource details" in screen and "replicas>" not in screen
+
+
+def bounded_capture_command(output: pathlib.Path, helper: pathlib.Path, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        raise ValueError("raw capture maximum must be positive")
+    return (
+        f"{shell_quote(str(helper))} --output {shell_quote(str(output))} "
+        f"--max-bytes {max_bytes}"
+    )
+
+
 class ScenarioFailure(RuntimeError):
     pass
 
@@ -56,6 +69,14 @@ class Driver:
             raise ValueError(f"unsafe tmux socket name: {args.tmux_socket!r}")
         self.session = args.session
         self.tmux_socket = args.tmux_socket
+        self.raw_capture_max_bytes = getattr(args, "raw_capture_max_bytes", 16 * 1024 * 1024)
+        if self.raw_capture_max_bytes <= 0:
+            raise ValueError("raw capture maximum must be positive")
+        self.capture_helper = pathlib.Path(
+            getattr(args, "capture_helper", pathlib.Path(__file__).with_name("bounded_capture.py"))
+        ).resolve()
+        process_state_dir = getattr(args, "process_state_dir", None)
+        self.process_state_dir = pathlib.Path(process_state_dir).resolve() if process_state_dir else None
         self.checkpoint_index = 0
         self.started = False
 
@@ -116,6 +137,19 @@ class Driver:
             time.sleep(POLL_INTERVAL_SECONDS)
         raise ScenarioFailure(f"scenario {name!r} timed out waiting for {forbidden!r} to disappear")
 
+    def wait_scale_prompt_cancelled(self, timeout: float = 20.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            screen = self.capture()
+            if scale_prompt_cancelled(screen):
+                self.checkpoint_index += 1
+                path = self.artifacts / f"{self.checkpoint_index:02d}-scale-cancelled.screen.txt"
+                path.write_text(screen + "\n", encoding="utf-8")
+                print("checkpoint scale-cancelled: replicas prompt absent", flush=True)
+                return
+            time.sleep(POLL_INTERVAL_SECONDS)
+        raise ScenarioFailure("scenario 'scale-cancelled' timed out waiting for replicas prompt to disappear")
+
     def literal(self, value: str) -> None:
         self.tmux("send-keys", "-t", self.session, "-l", value)
 
@@ -158,6 +192,19 @@ class Driver:
             raise ScenarioFailure(f"unexpected isolated last_session in {path}: {last_session!r}")
         print(f"isolated preferences verified: {path}", flush=True)
 
+    def record_owned_process_identity(self, name: str, pid: int) -> None:
+        if self.process_state_dir is None:
+            return
+        if pid <= 0:
+            raise ScenarioFailure(f"invalid owned process PID: {pid}")
+        stat_fields = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
+        if len(stat_fields) < 22:
+            raise ScenarioFailure(f"incomplete process identity for PID {pid}")
+        self.process_state_dir.mkdir(parents=True, exist_ok=True)
+        (self.process_state_dir / f"{name}.identity").write_text(
+            f"{pid} {stat_fields[21]}\n", encoding="utf-8"
+        )
+
     def start(self) -> None:
         if not self.binary.is_file() or not os.access(self.binary, os.X_OK):
             raise ScenarioFailure(f"binary is not executable: {self.binary}")
@@ -174,8 +221,13 @@ class Driver:
             check=True, timeout=10,
         )
         self.started = True
+        tmux_server_pid = int(self.tmux("display-message", "-p", "-t", self.session, "#{pid}").stdout.strip())
+        tmux_pane_pid = int(self.tmux("display-message", "-p", "-t", self.session, "#{pane_pid}").stdout.strip())
+        self.record_owned_process_identity("tmux-server", tmux_server_pid)
+        self.record_owned_process_identity("tmux-pane", tmux_pane_pid)
         raw = self.artifacts / "raw-terminal.log"
-        self.tmux("pipe-pane", "-t", self.session, "-o", f"cat >> {shell_quote(str(raw))}")
+        capture_command = bounded_capture_command(raw, self.capture_helper, self.raw_capture_max_bytes)
+        self.tmux("pipe-pane", "-t", self.session, "-o", capture_command)
 
     def run(self) -> None:
         self.start()
@@ -229,7 +281,7 @@ class Driver:
         self.literal("s")
         self.checkpoint("scale-prompt-cancel", ("replicas>",))
         self.key("Escape")
-        self.checkpoint("scale-cancelled", ("surfsk8s · resource details", "scalable"))
+        self.wait_scale_prompt_cancelled()
         self.literal("s")
         self.checkpoint("scale-prompt", ("replicas>",))
         self.key("C-u")
@@ -280,6 +332,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--session", required=True)
     parser.add_argument("--tmux-socket", required=True)
     parser.add_argument("--artifacts", required=True)
+    parser.add_argument("--capture-helper", required=True)
+    parser.add_argument("--raw-capture-max-bytes", required=True, type=int)
+    parser.add_argument("--process-state-dir", required=True)
     return parser.parse_args()
 
 

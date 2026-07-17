@@ -598,7 +598,7 @@ func (a *App) persistSession() {
 	}
 }
 
-func (a *App) applyResumeSession(now time.Time) {
+func (a *App) applyResumeSession(now time.Time) tea.Cmd {
 	session := a.resumeSession
 	a.namespace = session.Namespace
 	a.contextScope = session.ContextScope
@@ -609,29 +609,30 @@ func (a *App) applyResumeSession(now time.Time) {
 			a.resourceQuery = session.Query
 			a.screen = screenGroupResources
 			a.refreshGroupResources()
-			return
+			return nil
 		}
 	case "pods":
-		a.openResourceList(builtinPodResourceKind())
+		openCmd := a.openResourceList(builtinPodResourceKind())
 		a.podQuery = session.Query
 		a.refreshPods(now)
-		return
+		return openCmd
 	case "resource-list":
 		if resource, ok := a.catalogResourceByID(session.ResourceID); ok {
 			a.resourceQuery2 = session.Query
-			a.openResourceList(resource)
+			openCmd := a.openResourceList(resource)
 			a.setCurrentQuery(session.Query)
-			a.refreshCurrentScreen(now)
-			return
+			refreshCmd := a.refreshCurrentScreen(now)
+			return tea.Batch(openCmd, refreshCmd)
 		}
 	case "catalog":
 		a.catalogQuery = session.Query
 		a.screen = screenCatalog
 		a.refreshCatalog()
-		return
+		return nil
 	}
 	a.screen = screenCatalog
 	a.refreshCatalog()
+	return nil
 }
 
 func (a *App) catalogGroupByName(name string) (cluster.ResourceGroup, bool) {
@@ -692,14 +693,15 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.persistSelectedContexts()
 		a.statusMessage = fmt.Sprintf("connected %d context(s)", len(typed.contexts))
+		var resumeCmd tea.Cmd
 		if a.resumeOnStart {
 			a.resumeOnStart = false
-			a.applyResumeSession(time.Now())
+			resumeCmd = a.applyResumeSession(time.Now())
 		} else {
 			a.screen = screenCatalog
 			a.refreshCatalog()
 		}
-		return a, a.maybeRefreshCatalogOverviewCmd(time.Now())
+		return a, tea.Batch(resumeCmd, a.maybeRefreshCatalogOverviewCmd(time.Now()))
 
 	case actionResultMsg:
 		if typed.err != nil {
@@ -1103,8 +1105,8 @@ func (a *App) updateGroupKeys(msg tea.KeyMsg) tea.Cmd {
 	case "enter":
 		index := a.navTable.SelectedIndex()
 		if index >= 0 && index < len(a.visibleResources) {
-			a.openResourceList(a.visibleResources[index])
-			return a.maybeRefreshResourceUsageCmd(time.Now())
+			openCmd := a.openResourceList(a.visibleResources[index])
+			return tea.Batch(openCmd, a.maybeRefreshResourceUsageCmd(time.Now()))
 		}
 	case "+":
 		if resource, ok := a.selectedGroupResource(); ok {

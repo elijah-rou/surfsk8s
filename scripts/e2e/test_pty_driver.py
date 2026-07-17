@@ -7,6 +7,8 @@ import unittest
 
 MODULE_PATH = pathlib.Path(__file__).with_name("pty_driver.py")
 SPEC = importlib.util.spec_from_file_location("pty_driver", MODULE_PATH)
+if SPEC is None or SPEC.loader is None:
+    raise RuntimeError(f"cannot load PTY driver module: {MODULE_PATH}")
 pty_driver = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pty_driver)
 
@@ -18,6 +20,14 @@ class NormalizeScreenTest(unittest.TestCase):
 
     def test_removes_backspace_overstrikes(self):
         self.assertEqual(pty_driver.normalize_terminal("ab\bcd"), "acd")
+
+
+class ScaleCancellationTest(unittest.TestCase):
+    def test_requires_replicas_prompt_to_disappear_from_detail_screen(self):
+        detail = "surfsk8s · resource details\nscalable\ns scale"
+        self.assertTrue(pty_driver.scale_prompt_cancelled(detail))
+        self.assertFalse(pty_driver.scale_prompt_cancelled(detail + "\nreplicas> 1"))
+        self.assertFalse(pty_driver.scale_prompt_cancelled("surfsk8s · resource catalog"))
 
 
 class ContextSelectionTest(unittest.TestCase):
@@ -60,6 +70,15 @@ class ScriptedLaunchTest(unittest.TestCase):
             )
             self.assertIn(pty_driver.shell_quote(str(binary.resolve())), launch)
             self.assertIn(pty_driver.shell_quote(str(kubeconfig.resolve())), launch)
+
+    def test_raw_capture_command_uses_explicit_byte_cap(self):
+        command = pty_driver.bounded_capture_command(
+            pathlib.Path("/tmp/raw terminal.log"), pathlib.Path("/tmp/capture helper.py"), 4096
+        )
+        self.assertIn("'/tmp/capture helper.py'", command)
+        self.assertIn("--max-bytes 4096", command)
+        self.assertIn("'/tmp/raw terminal.log'", command)
+        self.assertNotIn("cat >>", command)
 
 
 class ClusterNameTest(unittest.TestCase):

@@ -158,6 +158,57 @@ func TestResourceFinderGenericSelectionStartsListFetch(t *testing.T) {
 	}
 }
 
+func TestGroupedCatalogGenericSelectionExecutesInitialListFetch(t *testing.T) {
+	h := newModelHarness(t)
+	fake := newBlockingGenericBackend()
+	fake.rows = []cluster.GenericResourceRow{{
+		Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "grouped"}, Name: "grouped", Namespace: "default", Cluster: "dev",
+	}}
+	fake.listBarrier.Release()
+	h.app.genericBackend = fake
+	h.app.screen = screenGroupResources
+	h.app.visibleResources = []cluster.ResourceKind{testGenericKind()}
+	h.app.setNavTable("RESOURCES", [][]string{{"Widgets"}})
+
+	cmd := h.app.updateGroupKeys(tea.KeyMsg{Type: tea.KeyEnter})
+	h.RunAll(cmd)
+
+	if fake.listCalls != 1 {
+		t.Fatalf("generic list calls = %d, want 1", fake.listCalls)
+	}
+	if h.app.genericListLoading {
+		t.Fatal("generic list remained loading after grouped catalog fetch completed")
+	}
+	if len(h.app.sortedGenericRows) != 1 || h.app.sortedGenericRows[0].Name != "grouped" {
+		t.Fatalf("generic rows = %#v, want fetched grouped row", h.app.sortedGenericRows)
+	}
+}
+
+func TestRestoredGenericSessionExecutesInitialListFetch(t *testing.T) {
+	h := newModelHarness(t)
+	fake := newBlockingGenericBackend()
+	fake.rows = []cluster.GenericResourceRow{{
+		Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "restored"}, Name: "restored", Namespace: "default", Cluster: "dev",
+	}}
+	fake.listBarrier.Release()
+	h.app.genericBackend = fake
+	h.app.resumeOnStart = true
+	h.app.resumeSession = sessionPreference{Screen: "resource-list", ResourceID: "apps/statefulsets", Namespace: "default", Query: "restored"}
+
+	_, cmd := h.app.Update(connectResultMsg{contexts: []string{"dev"}})
+	h.RunAll(cmd)
+
+	if fake.listCalls != 1 {
+		t.Fatalf("generic list calls = %d, want 1", fake.listCalls)
+	}
+	if h.app.genericListLoading {
+		t.Fatal("generic list remained loading after restored-session fetch completed")
+	}
+	if len(h.app.sortedGenericRows) != 1 || h.app.sortedGenericRows[0].Name != "restored" {
+		t.Fatalf("generic rows = %#v, want fetched restored row", h.app.sortedGenericRows)
+	}
+}
+
 func TestGenericListUpdateDoesNotBlock(t *testing.T) {
 	h := newModelHarness(t)
 	fake := newBlockingGenericBackend()
