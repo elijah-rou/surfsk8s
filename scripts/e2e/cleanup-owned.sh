@@ -59,6 +59,17 @@ fail() {
 retry_message() {
   printf 'owned cleanup incomplete; recovery state retained. Retry cleanup: %q %q\n' "$0" "$config" >&2
 }
+process_start_time() {
+  local pid=$1
+  local stat
+  local -a fields
+  IFS= read -r stat <"/proc/$pid/stat" || return 1
+  stat=${stat##*) }
+  read -r -a fields <<<"$stat"
+  (( ${#fields[@]} >= 20 )) || return 1
+  [[ "${fields[19]}" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "${fields[19]}"
+}
 
 # Stop only the dedicated server and session. The exact socket path is removed
 # only after the dedicated server has been asked to exit.
@@ -78,8 +89,11 @@ for identity in "$state_root/tmux-server.identity" "$state_root/tmux-pane.identi
     continue
   fi
   if [[ -r "/proc/$pid/stat" ]]; then
-    current_start_time=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true)
-    [[ "$current_start_time" != "$start_time" ]] || fail "owned process still running: pid=$pid identity=$identity"
+    if ! current_start_time=$(process_start_time "$pid"); then
+      fail "cannot verify owned process identity: pid=$pid identity=$identity"
+    elif [[ "$current_start_time" == "$start_time" ]]; then
+      fail "owned process still running: pid=$pid identity=$identity"
+    fi
   fi
 done
 

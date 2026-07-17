@@ -37,6 +37,15 @@ class ContextSelectionTest(unittest.TestCase):
         self.assertFalse(pty_driver.context_is_selected(screen.replace("[x]", "[ ]"), "k3d-surfsk8s-e2e-test"))
 
 
+class ProcessIdentityTest(unittest.TestCase):
+    def test_proc_stat_start_time_handles_spaces_in_process_name(self):
+        fields_after_name = ["S"] + [str(value) for value in range(4, 23)]
+        fields_after_name[19] = "98765"
+        stat = "123 (tmux: server) " + " ".join(fields_after_name) + "\n"
+
+        self.assertEqual(pty_driver.proc_stat_start_time(stat), 98765)
+
+
 class ScriptedLaunchTest(unittest.TestCase):
     def test_launch_explicitly_passes_isolated_xdg_config_home(self):
         with tempfile.TemporaryDirectory() as temporary:

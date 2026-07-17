@@ -141,6 +141,40 @@ class CleanupSafetyTest(unittest.TestCase):
             )
             self.assertEqual(repeated.returncode, 0, repeated.stderr)
 
+    def test_process_identity_with_space_in_name_detects_running_process(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            harness = CleanupHarness(pathlib.Path(temporary))
+            process = subprocess.Popen(
+                [
+                    "python3",
+                    "-c",
+                    "import pathlib, time; pathlib.Path('/proc/self/comm').write_text('tmux: server'); print('ready', flush=True); time.sleep(30)",
+                ],
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                self.assertIsNotNone(process.stdout)
+                self.assertEqual(process.stdout.readline(), "ready\n")
+                stat = pathlib.Path(f"/proc/{process.pid}/stat").read_text(encoding="utf-8")
+                fields_after_name = stat.rsplit(") ", 1)[1].split()
+                self.assertGreaterEqual(len(fields_after_name), 20)
+                start_time = fields_after_name[19]
+                (harness.state / "tmux-server.identity").write_text(
+                    f"{process.pid} {start_time}\n", encoding="utf-8"
+                )
+
+                result = harness.run()
+
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("owned process still running", result.stderr)
+                self.assertTrue(harness.state.is_dir())
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+
     def test_cluster_list_failure_retains_all_recovery_state(self):
         with tempfile.TemporaryDirectory() as temporary:
             harness = CleanupHarness(pathlib.Path(temporary))

@@ -35,6 +35,17 @@ file_fingerprint() {
     printf 'missing\n'
   fi
 }
+process_start_time() {
+  local pid=$1
+  local stat
+  local -a fields
+  IFS= read -r stat <"/proc/$pid/stat" || return 1
+  stat=${stat##*) }
+  read -r -a fields <<<"$stat"
+  (( ${#fields[@]} >= 20 )) || return 1
+  [[ "${fields[19]}" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "${fields[19]}"
+}
 kubeconfig_fingerprint() {
   local path
   local -a paths
@@ -285,8 +296,8 @@ else
   tmux -L "$tmux_socket" pipe-pane -t "$session" -o "$capture_pipeline"
   tmux_server_pid=$(tmux -L "$tmux_socket" display-message -p -t "$session" '#{pid}')
   tmux_pane_pid=$(tmux -L "$tmux_socket" display-message -p -t "$session" '#{pane_pid}')
-  printf '%s %s\n' "$tmux_server_pid" "$(awk '{print $22}' "/proc/$tmux_server_pid/stat")" >"$state_root/tmux-server.identity"
-  printf '%s %s\n' "$tmux_pane_pid" "$(awk '{print $22}' "/proc/$tmux_pane_pid/stat")" >"$state_root/tmux-pane.identity"
+  printf '%s %s\n' "$tmux_server_pid" "$(process_start_time "$tmux_server_pid")" >"$state_root/tmux-server.identity"
+  printf '%s %s\n' "$tmux_pane_pid" "$(process_start_time "$tmux_pane_pid")" >"$state_root/tmux-pane.identity"
   printf 'Agentic E2E is live for at most %ss.\n' "$ttl"
   printf 'Cluster: %q\n' "$cluster_name"
   printf 'Kubeconfig: %q\n' "$kubeconfig"

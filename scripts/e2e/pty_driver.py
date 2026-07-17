@@ -197,12 +197,11 @@ class Driver:
             return
         if pid <= 0:
             raise ScenarioFailure(f"invalid owned process PID: {pid}")
-        stat_fields = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").split()
-        if len(stat_fields) < 22:
-            raise ScenarioFailure(f"incomplete process identity for PID {pid}")
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        start_time = proc_stat_start_time(stat)
         self.process_state_dir.mkdir(parents=True, exist_ok=True)
         (self.process_state_dir / f"{name}.identity").write_text(
-            f"{pid} {stat_fields[21]}\n", encoding="utf-8"
+            f"{pid} {start_time}\n", encoding="utf-8"
         )
 
     def start(self) -> None:
@@ -315,6 +314,22 @@ class Driver:
             except Exception:
                 pass
             self.tmux("kill-session", "-t", self.session, check=False)
+
+
+def proc_stat_start_time(stat: str) -> int:
+    try:
+        fields_after_name = stat.rsplit(") ", 1)[1].split()
+    except IndexError as error:
+        raise ScenarioFailure("invalid /proc process stat") from error
+    if len(fields_after_name) < 20:
+        raise ScenarioFailure("incomplete /proc process stat")
+    try:
+        start_time = int(fields_after_name[19])
+    except ValueError as error:
+        raise ScenarioFailure("invalid /proc process start time") from error
+    if start_time <= 0:
+        raise ScenarioFailure("invalid /proc process start time")
+    return start_time
 
 
 def shell_quote(value: str) -> str:
