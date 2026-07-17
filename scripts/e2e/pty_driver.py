@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import pathlib
 import re
@@ -13,6 +14,7 @@ import time
 
 ANSI_CSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][0-2A-Z0-9]|[@-_])")
 CLUSTER_NAME = re.compile(r"^surfsk8s-e2e-[a-z0-9](?:[a-z0-9-]{0,16}[a-z0-9])?$")
+TMUX_NAME = re.compile(r"^surfsk8s-e2e-[A-Za-z0-9_-]{1,48}$")
 MAX_CAPTURE_BYTES = 2 * 1024 * 1024
 POLL_INTERVAL_SECONDS = 0.2
 
@@ -30,6 +32,10 @@ def normalize_terminal(value: str) -> str:
     return "\n".join(line.rstrip() for line in value.splitlines()).strip()
 
 
+def context_is_selected(screen: str, context: str) -> bool:
+    return re.search(r"(?m)^\s*\[x\]\s+" + re.escape(context) + r"(?:\s|$)", screen) is not None
+
+
 class ScenarioFailure(RuntimeError):
     pass
 
@@ -38,18 +44,24 @@ class Driver:
     def __init__(self, args: argparse.Namespace) -> None:
         self.binary = pathlib.Path(args.binary).resolve()
         self.kubeconfig = pathlib.Path(args.kubeconfig).resolve()
+        self.xdg_config = pathlib.Path(args.xdg_config).resolve()
         self.artifacts = pathlib.Path(args.artifacts).resolve()
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.context = args.context
         self.namespace = args.namespace
         self.cluster = validate_cluster_name(args.cluster)
+        if TMUX_NAME.fullmatch(args.session) is None:
+            raise ValueError(f"unsafe tmux session name: {args.session!r}")
+        if TMUX_NAME.fullmatch(args.tmux_socket) is None:
+            raise ValueError(f"unsafe tmux socket name: {args.tmux_socket!r}")
         self.session = args.session
+        self.tmux_socket = args.tmux_socket
         self.checkpoint_index = 0
         self.started = False
 
     def tmux(self, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            ["tmux", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            ["tmux", "-L", self.tmux_socket, *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=10, check=check,
         )
 
@@ -123,27 +135,43 @@ class Driver:
         self.key("Enter")
         self.checkpoint(checkpoint, (expected, query))
 
+    def build_launch_script(self) -> str:
+        return (
+            "#!/usr/bin/env bash\nset -uo pipefail\n"
+            f"env TERM={shell_quote('xterm-256color')} XDG_CONFIG_HOME={shell_quote(str(self.xdg_config))} "
+            f"{shell_quote(str(self.binary))} -kubeconfig {shell_quote(str(self.kubeconfig))} "
+            f"-context {shell_quote(self.context)} -namespace {shell_quote(self.namespace)}\n"
+            "rc=$?\nprintf 'SURFSK8S_SHELL_RESTORED rc=%s\\n' \"$rc\"\n"
+            "exec bash --noprofile --norc\n"
+        )
+
+    def assert_isolated_preferences(self) -> None:
+        path = self.xdg_config / "surfsk8s" / "preferences.json"
+        try:
+            preferences = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ScenarioFailure(f"isolated preferences missing or invalid: {path}: {error}") from error
+        last_session = preferences.get("last_session")
+        if not isinstance(last_session, dict):
+            raise ScenarioFailure(f"isolated preferences have no last_session: {path}")
+        if last_session.get("namespace") != self.namespace or last_session.get("query") != "=scalable":
+            raise ScenarioFailure(f"unexpected isolated last_session in {path}: {last_session!r}")
+        print(f"isolated preferences verified: {path}", flush=True)
+
     def start(self) -> None:
         if not self.binary.is_file() or not os.access(self.binary, os.X_OK):
             raise ScenarioFailure(f"binary is not executable: {self.binary}")
         if not self.kubeconfig.is_file():
             raise ScenarioFailure(f"kubeconfig missing: {self.kubeconfig}")
+        if not self.xdg_config.is_dir():
+            raise ScenarioFailure(f"XDG config directory missing: {self.xdg_config}")
         self.tmux("kill-session", "-t", self.session, check=False)
         launch = self.artifacts / "launch.sh"
-        launch.write_text(
-            "#!/usr/bin/env bash\nset -uo pipefail\n"
-            f"{shell_quote(str(self.binary))} -kubeconfig {shell_quote(str(self.kubeconfig))} "
-            f"-context {shell_quote(self.context)} -namespace {shell_quote(self.namespace)}\n"
-            "rc=$?\nprintf 'SURFSK8S_SHELL_RESTORED rc=%s\\n' \"$rc\"\n"
-            "exec bash --noprofile --norc\n",
-            encoding="utf-8",
-        )
+        launch.write_text(self.build_launch_script(), encoding="utf-8")
         launch.chmod(0o700)
-        env = os.environ.copy()
-        env["TERM"] = "xterm-256color"
         subprocess.run(
-            ["tmux", "new-session", "-d", "-s", self.session, "-x", "140", "-y", "36", str(launch)],
-            env=env, check=True, timeout=10,
+            ["tmux", "-L", self.tmux_socket, "new-session", "-d", "-s", self.session, "-x", "140", "-y", "36", str(launch)],
+            check=True, timeout=10,
         )
         self.started = True
         raw = self.artifacts / "raw-terminal.log"
@@ -151,8 +179,9 @@ class Driver:
 
     def run(self) -> None:
         self.start()
-        self.checkpoint("startup-context-picker", ("surfsk8s · select contexts", self.context))
-        self.key("Space")
+        startup = self.checkpoint("startup-context-picker", ("surfsk8s · select contexts", self.context))
+        if not context_is_selected(startup, self.context):
+            self.key("Space")
         self.checkpoint("startup-context-selected", ("[x]", self.context))
         self.key("Enter")
         self.checkpoint("connected-catalog", ("surfsk8s · resource catalog",))
@@ -196,7 +225,7 @@ class Driver:
         self.command("deployments", ("surfsk8s", "deployments"), "deployments-list")
         self.exact_filter("scalable", "scalable", "deployment-filter")
         self.key("Enter")
-        self.checkpoint("deployment-detail", ("surfsk8s · resource details", "scalable"))
+        self.checkpoint("deployment-detail", ("surfsk8s · resource details", "scalable", "s scale"))
         self.literal("s")
         self.checkpoint("scale-prompt-cancel", ("replicas>",))
         self.key("Escape")
@@ -223,6 +252,7 @@ class Driver:
 
         self.literal("q")
         self.checkpoint("quit-restoration", ("SURFSK8S_SHELL_RESTORED rc=0",), 20)
+        self.assert_isolated_preferences()
         print("all scripted live PTY scenarios passed", flush=True)
 
     def cleanup(self) -> None:
@@ -243,10 +273,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", required=True)
     parser.add_argument("--kubeconfig", required=True)
+    parser.add_argument("--xdg-config", required=True)
     parser.add_argument("--context", required=True)
     parser.add_argument("--namespace", required=True)
     parser.add_argument("--cluster", required=True)
     parser.add_argument("--session", required=True)
+    parser.add_argument("--tmux-socket", required=True)
     parser.add_argument("--artifacts", required=True)
     return parser.parse_args()
 

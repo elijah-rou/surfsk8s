@@ -2450,7 +2450,7 @@ func (a *App) resourceDetailFooter() string {
 	podTableHints := "enter open-pod  +/- width  0 collapse  "
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		return prefix + podTableHints + "n ns-find  s scale  r restart  e edit  d delete  l logs  esc back"
+		return "s scale  r restart  " + prefix + podTableHints + "n ns-find  e edit  d delete  l logs  esc back"
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
 		return prefix + podTableHints + "n ns-find  p port-forward  e edit  d delete  esc back"
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":

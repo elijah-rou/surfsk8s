@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
+import argparse
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 
 MODULE_PATH = pathlib.Path(__file__).with_name("pty_driver.py")
@@ -16,6 +18,48 @@ class NormalizeScreenTest(unittest.TestCase):
 
     def test_removes_backspace_overstrikes(self):
         self.assertEqual(pty_driver.normalize_terminal("ab\bcd"), "acd")
+
+
+class ContextSelectionTest(unittest.TestCase):
+    def test_detects_current_context_selected_by_default(self):
+        screen = "CONTEXTS\n [x] k3d-surfsk8s-e2e-test  (cluster · user) current"
+        self.assertTrue(pty_driver.context_is_selected(screen, "k3d-surfsk8s-e2e-test"))
+        self.assertFalse(pty_driver.context_is_selected(screen.replace("[x]", "[ ]"), "k3d-surfsk8s-e2e-test"))
+
+
+class ScriptedLaunchTest(unittest.TestCase):
+    def test_launch_explicitly_passes_isolated_xdg_config_home(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            binary = root / "surfsk8s binary"
+            kubeconfig = root / "kube'config"
+            xdg_config = root / "xdg config"
+            artifacts = root / "artifacts"
+            binary.write_text("", encoding="utf-8")
+            binary.chmod(0o700)
+            kubeconfig.write_text("", encoding="utf-8")
+            args = argparse.Namespace(
+                binary=str(binary),
+                kubeconfig=str(kubeconfig),
+                xdg_config=str(xdg_config),
+                context="k3d-surfsk8s-e2e-test",
+                namespace="surfsk8s-e2e",
+                cluster="surfsk8s-e2e-test",
+                session="surfsk8s-e2e-session",
+                tmux_socket="surfsk8s-e2e-socket",
+                artifacts=str(artifacts),
+            )
+
+            driver = pty_driver.Driver(args)
+            launch = driver.build_launch_script()
+
+            self.assertIn(
+                "env TERM='xterm-256color' XDG_CONFIG_HOME="
+                + pty_driver.shell_quote(str(xdg_config.resolve())),
+                launch,
+            )
+            self.assertIn(pty_driver.shell_quote(str(binary.resolve())), launch)
+            self.assertIn(pty_driver.shell_quote(str(kubeconfig.resolve())), launch)
 
 
 class ClusterNameTest(unittest.TestCase):

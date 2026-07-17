@@ -19,9 +19,9 @@ Required: a healthy Docker daemon, Linux amd64 or arm64, `kubectl`, Go, tmux, Py
 ./scripts/e2e/run.sh
 ```
 
-`run.sh` has per-operation deadlines and a bounded PTY run. It creates a random validated `surfsk8s-e2e-*` cluster, disables k3d's default-kubeconfig update and context switch, writes a mode-0600 temporary kubeconfig, isolates `XDG_CONFIG_HOME`, builds once, applies fixtures, and waits on API readiness conditions. Every kubectl invocation supplies that kubeconfig and context explicitly. EXIT, ERR, INT, and TERM paths delete exactly the owned cluster.
+`run.sh` has per-operation deadlines and a bounded PTY run. It creates a random validated `surfsk8s-e2e-*` cluster, disables k3d's default-kubeconfig update and context switch, writes a mode-0600 temporary kubeconfig, passes the isolated `XDG_CONFIG_HOME` explicitly to the TUI, builds once, applies fixtures, and waits on API readiness conditions. Every kubectl invocation supplies that kubeconfig and context explicitly. The harness fingerprints the host preferences and default kubeconfig/context before and after each run. EXIT, ERR, INT, and TERM paths invoke the generated cleanup helper, which stops only the run's dedicated tmux socket/session, deletes exactly the owned cluster, and removes exactly the temporary state tree.
 
-The tmux driver polls interpreted screen text at semantic checkpoints. It records each screen plus the raw terminal stream. It checks startup selection and connection, catalog rendering, small/large resizes, Pod navigation and a stable log marker, CRD discovery/list/detail and printer columns, watch add/delete churn, cancelled then confirmed Deployment scale, an independent API replica/rollout assertion, bounded quit, and a shell-restoration marker after alternate-screen exit.
+The tmux driver polls interpreted screen text at semantic checkpoints through a collision-resistant dedicated tmux socket. It records each screen plus the raw terminal stream. It checks startup selection and connection, catalog rendering, small/large resizes, Pod navigation and a stable log marker, CRD discovery/list/detail and printer columns, watch add/delete churn, a visible Deployment scale hint at 160 columns, cancelled then confirmed scaling, an independent API replica/rollout assertion, isolated preference persistence, bounded quit, and a shell-restoration marker after alternate-screen exit.
 
 Artifacts are written under `artifacts/e2e/<run-id>/`. On failure they include the last screen, Kubernetes resources/events, CRD schema, bounded container logs, and cluster lifecycle logs. The isolated kubeconfig and XDG state remain in the temporary state directory and are never copied into artifacts. Avoid adding Secrets to fixtures or diagnostic collection.
 
@@ -33,7 +33,7 @@ This mode provisions the same isolated cluster and fixture set, then leaves a bo
 SURFSK8S_AGENTIC_TTL_SECONDS=1800 ./scripts/e2e/agentic.sh
 ```
 
-The command prints exact `tmux capture-pane`, `tmux send-keys`, attach, quit, and cleanup commands with the generated session and cluster names. Inspect interpreted state with `capture-pane`; send literal queries with `send-keys -l`; send keys such as `Enter`, `Escape`, `Up`, or `C-c` by name. The default TTL is 30 minutes and the maximum is 24 hours. Exiting the UI, signals, errors, and TTL expiry clean the session and cluster.
+The command prints shell-quoted kubeconfig, context, namespace, state, XDG, artifacts, tmux socket/session, explicit `kubectl`, `tmux capture-pane`, `tmux send-keys`, attach, quit, and full cleanup commands. Inspect interpreted state with `capture-pane`; send literal queries with `send-keys -l`; send keys such as `Enter`, `Escape`, `Up`, or `C-c` by name. The default TTL is 30 minutes and the maximum is 24 hours. Exiting the UI, signals, errors, and TTL expiry run the same ownership-scoped cleanup helper.
 
 Preservation is opt-in only:
 
@@ -41,7 +41,7 @@ Preservation is opt-in only:
 SURFSK8S_E2E_KEEP_CLUSTER=1 SURFSK8S_AGENTIC_TTL_SECONDS=1800 ./scripts/e2e/agentic.sh
 ```
 
-The final output and `KEEP.txt` print the exact kubeconfig, config-state, and deletion commands. This leaves credentials on disk and a running cluster; execute the printed cleanup command when finished. Scripted CI never enables keep mode.
+The final output and `KEEP.txt` print the exact kubeconfig, config-state, and cleanup-helper command. This leaves credentials on disk and a running cluster; execute the printed helper when finished. It removes the dedicated tmux server, exact cluster, and exact state tree. Scripted CI never enables keep mode.
 
 ## CI
 

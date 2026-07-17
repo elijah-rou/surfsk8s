@@ -20,7 +20,36 @@ done
 timeout 15s docker info >/dev/null 2>&1 || { echo "Docker daemon is unavailable" >&2; exit 2; }
 
 umask 077
-run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+original_xdg_config_home=${XDG_CONFIG_HOME-}
+original_kubeconfig=${KUBECONFIG-}
+host_config_root=${original_xdg_config_home:-$HOME/.config}
+host_preferences="$host_config_root/surfsk8s/preferences.json"
+host_kubeconfig=${original_kubeconfig:-$HOME/.kube/config}
+file_fingerprint() {
+  local path=$1
+  if [[ -f "$path" ]]; then
+    sha256sum -- "$path" | awk '{print $1}'
+  else
+    printf 'missing\n'
+  fi
+}
+kubeconfig_fingerprint() {
+  local path
+  local -a paths
+  IFS=: read -r -a paths <<<"$host_kubeconfig"
+  for path in "${paths[@]}"; do
+    printf '%s\0%s\n' "$path" "$(file_fingerprint "$path")"
+  done | sha256sum | awk '{print $1}'
+}
+host_preferences_before=$(file_fingerprint "$host_preferences")
+host_kubeconfig_before=$(kubeconfig_fingerprint)
+if [[ -n "$original_kubeconfig" ]]; then
+  host_context_before=$(timeout 10s env KUBECONFIG="$original_kubeconfig" kubectl config current-context 2>/dev/null || true)
+else
+  host_context_before=$(timeout 10s env -u KUBECONFIG kubectl config current-context 2>/dev/null || true)
+fi
+
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
 pid_suffix=$(printf '%05d' "$(( $$ % 100000 ))")
 cluster_name="surfsk8s-e2e-$(date -u +%H%M%S)-$pid_suffix-$(od -An -N2 -tx1 /dev/urandom | tr -d ' \n')"
 [[ ${#cluster_name} -le 32 && "$cluster_name" =~ ^surfsk8s-e2e-[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?$ ]] || {
@@ -34,12 +63,15 @@ state_root=$(mktemp -d "${TMPDIR:-/tmp}/surfsk8s-e2e.XXXXXX")
 kubeconfig="$state_root/kubeconfig"
 xdg_config="$state_root/xdg-config"
 binary="$state_root/surfsk8s"
-session="surfsk8s-e2e-${run_id:9:12}"
+session="surfsk8s-e2e-${run_id:9:5}-${run_id:16:12}"
+tmux_socket="surfsk8s-e2e-${run_id:9:5}-${run_id:16:12}"
+tmux_socket_path="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$tmux_socket"
+[[ "$session" =~ ^surfsk8s-e2e-[A-Za-z0-9_-]{1,48}$ ]] || { echo "generated unsafe tmux session: $session" >&2; exit 2; }
+[[ "$tmux_socket" =~ ^surfsk8s-e2e-[A-Za-z0-9_-]{1,48}$ ]] || { echo "generated unsafe tmux socket: $tmux_socket" >&2; exit 2; }
 mkdir -p "$xdg_config"
 chmod 700 "$state_root" "$xdg_config"
 export XDG_CONFIG_HOME="$xdg_config"
 export KUBECONFIG="$kubeconfig"
-created=0
 keep_cluster=0
 if [[ "${SURFSK8S_E2E_KEEP_CLUSTER:-0}" == "1" ]]; then
   [[ "$mode" == "agentic" ]] || { echo "cluster preservation is allowed only in --agentic mode" >&2; exit 2; }
@@ -52,6 +84,50 @@ fi
 k3d_bin=$("$ROOT_DIR/scripts/e2e/bootstrap-k3d.sh" | tail -n 1)
 [[ -x "$k3d_bin" ]] || { echo "bootstrap did not return an executable k3d path" >&2; exit 1; }
 context_name="k3d-$cluster_name"
+cleanup_helper="$state_root/cleanup-owned-e2e.sh"
+printf -v quoted_tmux_socket '%q' "$tmux_socket"
+printf -v quoted_tmux_socket_path '%q' "$tmux_socket_path"
+printf -v quoted_session '%q' "$session"
+printf -v quoted_k3d_bin '%q' "$k3d_bin"
+printf -v quoted_cluster_name '%q' "$cluster_name"
+printf -v quoted_kubeconfig '%q' "$kubeconfig"
+printf -v quoted_state_root '%q' "$state_root"
+printf -v quoted_state_parent '%q' "$(dirname "$state_root")"
+cat >"$cleanup_helper" <<EOF
+#!/usr/bin/env bash
+set -uo pipefail
+tmux_socket=$quoted_tmux_socket
+tmux_socket_path=$quoted_tmux_socket_path
+session=$quoted_session
+k3d_bin=$quoted_k3d_bin
+cluster_name=$quoted_cluster_name
+kubeconfig=$quoted_kubeconfig
+state_root=$quoted_state_root
+state_parent=$quoted_state_parent
+status=0
+[[ "\$cluster_name" =~ ^surfsk8s-e2e-[a-z0-9]([a-z0-9-]{0,16}[a-z0-9])?\$ ]] || { echo "refusing unsafe cluster name: \$cluster_name" >&2; exit 2; }
+[[ "\$tmux_socket" =~ ^surfsk8s-e2e-[A-Za-z0-9_-]{1,48}\$ ]] || { echo "refusing unsafe tmux socket: \$tmux_socket" >&2; exit 2; }
+[[ "\$session" =~ ^surfsk8s-e2e-[A-Za-z0-9_-]{1,48}\$ ]] || { echo "refusing unsafe tmux session: \$session" >&2; exit 2; }
+[[ "\$(dirname "\$state_root")" == "\$state_parent" && "\$(basename "\$state_root")" == surfsk8s-e2e.* ]] || { echo "refusing unsafe state path: \$state_root" >&2; exit 2; }
+if ! mkdir "\$state_root/.cleanup-lock" 2>/dev/null; then
+  for _ in {1..200}; do
+    [[ ! -e "\$state_root" ]] && exit 0
+    sleep 0.1
+  done
+  echo "timed out waiting for owned cleanup: \$state_root" >&2
+  exit 1
+fi
+tmux -L "\$tmux_socket" kill-session -t "\$session" >/dev/null 2>&1 || true
+tmux -L "\$tmux_socket" kill-server >/dev/null 2>&1 || true
+[[ "\$(basename "\$tmux_socket_path")" == "\$tmux_socket" ]] || { echo "refusing unsafe tmux socket path: \$tmux_socket_path" >&2; exit 2; }
+rm -f -- "\$tmux_socket_path"
+if timeout 20s "\$k3d_bin" cluster list --no-headers 2>/dev/null | awk '{print \$1}' | grep -Fxq "\$cluster_name"; then
+  timeout 90s env KUBECONFIG="\$kubeconfig" "\$k3d_bin" cluster delete "\$cluster_name" || status=1
+fi
+rm -rf -- "\$state_root"
+exit "\$status"
+EOF
+chmod 700 "$cleanup_helper"
 
 k() {
   timeout 120s kubectl --kubeconfig "$kubeconfig" --context "$context_name" \
@@ -79,31 +155,62 @@ capture_diagnostics() {
     [[ -n "$container_id" ]] || continue
     timeout 10s docker logs --tail 500 "$container_id" >"$artifact_root/docker-$container_id.log" 2>&1 || true
   done <"$artifact_root/docker-containers.txt"
-  tmux capture-pane -p -J -t "$session" -S - >"$artifact_root/failure.screen.txt" 2>&1 || true
+  tmux -L "$tmux_socket" capture-pane -p -J -t "$session" -S - >"$artifact_root/failure.screen.txt" 2>&1 || true
 }
 
 cleanup() {
   local status=$?
+  local host_context_after
+  local host_kubeconfig_after
+  local host_preferences_after
   trap - EXIT INT TERM ERR
   if (( status != 0 )); then
     capture_diagnostics "exit-$status"
   fi
-  tmux kill-session -t "$session" >/dev/null 2>&1 || true
-  if (( created == 1 && keep_cluster == 0 )); then
-    timeout 90s "$k3d_bin" cluster delete "$cluster_name" >"$artifact_root/cluster-delete.log" 2>&1 || {
-      echo "failed to delete exact E2E cluster $cluster_name; see $artifact_root/cluster-delete.log" >&2
-      status=1
-    }
-  fi
   if (( keep_cluster == 0 )); then
-    rm -rf "$state_root"
+    if [[ -x "$cleanup_helper" ]]; then
+      "$cleanup_helper" >"$artifact_root/cleanup.log" 2>&1 || {
+        echo "failed to clean exact E2E ownership; see $artifact_root/cleanup.log" >&2
+        status=1
+      }
+    elif tmux -L "$tmux_socket" has-session -t "$session" 2>/dev/null || [[ -e "$state_root" ]] || timeout 20s "$k3d_bin" cluster list --no-headers 2>/dev/null | awk '{print $1}' | grep -Fxq "$cluster_name"; then
+      echo "cleanup helper is missing while owned resources remain" >&2
+      status=1
+    else
+      echo "owned resources were already removed by the cleanup helper"
+    fi
   else
+    tmux -L "$tmux_socket" kill-session -t "$session" >/dev/null 2>&1 || true
+    tmux -L "$tmux_socket" kill-server >/dev/null 2>&1 || true
+    rm -f -- "$tmux_socket_path"
     {
-      echo "KEPT cluster=$cluster_name"
-      echo "KUBECONFIG=$kubeconfig"
-      echo "XDG_CONFIG_HOME=$xdg_config"
-      echo "cleanup: $k3d_bin cluster delete $cluster_name && rm -rf $state_root"
+      printf 'KEPT cluster=%q\n' "$cluster_name"
+      printf 'KUBECONFIG=%q\n' "$kubeconfig"
+      printf 'XDG_CONFIG_HOME=%q\n' "$xdg_config"
+      printf 'cleanup: %q\n' "$cleanup_helper"
     } | tee "$artifact_root/KEEP.txt"
+  fi
+
+  host_preferences_after=$(file_fingerprint "$host_preferences")
+  host_kubeconfig_after=$(kubeconfig_fingerprint)
+  if [[ -n "$original_kubeconfig" ]]; then
+    host_context_after=$(timeout 10s env KUBECONFIG="$original_kubeconfig" kubectl config current-context 2>/dev/null || true)
+  else
+    host_context_after=$(timeout 10s env -u KUBECONFIG kubectl config current-context 2>/dev/null || true)
+  fi
+  {
+    printf 'host_preferences_before=%s\n' "$host_preferences_before"
+    printf 'host_preferences_after=%s\n' "$host_preferences_after"
+    printf 'host_kubeconfig_before=%s\n' "$host_kubeconfig_before"
+    printf 'host_kubeconfig_after=%s\n' "$host_kubeconfig_after"
+    printf 'host_context_before=%q\n' "$host_context_before"
+    printf 'host_context_after=%q\n' "$host_context_after"
+  } >"$artifact_root/host-restoration.txt"
+  if [[ "$host_preferences_after" != "$host_preferences_before" || "$host_kubeconfig_after" != "$host_kubeconfig_before" || "$host_context_after" != "$host_context_before" ]]; then
+    echo "host preferences or default kubeconfig/context changed; see $artifact_root/host-restoration.txt" >&2
+    status=1
+  else
+    echo "host preferences and default kubeconfig/context unchanged"
   fi
   echo "E2E artifacts: $artifact_root"
   exit "$status"
@@ -126,7 +233,6 @@ fi
 
 echo "creating isolated cluster $cluster_name with $K3S_IMAGE"
 # From this point cleanup owns the exact generated name, including partial creates.
-created=1
 timeout 150s "$k3d_bin" cluster create "$cluster_name" \
   --image "$K3S_IMAGE" \
   --servers 1 --agents 0 \
@@ -168,9 +274,9 @@ timeout 120s go build -trimpath -o "$binary" "$ROOT_DIR"
 
 if [[ "$mode" == "scripted" ]]; then
   timeout "$TOTAL_TIMEOUT_SECONDS" python3 "$ROOT_DIR/scripts/e2e/pty_driver.py" \
-    --binary "$binary" --kubeconfig "$kubeconfig" --context "$context_name" \
-    --namespace "$NAMESPACE" --cluster "$cluster_name" --session "$session" \
-    --artifacts "$artifact_root"
+    --binary "$binary" --kubeconfig "$kubeconfig" --xdg-config "$xdg_config" \
+    --context "$context_name" --namespace "$NAMESPACE" --cluster "$cluster_name" \
+    --session "$session" --tmux-socket "$tmux_socket" --artifacts "$artifact_root"
 else
   ttl="${SURFSK8S_AGENTIC_TTL_SECONDS:-1800}"
   if [[ ! "$ttl" =~ ^[1-9][0-9]{0,4}$ ]] || (( ttl > 86400 )); then
@@ -179,27 +285,33 @@ else
   fi
   raw_log="$artifact_root/agentic-raw-terminal.log"
   raw_log_quoted=$(printf '%q' "$raw_log")
-  tmux new-session -d -s "$session" -x 140 -y 36 \
+  tmux -L "$tmux_socket" new-session -d -s "$session" -x 140 -y 36 \
     env TERM=xterm-256color XDG_CONFIG_HOME="$xdg_config" \
     "$binary" -kubeconfig "$kubeconfig" -context "$context_name" -namespace "$NAMESPACE"
-  tmux pipe-pane -t "$session" -o "cat >> $raw_log_quoted"
-  cat <<EOF
-Agentic E2E is live for at most ${ttl}s.
-State: cluster=$cluster_name session=$session artifacts=$artifact_root
-Inspect: tmux capture-pane -p -J -t '$session' -S -
-Send text: tmux send-keys -t '$session' -l 'pods'
-Send semantic key: tmux send-keys -t '$session' Enter   # Escape, C-c, Up also work
-Attach (optional): tmux attach -t '$session'
-End UI: tmux send-keys -t '$session' q
-Cleanup now: $k3d_bin cluster delete '$cluster_name'
-The wrapper cleans up when the UI exits, on signals, or at the TTL. Set SURFSK8S_E2E_KEEP_CLUSTER=1 before launch only for explicit preservation.
-EOF
+  tmux -L "$tmux_socket" pipe-pane -t "$session" -o "cat >> $raw_log_quoted"
+  printf 'Agentic E2E is live for at most %ss.\n' "$ttl"
+  printf 'Cluster: %q\n' "$cluster_name"
+  printf 'Kubeconfig: %q\n' "$kubeconfig"
+  printf 'Context: %q\n' "$context_name"
+  printf 'Namespace: %q\n' "$NAMESPACE"
+  printf 'State root: %q\n' "$state_root"
+  printf 'XDG_CONFIG_HOME: %q\n' "$xdg_config"
+  printf 'Artifacts: %q\n' "$artifact_root"
+  printf 'tmux socket/session: %q / %q\n' "$tmux_socket" "$session"
+  printf 'kubectl: kubectl --kubeconfig %q --context %q --namespace %q get pods -o wide\n' "$kubeconfig" "$context_name" "$NAMESPACE"
+  printf 'Inspect: tmux -L %q capture-pane -p -J -t %q -S -\n' "$tmux_socket" "$session"
+  printf 'Send text: tmux -L %q send-keys -t %q -l %q\n' "$tmux_socket" "$session" pods
+  printf 'Send semantic key: tmux -L %q send-keys -t %q Enter  # Escape, C-c, Up also work\n' "$tmux_socket" "$session"
+  printf 'Attach (optional): tmux -L %q attach -t %q\n' "$tmux_socket" "$session"
+  printf 'End UI: tmux -L %q send-keys -t %q q\n' "$tmux_socket" "$session"
+  printf 'Full cleanup now: %q\n' "$cleanup_helper"
+  echo 'The wrapper uses the same helper on exit, signals, or TTL. Set SURFSK8S_E2E_KEEP_CLUSTER=1 before launch only for explicit preservation.'
   deadline=$((SECONDS + ttl))
-  while tmux has-session -t "$session" 2>/dev/null && (( SECONDS < deadline )); do
+  while tmux -L "$tmux_socket" has-session -t "$session" 2>/dev/null && (( SECONDS < deadline )); do
     sleep 1
   done
-  if tmux has-session -t "$session" 2>/dev/null; then
+  if tmux -L "$tmux_socket" has-session -t "$session" 2>/dev/null; then
     echo "agentic TTL reached; stopping session" >&2
-    tmux kill-session -t "$session"
+    tmux -L "$tmux_socket" kill-session -t "$session"
   fi
 fi

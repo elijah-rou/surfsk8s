@@ -890,6 +890,28 @@ func TestRenderDeploymentDetailsUseResponsiveGrid(t *testing.T) {
 	}
 }
 
+func TestDeploymentDetailScaleHintIsVisibleAt160Columns(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 160
+	app.height = 44
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+
+	rendered := stripUsageANSI(app.View())
+	for _, line := range strings.Split(rendered, "\n") {
+		index := strings.Index(line, "s scale")
+		if index < 0 {
+			continue
+		}
+		if lipgloss.Width(line[:index+len("s scale")]) > app.width {
+			t.Fatalf("scale hint ends outside 160-column viewport: %q", line)
+		}
+		return
+	}
+	t.Fatalf("deployment detail view has no visible scale hint at width 160:\n%s", rendered)
+}
+
 func TestRenderDeploymentDetailsFitAvailableWidth(t *testing.T) {
 	manager := newTestManager(t)
 	store := state.NewStore()
