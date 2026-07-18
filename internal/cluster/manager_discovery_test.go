@@ -10,10 +10,12 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/elijahrou/surfsk8s/internal/state"
 )
@@ -155,6 +157,65 @@ func TestDiscoveryPublishesPartialThenReplacesWithCompleteSnapshot(t *testing.T)
 	defer conn.genericMu.Unlock()
 	if got := len(conn.genericWatches); got != 0 {
 		t.Fatalf("discovery started %d generic watches", got)
+	}
+}
+
+func TestDiscoveryLaterCRDReceivesCurrentPrinterColumns(t *testing.T) {
+	client := &sequenceDiscovery{results: []discoveryResult{
+		{resources: []*metav1.APIResourceList{
+			discoveryList("v1", metav1.APIResource{Name: "pods", Kind: "Pod", Namespaced: true}),
+		}, err: discoveryPartialError()},
+		{resources: []*metav1.APIResourceList{
+			discoveryList("v1", metav1.APIResource{Name: "pods", Kind: "Pod", Namespaced: true}),
+			discoveryList("surfsk8s.dev/v1alpha1", metav1.APIResource{Name: "widgets", Kind: "Widget", Namespaced: true}),
+		}},
+	}}
+	manager, conn := newDiscoveryTestManager(client, 0)
+	dynamicClient := conn.Dynamic.(*fake.FakeDynamicClient)
+	columnLists := 0
+	dynamicClient.PrependReactor("list", "customresourcedefinitions", func(k8stesting.Action) (bool, runtime.Object, error) {
+		columnLists++
+		list := &unstructured.UnstructuredList{}
+		if columnLists == 1 {
+			return true, list, nil
+		}
+		list.Items = []unstructured.Unstructured{{Object: map[string]interface{}{
+			"spec": map[string]interface{}{
+				"group": "surfsk8s.dev",
+				"names": map[string]interface{}{"plural": "widgets"},
+				"versions": []interface{}{map[string]interface{}{
+					"name": "v1alpha1",
+					"additionalPrinterColumns": []interface{}{
+						map[string]interface{}{"name": "PHASE", "jsonPath": ".status.phase", "type": "string"},
+						map[string]interface{}{"name": "COLOR", "jsonPath": ".spec.color", "type": "string"},
+					},
+				}},
+			},
+		}}}
+		return true, list, nil
+	})
+
+	manager.discoverResources(conn.Context, conn)
+
+	if got := columnLists; got != 2 {
+		t.Fatalf("CRD printer-column lists = %d, want one per discovery attempt", got)
+	}
+	if got := manager.Version(); got != 2 {
+		t.Fatalf("version = %d, want partial and complete updates only", got)
+	}
+	var widget ResourceKind
+	for _, group := range manager.Catalog() {
+		for _, resource := range group.Resources {
+			if resource.ID == "surfsk8s.dev/widgets" {
+				widget = resource
+			}
+		}
+	}
+	if got := len(widget.PrinterColumns); got != 2 {
+		t.Fatalf("Widget printer columns = %#v", widget.PrinterColumns)
+	}
+	if widget.PrinterColumns[0].Name != "COLOR" || widget.PrinterColumns[1].Name != "PHASE" {
+		t.Fatalf("Widget printer columns = %#v", widget.PrinterColumns)
 	}
 }
 

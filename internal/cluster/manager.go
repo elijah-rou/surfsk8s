@@ -772,7 +772,6 @@ func (m *Manager) discoverResources(ctx context.Context, conn *ClusterConn) {
 	}
 	attemptLimit := len(backoffs) + 1
 	accumulated := make([]discoveredResource, 0, 128)
-	var printerColumnsByVersionKey map[string][]PrinterColumn
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
 		<-timer.C
@@ -787,7 +786,8 @@ func (m *Manager) discoverResources(ctx context.Context, conn *ClusterConn) {
 		if ctx.Err() != nil {
 			return
 		}
-		if printerColumnsByVersionKey == nil && len(resourceLists) != 0 {
+		var printerColumnsByVersionKey map[string][]PrinterColumn
+		if len(resourceLists) != 0 {
 			printerColumnsByVersionKey = fetchCustomResourcePrinterColumns(overallCtx, conn.Dynamic)
 			if ctx.Err() != nil {
 				return

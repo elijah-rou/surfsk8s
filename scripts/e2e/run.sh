@@ -302,8 +302,7 @@ k get widget alpha -o jsonpath='{.spec.color}{" "}{.status.phase}{"\n"}' | grep 
 discovery_deadline=$((SECONDS + 45))
 discovery_ready() {
   k api-resources --no-headers >"$artifact_root/discovery-readiness.log" 2>/dev/null || return 1
-  grep -Eq '^widgets[[:space:]].*surfsk8s\.dev/' "$artifact_root/discovery-readiness.log" \
-    && grep -Eq '^accesscontrolpolicies[[:space:]].*hub\.traefik\.io/' "$artifact_root/discovery-readiness.log"
+  grep -Eq '^widgets[[:space:]].*surfsk8s\.dev/' "$artifact_root/discovery-readiness.log"
 }
 until discovery_ready; do
   (( SECONDS < discovery_deadline )) || { echo "cluster discovery readiness deadline exceeded" >&2; exit 1; }

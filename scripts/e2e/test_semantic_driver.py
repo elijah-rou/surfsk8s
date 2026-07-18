@@ -239,6 +239,40 @@ class SemanticDriverContractTest(unittest.TestCase):
                         ("clear_filter",),
                     )
 
+    def test_system_catalog_additions_do_not_change_required_replay_identity(self):
+        base_catalog = (
+            "surfsk8s · resource catalog\nctx  ctx:all(1)  ns:surfsk8s-e2e  rows:9/9\n"
+            "Pods  Deployments\n2 Running  1 Running\nGROUPS\n"
+            "Workloads  (7 resources)\nCRDs  (73 resources)\n"
+            "r resource-find  enter open group  : commands"
+        )
+        hub_catalog = base_catalog.replace("rows:9/9", "rows:10/10").replace(
+            "CRDs  (73 resources)", "Hub  (29 resources)\nCRDs  (102 resources)"
+        )
+        self.assertEqual(
+            self.semantic.observe(base_catalog, "ctx").fingerprint,
+            self.semantic.observe(hub_catalog, "ctx").fingerprint,
+        )
+
+        base_finder = (
+            "surfsk8s · resource finder\nctx  ctx:all(1)  ns:surfsk8s-e2e  rows:3/3\n"
+            "RESOURCES\nDeployments  (apps · ns)\nPods  (core · ns)\n"
+            "widgets  (surfsk8s.dev · ns)\n"
+            "type to filter  enter open  esc close"
+        )
+        hub_finder = base_finder.replace("rows:3/3", "rows:4/4").replace(
+            "widgets  (surfsk8s.dev · ns)",
+            "accesscontrolpolicies  (hub.traefik.io · cluster)\nwidgets  (surfsk8s.dev · ns)",
+        )
+        base = self.semantic.observe(base_finder, "ctx")
+        self.assertEqual(base.fingerprint, self.semantic.observe(hub_finder, "ctx").fingerprint)
+        for changed in (
+            base_finder.replace("Pods  (core · ns)\n", ""),
+            base_finder.replace("widgets  (surfsk8s.dev · ns)\n", ""),
+        ):
+            with self.subTest(changed=changed):
+                self.assertNotEqual(base.fingerprint, self.semantic.observe(changed, "ctx").fingerprint)
+
     def test_ready_partial_and_complete_catalogs_share_replay_identity(self):
         complete_screen = (
             "surfsk8s · resource catalog\nctx  ctx:all(1)  ns:surfsk8s-e2e  rows:9/9\n"

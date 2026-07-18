@@ -194,15 +194,27 @@ def canonical_replay_rows(
     project_crd_count: bool = False,
 ) -> tuple[str, ...]:
     rows = canonical_semantic_rows(canonical_screen)
-    if project_crd_count:
-        rows = tuple(
-            re.sub(r"^(CRDs) \(\d+ resources\)$", r"\1 group available", row)
-            for row in rows
-        )
     projected: list[str] = []
     in_resource_usage = False
     for row in rows:
         row = re.sub(r"(?<=<CONTEXT>):discovery-partial(?=\s|$)", "", row)
+        if state in {ScreenState.CATALOG, ScreenState.RESOURCE_FINDER}:
+            row = re.sub(r"\brows:\d+/\d+\b", "rows:<DISCOVERY>", row)
+        if state == ScreenState.CATALOG and project_crd_count:
+            group_count = re.fullmatch(r"(?:│\s*)?(.+?)\s+\(\d+ resources\)(?:\s+│)?", row)
+            if group_count is not None:
+                if group_count.group(1).strip() == "CRDs":
+                    projected.append("CRDs group available")
+                continue
+        if state == ScreenState.RESOURCE_FINDER:
+            resource_row = re.fullmatch(
+                r"(?:│\s*)?(?:★\s+)?([^ ]+).*\([^()]+ · (?:ns|cluster)\)(?:\s+│)?",
+                row,
+            )
+            if resource_row is not None and resource_row.group(1).lower() not in {
+                "deployments", "pods", "widgets",
+            }:
+                continue
         if state == ScreenState.POD_DETAIL:
             if re.match(r"^(?:│\s*)?Resource usage\b", row):
                 if projected and re.fullmatch(r"╭─+╮", projected[-1]):
