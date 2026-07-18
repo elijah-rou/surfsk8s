@@ -164,6 +164,7 @@ func (m *Manager) SetDiscoveredResourcesForTest(clusterName string, resources []
 		m.resources = make(map[string][]discoveredResource, 1)
 	}
 	m.resources[clusterName] = converted
+	m.insertConnOrderLocked(clusterName)
 	m.mu.Unlock()
 	m.version.Add(1)
 }

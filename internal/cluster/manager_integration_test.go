@@ -12,14 +12,19 @@ import (
 	"github.com/elijahrou/surfsk8s/internal/state"
 )
 
-func TestManagerCloseCompletesWhenDiscoveryStalls(t *testing.T) {
+func TestManagerCloseCancelsStalledDiscoveryRequest(t *testing.T) {
 	entered := make(chan struct{}, 1)
+	requestCanceled := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		select {
 		case entered <- struct{}{}:
 		default:
 		}
 		<-r.Context().Done()
+		select {
+		case requestCanceled <- struct{}{}:
+		default:
+		}
 	}))
 	t.Cleanup(server.Close)
 
@@ -49,7 +54,7 @@ users:
 	store := state.NewStore()
 	manager, err := NewManager(store, Config{
 		KubeconfigPath:   kubeconfigPath,
-		DiscoveryTimeout: 200 * time.Millisecond,
+		DiscoveryTimeout: 30 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
@@ -68,14 +73,23 @@ users:
 	}
 
 	done := make(chan struct{})
+	started := time.Now()
 	go func() {
 		defer close(done)
 		manager.Close()
 	}()
 
 	select {
+	case <-requestCanceled:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Manager.Close did not cancel the discovery HTTP request")
+	}
+	select {
 	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("Manager.Close blocked while discovery stalled")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Manager.Close blocked after discovery request cancellation")
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("Manager.Close took %s with a 30s REST timeout", elapsed)
 	}
 }

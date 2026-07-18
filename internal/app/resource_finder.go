@@ -30,7 +30,14 @@ func (a *App) openResourceFinder() tea.Cmd {
 }
 
 func (a *App) refreshResourceFinder() {
-	a.lastManagerVersion = a.manager.Version()
+	managerVersion := a.manager.Version()
+	selectedResourceID := ""
+	if managerVersion != a.lastManagerVersion {
+		if selected, ok := a.selectedResourceFinderResource(); ok {
+			selectedResourceID = selected.ID
+		}
+	}
+	a.lastManagerVersion = managerVersion
 	a.lastTick = time.Now()
 	a.resourceFinderItems = buildResourceFinderItems(applyFavoriteResources(a.manager.Catalog(), a.favoriteResourceIDs))
 	a.visibleResourceItems = fuzzyResourceFinderItems(a.resourceFinderItems, a.resourceFinderQuery)
@@ -38,6 +45,12 @@ func (a *App) refreshResourceFinder() {
 	a.totalRows = len(a.resourceFinderItems)
 	a.setNavTable("RESOURCES", renderResourceFinderRows(a.visibleResourceItems, a.favoriteResources))
 	a.navTable.MoveTop()
+	for index, item := range a.visibleResourceItems {
+		if item.resource.ID == selectedResourceID {
+			a.navTable.SetCursor(index)
+			break
+		}
+	}
 }
 
 func buildResourceFinderItems(groups []cluster.ResourceGroup) []resourceFinderItem {

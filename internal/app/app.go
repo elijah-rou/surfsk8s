@@ -482,7 +482,7 @@ func (a *App) Init() tea.Cmd {
 		if len(selected) != 0 {
 			a.connecting = true
 			a.activity = "connecting contexts"
-			return tea.Batch(tickCmd(), connectContextsCmd(a.manager, selected))
+			return tea.Batch(tickCmd(), connectContextsCmd(a.context, a.manager, selected))
 		}
 	}
 	return tickCmd()
@@ -1049,7 +1049,7 @@ func (a *App) updateContextKeys(msg tea.KeyMsg) tea.Cmd {
 		}
 		a.connecting = true
 		a.activity = "connecting contexts"
-		return connectContextsCmd(a.manager, selected)
+		return connectContextsCmd(a.context, a.manager, selected)
 	}
 	return nil
 }
@@ -1904,7 +1904,24 @@ func (a *App) refreshCatalog() {
 }
 
 func (a *App) refreshGroupResources() {
-	a.lastManagerVersion = a.manager.Version()
+	managerVersion := a.manager.Version()
+	catalogChanged := managerVersion != a.lastManagerVersion
+	selectedResourceID := ""
+	if catalogChanged {
+		if selected, ok := a.selectedGroupResource(); ok {
+			selectedResourceID = selected.ID
+		}
+		a.catalog = applyFavoriteResources(a.manager.Catalog(), a.favoriteResourceIDs)
+		activeGroupName := a.activeGroup.Name
+		a.activeGroup = cluster.ResourceGroup{Name: activeGroupName}
+		for _, group := range a.catalog {
+			if group.Name == activeGroupName {
+				a.activeGroup = group
+				break
+			}
+		}
+	}
+	a.lastManagerVersion = managerVersion
 	a.lastTick = time.Now()
 	resources := fuzzyResources(a.activeGroup.Resources, a.resourceQuery)
 	a.visibleResources = resources
@@ -1912,6 +1929,12 @@ func (a *App) refreshGroupResources() {
 	a.totalRows = len(a.activeGroup.Resources)
 	a.setNavTable(strings.ToUpper(a.activeGroup.Name), renderResourceRows(resources, a.favoriteResources))
 	a.navTable.MoveTop()
+	for index, resource := range resources {
+		if resource.ID == selectedResourceID {
+			a.navTable.SetCursor(index)
+			break
+		}
+	}
 }
 
 func (a *App) backToResourceOrigin() {
@@ -2482,6 +2505,8 @@ func (a *App) shouldRefresh(now time.Time) bool {
 	switch a.screen {
 	case screenCatalog:
 		return a.store.Version() != a.lastDataVersion || a.manager.Version() != a.lastManagerVersion
+	case screenGroupResources, screenResourceFinder:
+		return a.manager.Version() != a.lastManagerVersion
 	case screenPods:
 		return a.store.PodVersion() != a.lastDataVersion
 	case screenResourceList:
@@ -2791,10 +2816,13 @@ func tickCmd() tea.Cmd {
 	})
 }
 
-func connectContextsCmd(manager *cluster.Manager, contexts []string) tea.Cmd {
+func connectContextsCmd(ctx context.Context, manager *cluster.Manager, contexts []string) tea.Cmd {
+	if ctx == nil {
+		panic("app.connectContextsCmd: nil context")
+	}
 	contextsCopy := append([]string(nil), contexts...)
 	return func() tea.Msg {
-		err := manager.Connect(context.Background(), contextsCopy)
+		err := manager.Connect(ctx, contextsCopy)
 		return connectResultMsg{contexts: contextsCopy, err: err}
 	}
 }

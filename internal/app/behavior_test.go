@@ -1806,6 +1806,85 @@ func TestFuzzyResourcesSortsStrongestResourceMatchFirst(t *testing.T) {
 	}
 }
 
+func TestResourceFinderRefreshesAfterDiscoveryAndPreservesSelection(t *testing.T) {
+	manager := newTestManager(t)
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceFinder
+	app.resourceFinderQuery = "example"
+	app.refreshResourceFinder()
+	for index, item := range app.visibleResourceItems {
+		if item.resource.ID == "example.dev/zetas" {
+			app.navTable.SetCursor(index)
+		}
+	}
+
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "widgets", Kind: "Widget"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	if !app.shouldRefresh(time.Now()) {
+		t.Fatal("resource finder did not observe Manager.Version")
+	}
+	app.refreshCurrentScreen(time.Now())
+	if got := app.resourceFinderQuery; got != "example" {
+		t.Fatalf("query = %q", got)
+	}
+	selected, ok := app.selectedResourceFinderResource()
+	if !ok || selected.ID != "example.dev/zetas" {
+		t.Fatalf("selected resource = %#v, ok=%t, visible=%#v, items=%d", selected, ok, app.visibleResourceItems, len(app.resourceFinderItems))
+	}
+	foundWidget := false
+	for _, item := range app.visibleResourceItems {
+		foundWidget = foundWidget || item.resource.ID == "example.dev/widgets"
+	}
+	if !foundWidget {
+		t.Fatal("newly discovered Widget missing from finder")
+	}
+}
+
+func TestGroupedCRDsRefreshAfterDiscoveryAndPreserveSelection(t *testing.T) {
+	manager := newTestManager(t)
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenGroupResources
+	app.activeGroup, _ = app.catalogGroupByName("CRDs")
+	app.resourceQuery = "example"
+	app.refreshGroupResources()
+	for index, resource := range app.visibleResources {
+		if resource.ID == "example.dev/zetas" {
+			app.navTable.SetCursor(index)
+		}
+	}
+
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "widgets", Kind: "Widget"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	if !app.shouldRefresh(time.Now()) {
+		t.Fatal("group resource screen did not observe Manager.Version")
+	}
+	app.refreshCurrentScreen(time.Now())
+	if got := app.resourceQuery; got != "example" {
+		t.Fatalf("query = %q", got)
+	}
+	selected, ok := app.selectedGroupResource()
+	if !ok || selected.ID != "example.dev/zetas" {
+		t.Fatalf("selected resource = %#v, ok=%t, visible=%#v, active=%#v", selected, ok, app.visibleResources, app.activeGroup)
+	}
+	if got := len(app.activeGroup.Resources); got != 3 {
+		t.Fatalf("active CRD group resources = %d, want 3", got)
+	}
+}
+
 func TestResourceFinderSortsStrongestResourceMatchFirst(t *testing.T) {
 	items := []resourceFinderItem{
 		{resource: cluster.ResourceKind{ID: "example.dev/services", Display: "Backends", Kind: "Backend", Resource: "backends", APIGroup: "services.example.dev"}, group: "Custom"},
