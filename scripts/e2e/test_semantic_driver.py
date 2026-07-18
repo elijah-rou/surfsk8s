@@ -89,6 +89,46 @@ class SemanticDriverContractTest(unittest.TestCase):
         )
         self.assertNotEqual(red.fingerprint, green.fingerprint)
 
+    def test_pod_detail_replay_identity_ignores_only_volatile_usage_values(self):
+        first = self.semantic.observe(
+            "surfsk8s · pod details\n"
+            "Name: log-marker  Namespace: surfsk8s-e2e  Phase: Running  Ready: 1/1  Restarts: 0\n"
+            "╭────────────────────────╮\nResource usage (updated 1s ago):\n- CPU 2m / 100m  ██\n- Memory 8Mi / 32Mi  █\n- Ephemeral 4Ki\n╰────────────────────────╯\n"
+            "Conditions\n- Ready=True\nLabels:\n- app=log-marker\n"
+            "Containers\n- logger image=busybox:1.36.1\nl logs  esc back",
+            "ctx",
+        )
+        second = self.semantic.observe(
+            "surfsk8s · pod details\n"
+            "Name: log-marker  Namespace: surfsk8s-e2e  Phase: Running  Ready: 1/1  Restarts: 0\n"
+            "╭────────────────────────────────╮\nResource usage (updated 9s ago):\n- CPU 91m / 100m  █████\n- Memory 31Mi / 32Mi  █████\n- Ephemeral 900Ki\n╰────────────────────────────────╯\n"
+            "Conditions\n- Ready=True\nLabels:\n- app=log-marker\n"
+            "Containers\n- logger image=busybox:1.36.1\nl logs  esc back",
+            "ctx",
+        )
+        self.assertEqual(first.fingerprint, second.fingerprint)
+        self.assertNotEqual(first.raw_hash, second.raw_hash)
+
+    def test_pod_detail_replay_identity_retains_meaningful_facts(self):
+        base = (
+            "surfsk8s · pod details\n"
+            "Name: log-marker  Namespace: surfsk8s-e2e  Phase: Running  Ready: 1/1  Restarts: 0\n"
+            "Resource usage (updated 1s ago):\n- CPU 2m / 100m\n- Memory 8Mi / 32Mi\n- Ephemeral 4Ki\n"
+            "Conditions\n- Ready=True\nLabels:\n- app=log-marker\n"
+            "Containers\n- logger image=busybox:1.36.1\nl logs  esc back"
+        )
+        observation = self.semantic.observe(base, "ctx")
+        changes = {
+            "name": base.replace("Name: log-marker", "Name: other"),
+            "phase": base.replace("Phase: Running", "Phase: Failed"),
+            "ready": base.replace("Ready: 1/1", "Ready: 0/1"),
+            "container": base.replace("logger image=busybox:1.36.1", "sidecar image=busybox:1.36.1"),
+            "image": base.replace("busybox:1.36.1", "busybox:1.35.0"),
+        }
+        for fact, changed in changes.items():
+            with self.subTest(fact=fact):
+                self.assertNotEqual(self.semantic.observe(changed, "ctx").fingerprint, observation.fingerprint)
+
     def test_context_and_ages_are_canonicalized(self):
         first = self.semantic.observe(
             "surfsk8s · select contexts\n[x] k3d-surfsk8s-e2e-abc\nAGE 12s\nenter connect  q quit",
@@ -199,24 +239,29 @@ class SemanticDriverContractTest(unittest.TestCase):
                         ("clear_filter",),
                     )
 
-    def test_connect_catalog_waits_for_discovery_convergence_without_crd_count_dependency(self):
+    def test_ready_partial_and_complete_catalogs_share_replay_identity(self):
+        complete_screen = (
+            "surfsk8s · resource catalog\nctx  ctx:all(1)  ns:surfsk8s-e2e  rows:9/9\n"
+            "Pods  Deployments\n2 Running  1 Running\nGROUPS\nCRDs  (73 resources)\n"
+            "r resource-find  enter open group  : commands"
+        )
+        partial_screen = complete_screen.replace("ctx  ctx:all", "ctx:discovery-partial  ctx:all").replace(
+            "CRDs  (73 resources)", "CRDs  (44 resources)"
+        )
+        complete = self.semantic.observe(complete_screen, "ctx")
+        partial = self.semantic.observe(partial_screen, "ctx")
+        self.assertEqual(partial.fingerprint, complete.fingerprint)
+        self.assertNotEqual(partial.raw_hash, complete.raw_hash)
+        self.assertIn("discovery-partial", partial.canonical_screen)
+
+    def test_connect_catalog_requires_visible_typed_and_crd_capabilities(self):
         before = self.semantic.observe(
             "surfsk8s · select contexts\n[x] ctx\nenter connect  q quit", "ctx"
         )
-        partial = (
-            "surfsk8s · resource catalog\nGROUPS\n2 Running\n1 Running\nCRDs  (999 resources)\n"
-            "discovery-partial\nr resource-find  enter open group  : commands"
-        )
-        converged = partial.replace("discovery-partial\n", "")
 
         class FakeDriver:
             context = "ctx"
             session = "session"
-
-            def __init__(self, artifacts):
-                self.artifacts = artifacts
-                self.screens = [partial, partial, partial, converged, converged, converged]
-                self.capture_count = 0
 
             def tmux(self, *args, **kwargs):
                 return types.SimpleNamespace(returncode=0)
@@ -224,25 +269,67 @@ class SemanticDriverContractTest(unittest.TestCase):
             def key(self, value):
                 self.key_sent = value
 
-            def capture(self):
-                self.capture_count += 1
-                return self.screens.pop(0) if self.screens else converged
+        walk = self.semantic.SemanticWalkthrough(FakeDriver(), 1)
+        predicate = walk._execute(self.semantic.Action("connect"), before)
+        ready_screen = (
+            "surfsk8s · resource catalog\nctx:discovery-partial  ctx:all(1)\n"
+            "Pods  Deployments\n2 Running  1 Running\nGROUPS\nCRDs  (999 resources)\n"
+            "r resource-find  enter open group  : commands"
+        )
+        ready = self.semantic.observe(ready_screen, "ctx")
+        self.assertTrue(predicate(ready))
+        missing_facts = {
+            "pods": ready_screen.replace("Pods", "Services"),
+            "deployments": ready_screen.replace("Deployments", "Services"),
+            "pod readiness": ready_screen.replace("2 Running", "1 Running"),
+            "deployment readiness": ready_screen.replace("1 Running", "0 Running"),
+            "CRDs": ready_screen.replace("CRDs  (999 resources)", "Cluster  (999 resources)"),
+            "resource finder": ready_screen.replace("r resource-find  ", ""),
+            "commands": ready_screen.replace("  : commands", ""),
+            "open group": ready_screen.replace("enter open group  ", ""),
+        }
+        for fact, screen in missing_facts.items():
+            with self.subTest(fact=fact):
+                missing = self.semantic.observe(screen, "ctx")
+                self.assertFalse(predicate(missing))
+                self.assertNotEqual(missing.fingerprint, ready.fingerprint)
 
-        with tempfile.TemporaryDirectory() as temporary:
-            driver = FakeDriver(pathlib.Path(temporary))
-            walk = self.semantic.SemanticWalkthrough(driver, 1)
-            walk.deadline = time.monotonic() + 2
-            predicate = walk._execute(self.semantic.Action("connect"), before)
-            old_interval = self.semantic.POLL_INTERVAL_SECONDS
-            self.semantic.POLL_INTERVAL_SECONDS = 0
-            try:
-                result = walk._poll_transition(before, predicate, 0)
-            finally:
-                self.semantic.POLL_INTERVAL_SECONDS = old_interval
+    def test_other_meaningful_catalog_status_and_content_change_replay_identity(self):
+        base_screen = (
+            "surfsk8s · resource catalog\nctx  ctx:all(1)\nPods  Deployments\n"
+            "2 Running  1 Running\nGROUPS\nCRDs  (73 resources)\n"
+            "r resource-find  enter open group  : commands"
+        )
+        base = self.semantic.observe(base_screen, "ctx")
+        for changed_screen in (
+            base_screen.replace("ctx  ctx:all", "ctx:discovery-error  ctx:all"),
+            base_screen.replace("GROUPS", "GROUPS\nFavourites renamed"),
+        ):
+            with self.subTest(changed_screen=changed_screen):
+                self.assertNotEqual(self.semantic.observe(changed_screen, "ctx").fingerprint, base.fingerprint)
 
-        self.assertEqual(driver.key_sent, "Enter")
-        self.assertEqual(driver.capture_count, 6)
-        self.assertNotIn("discovery-partial", result.canonical_screen)
+    def test_resource_finder_missing_widget_fails_widget_route_transition(self):
+        before = self.semantic.observe(
+            "surfsk8s · resource finder\nPods\ntype to filter  enter open  esc close", "ctx"
+        )
+
+        class FakeDriver:
+            context = "ctx"
+            session = "session"
+
+            def tmux(self, *args, **kwargs):
+                return types.SimpleNamespace(returncode=0)
+
+            def literal(self, value):
+                self.literal_sent = value
+
+        walk = self.semantic.SemanticWalkthrough(FakeDriver(), 1)
+        predicate = walk._execute(self.semantic.Action("filter_resource:widgets"), before)
+        missing_widget = self.semantic.observe(
+            "surfsk8s · resource finder\nNo resources\ntype to filter  enter open  esc close", "ctx"
+        )
+        self.assertEqual(walk.driver.literal_sent, "widgets")
+        self.assertFalse(predicate(missing_widget))
 
     def test_no_candidates_and_destructive_replay_actions_fail_closed(self):
         observation = self.semantic.observe(

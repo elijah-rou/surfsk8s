@@ -8,10 +8,19 @@ readonly K3S_VERSION="v1.35.1-k3s1"
 readonly K3S_IMAGE="rancher/k3s:${K3S_VERSION}@sha256:634920385dc89133d80060b3a3b2b547e734d711ef8c050e6b5c6341800d53fd"
 readonly TOTAL_TIMEOUT_SECONDS=420
 readonly DEFAULT_RAW_CAPTURE_MAX_BYTES=$((16 * 1024 * 1024))
+usage() {
+  printf 'usage: %s [--agentic | --semantic [--seed UINT64 | --replay PATH]]\n' "$0"
+}
+
 mode="scripted"
 semantic_seed=""
 semantic_replay=""
-if [[ "${1:-}" == "--agentic" && $# -eq 1 ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+  usage
+  exit 0
+elif [[ "${1:-}" == "--agentic" ]]; then
+  [[ $# -eq 1 ]] || { usage >&2; exit 2; }
   mode="agentic"
 elif [[ "${1:-}" == "--semantic" ]]; then
   mode="semantic"
@@ -33,7 +42,7 @@ elif [[ "${1:-}" == "--semantic" ]]; then
     *) echo "usage: $0 --semantic [--seed UINT64 | --replay PATH]" >&2; exit 2 ;;
   esac
 elif [[ $# -ne 0 ]]; then
-  echo "usage: $0 [--agentic | --semantic [--seed UINT64 | --replay PATH]]" >&2
+  usage >&2
   exit 2
 fi
 
@@ -290,6 +299,16 @@ k apply -f "$ROOT_DIR/scripts/e2e/fixtures.yaml" >"$artifact_root/fixture-apply.
 k wait --for=condition=Ready pod/log-marker --timeout=90s
 k rollout status deployment/scalable --timeout=90s
 k get widget alpha -o jsonpath='{.spec.color}{" "}{.status.phase}{"\n"}' | grep -Fx 'blue Stable'
+discovery_deadline=$((SECONDS + 45))
+discovery_ready() {
+  k api-resources --no-headers >"$artifact_root/discovery-readiness.log" 2>/dev/null || return 1
+  grep -Eq '^widgets[[:space:]].*surfsk8s\.dev/' "$artifact_root/discovery-readiness.log" \
+    && grep -Eq '^accesscontrolpolicies[[:space:]].*hub\.traefik\.io/' "$artifact_root/discovery-readiness.log"
+}
+until discovery_ready; do
+  (( SECONDS < discovery_deadline )) || { echo "cluster discovery readiness deadline exceeded" >&2; exit 1; }
+  sleep 1
+done
 
 echo "building surfsk8s once"
 timeout 120s go build -trimpath -o "$binary" "$ROOT_DIR"

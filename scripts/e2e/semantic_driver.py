@@ -188,6 +188,37 @@ def canonical_semantic_rows(canonical_screen: str) -> tuple[str, ...]:
     return tuple(rows)
 
 
+def canonical_replay_rows(
+    canonical_screen: str,
+    state: ScreenState,
+    project_crd_count: bool = False,
+) -> tuple[str, ...]:
+    rows = canonical_semantic_rows(canonical_screen)
+    if project_crd_count:
+        rows = tuple(
+            re.sub(r"^(CRDs) \(\d+ resources\)$", r"\1 group available", row)
+            for row in rows
+        )
+    projected: list[str] = []
+    in_resource_usage = False
+    for row in rows:
+        row = re.sub(r"(?<=<CONTEXT>):discovery-partial(?=\s|$)", "", row)
+        if state == ScreenState.POD_DETAIL:
+            if re.match(r"^(?:│\s*)?Resource usage\b", row):
+                if projected and re.fullmatch(r"╭─+╮", projected[-1]):
+                    projected[-1] = "<RESOURCE_USAGE_BORDER>"
+                in_resource_usage = True
+            usage = re.match(r"^(│\s*)?-\s*(CPU|Memory|Ephemeral)\b", row)
+            if usage is not None:
+                border = " │" if row.endswith("│") else ""
+                row = f"{usage.group(1) or ''}- {usage.group(2)} <VOLATILE_USAGE>{border}"
+            elif in_resource_usage and re.fullmatch(r"╰─+╯", row):
+                row = "<RESOURCE_USAGE_BORDER>"
+                in_resource_usage = False
+        projected.append(row)
+    return tuple(projected)
+
+
 def _classify(screen: str) -> ScreenState:
     restoration = re.search(r"SURFSK8S_SHELL_RESTORED rc=([^\s]+)", screen)
     if restoration is not None and restoration.group(1) != "0":
@@ -217,6 +248,22 @@ def _classify(screen: str) -> ScreenState:
     return matches[0]
 
 
+def catalog_capabilities_ready(
+    state: ScreenState,
+    affordances: tuple[str, ...],
+    targets: tuple[str, ...],
+    canonical_screen: str,
+) -> bool:
+    return (
+        state == ScreenState.CATALOG
+        and {"catalog", "deployments", "pods"}.issubset(targets)
+        and {"commands", "open", "resource_finder"}.issubset(affordances)
+        and "2 Running" in canonical_screen
+        and "1 Running" in canonical_screen
+        and re.search(r"(?m)^\s*CRDs(?:\s|$)", canonical_screen) is not None
+    )
+
+
 def observe(screen: str, context: str) -> Observation:
     normalized = normalize_terminal(screen)
     encoded = normalized.encode("utf-8")
@@ -228,9 +275,10 @@ def observe(screen: str, context: str) -> Observation:
     ))
     targets = tuple(sorted(target for target in SAFE_TARGETS if re.search(r"(?<![\w-])" + re.escape(target) + r"(?![\w-])", normalized, re.IGNORECASE)))
     canonical = canonicalize_screen(normalized, context)
-    semantic_rows = canonical_semantic_rows(canonical)
+    project_crd_count = catalog_capabilities_ready(state, affordances, targets, canonical)
+    replay_rows = canonical_replay_rows(canonical, state, project_crd_count)
     identity = json.dumps(
-        {"state": state.value, "affordances": affordances, "targets": targets, "rows": semantic_rows},
+        {"state": state.value, "affordances": affordances, "targets": targets, "rows": replay_rows},
         sort_keys=True,
         separators=(",", ":"),
     )
@@ -260,6 +308,15 @@ def exact_detail_filter_target(observation: Observation) -> str | None:
     if set(observation.targets) & detail_targets != {target}:
         return None
     return target
+
+
+def connect_catalog_ready(observation: Observation) -> bool:
+    return catalog_capabilities_ready(
+        observation.state,
+        observation.affordances,
+        observation.targets,
+        observation.canonical_screen,
+    )
 
 
 def candidates(observation: Observation, goals: frozenset[str]) -> tuple[Action, ...]:
@@ -534,13 +591,7 @@ class SemanticWalkthrough:
             self.driver.key("Enter")
             return lambda observation: (
                 observation.state == ScreenState.GROUP_RESOURCES
-                or (
-                    observation.state == ScreenState.CATALOG
-                    and "discovery-partial" not in observation.canonical_screen
-                    and "2 Running" in observation.canonical_screen
-                    and "1 Running" in observation.canonical_screen
-                    and re.search(r"(?m)^\s*CRDs(?:\s|$)", observation.canonical_screen) is not None
-                )
+                or connect_catalog_ready(observation)
             )
         elif action_id == "open_commands":
             self.driver.literal(":")
