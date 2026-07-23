@@ -1,0 +1,37 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.surfsk8s.dev
+spec:
+  group: surfsk8s.dev
+  scope: Namespaced
+  names:
+    plural: widgets
+    singular: widget
+    kind: Widget
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      additionalPrinterColumns:
+        - name: PHASE
+          type: string
+          jsonPath: .status.phase
+        - name: COLOR
+          type: string
+          jsonPath: .spec.color
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [color]
+              properties:
+                color:
+                  type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string

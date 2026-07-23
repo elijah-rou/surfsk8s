@@ -2,7 +2,12 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -25,8 +31,9 @@ import (
 )
 
 type Config struct {
-	KubeconfigPath string
-	Context        string
+	KubeconfigPath   string
+	Context          string
+	DiscoveryTimeout time.Duration
 }
 
 type ContextInfo struct {
@@ -42,6 +49,7 @@ type ClusterConn struct {
 	Clientset kubernetes.Interface
 	Dynamic   dynamic.Interface
 	REST      rest.Interface
+	Discovery discovery.DiscoveryInterface
 	Watcher   *informer.Watcher
 	Cancel    context.CancelFunc
 	Context   context.Context
@@ -53,11 +61,18 @@ type ClusterConn struct {
 	Synced  atomic.Bool
 	message atomic.Value
 	warning atomic.Value
+
+	discoveryContext context.Context
+	discoveryCancel  context.CancelFunc
 }
 
 // Manager holds concurrent connections to multiple k8s clusters.
 // Each cluster gets its own clientset and informer factory.
-const genericChangeHistoryLimit = 2048
+const (
+	genericChangeHistoryLimit = 2048
+	discoveryOverallTimeout   = 20 * time.Second
+	maxDiscoveryAttempts      = 4
+)
 
 type GenericResourceChange struct {
 	Version uint64
@@ -71,14 +86,17 @@ type Manager struct {
 	mu sync.RWMutex
 	wg sync.WaitGroup
 
-	store     *state.Store
-	rawConfig clientcmdapi.Config
-	contexts  []ContextInfo
-	conns     map[string]*ClusterConn
-	connOrder []string // sorted context names; mirrors keys in conns
-	resources map[string][]discoveredResource
-	closed    bool
-	version   atomic.Uint64
+	store                   *state.Store
+	discoveryTimeout        time.Duration
+	discoveryOverallTimeout time.Duration
+	discoveryRetryBackoffs  []time.Duration
+	rawConfig               clientcmdapi.Config
+	contexts                []ContextInfo
+	conns                   map[string]*ClusterConn
+	connOrder               []string // sorted context names; mirrors keys in conns
+	resources               map[string][]discoveredResource
+	closed                  bool
+	version                 atomic.Uint64
 
 	genericVersionMu sync.RWMutex
 	genericVersions  map[string]uint64
@@ -89,6 +107,13 @@ func NewManager(store *state.Store, cfg Config) (*Manager, error) {
 	if store == nil {
 		panic("cluster.NewManager: nil store")
 	}
+	discoveryTimeout := cfg.DiscoveryTimeout
+	if discoveryTimeout == 0 {
+		discoveryTimeout = 4 * time.Second
+	}
+	if discoveryTimeout < 0 {
+		return nil, fmt.Errorf("discovery timeout must be >= 0")
+	}
 
 	rawConfig, contexts, err := loadContexts(cfg)
 	if err != nil {
@@ -96,13 +121,16 @@ func NewManager(store *state.Store, cfg Config) (*Manager, error) {
 	}
 
 	return &Manager{
-		store:           store,
-		rawConfig:       rawConfig,
-		contexts:        contexts,
-		conns:           make(map[string]*ClusterConn, max(1, len(contexts))),
-		resources:       make(map[string][]discoveredResource, max(1, len(contexts))),
-		genericVersions: make(map[string]uint64, 8),
-		genericChanges:  make(map[string][]GenericResourceChange, 8),
+		store:                   store,
+		discoveryTimeout:        discoveryTimeout,
+		discoveryOverallTimeout: discoveryOverallTimeout,
+		discoveryRetryBackoffs:  []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second},
+		rawConfig:               rawConfig,
+		contexts:                contexts,
+		conns:                   make(map[string]*ClusterConn, max(1, len(contexts))),
+		resources:               make(map[string][]discoveredResource, max(1, len(contexts))),
+		genericVersions:         make(map[string]uint64, 8),
+		genericChanges:          make(map[string][]GenericResourceChange, 8),
 	}, nil
 }
 
@@ -275,29 +303,54 @@ func (m *Manager) ConnectContext(ctx context.Context, contextName string) (*Clus
 		return nil, fmt.Errorf("load kubeconfig context %q: %w", contextName, err)
 	}
 
+	connCtx, cancel := context.WithCancel(ctx)
+	discoveryCtx, discoveryCancel := context.WithTimeout(connCtx, m.discoveryOverallTimeout)
+	cancelClients := func() {
+		discoveryCancel()
+		cancel()
+	}
 	clientset, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
+		cancelClients()
 		m.mu.Unlock()
 		return nil, fmt.Errorf("create clientset for context %q: %w", contextName, err)
 	}
 	dynamicClient, err := dynamic.NewForConfig(restConfig)
 	if err != nil {
+		cancelClients()
 		m.mu.Unlock()
 		return nil, fmt.Errorf("create dynamic client for context %q: %w", contextName, err)
 	}
+	discoveryConfig := rest.CopyConfig(restConfig)
+	discoveryConfig.Timeout = m.discoveryTimeout
+	previousWrapTransport := discoveryConfig.WrapTransport
+	discoveryConfig.WrapTransport = func(transport http.RoundTripper) http.RoundTripper {
+		if previousWrapTransport != nil {
+			transport = previousWrapTransport(transport)
+		}
+		return discoveryContextTransport{context: discoveryCtx, transport: transport}
+	}
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(discoveryConfig)
+	if err != nil {
+		cancelClients()
+		m.mu.Unlock()
+		return nil, fmt.Errorf("create discovery client for context %q: %w", contextName, err)
+	}
 
-	connCtx, cancel := context.WithCancel(ctx)
 	watcher := informer.NewWatcher(clientset, contextName, m.store)
 	conn := &ClusterConn{
-		ID:             contextName,
-		Name:           contextName,
-		Clientset:      clientset,
-		Dynamic:        dynamicClient,
-		REST:           clientset.CoreV1().RESTClient(),
-		Watcher:        watcher,
-		Cancel:         cancel,
-		Context:        connCtx,
-		genericWatches: make(map[string]*genericResourceWatch, 4),
+		ID:               contextName,
+		Name:             contextName,
+		Clientset:        clientset,
+		Dynamic:          dynamicClient,
+		REST:             clientset.CoreV1().RESTClient(),
+		Discovery:        discoveryClient,
+		Watcher:          watcher,
+		Cancel:           cancel,
+		Context:          connCtx,
+		genericWatches:   make(map[string]*genericResourceWatch, 4),
+		discoveryContext: discoveryCtx,
+		discoveryCancel:  discoveryCancel,
 	}
 	conn.message.Store("connecting")
 	m.conns[contextName] = conn
@@ -348,8 +401,8 @@ func (m *Manager) Catalog() []ResourceGroup {
 
 	merged := make([]discoveredResource, 0, 128)
 	seen := make(map[string]struct{}, 128)
-	for _, resources := range m.resources {
-		for _, resource := range resources {
+	for _, connectionName := range m.connOrder {
+		for _, resource := range m.resources[connectionName] {
 			key := resourceKey(resource.APIGroup, resource.Resource)
 			if _, ok := seen[key]; ok {
 				continue
@@ -670,26 +723,107 @@ func (m *Manager) awaitInitialSync(ctx context.Context, conn *ClusterConn) {
 	}
 }
 
-func (m *Manager) discoverResources(ctx context.Context, conn *ClusterConn) {
-	resourceLists, err := conn.Clientset.Discovery().ServerPreferredResources()
-	if err != nil {
-		switch {
-		case apierrors.IsNotFound(err):
-			conn.warning.Store("discovery-not-found")
-		case isPartialDiscoveryError(err):
-			conn.warning.Store("discovery-partial")
-		default:
-			conn.message.Store("discovery-error")
-		}
-		m.version.Add(1)
-	}
-	if ctx.Err() != nil {
-		return
-	}
+type discoveryContextTransport struct {
+	context   context.Context
+	transport http.RoundTripper
+}
 
-	printerColumnsByVersionKey := fetchCustomResourcePrinterColumns(ctx, conn.Dynamic)
-	resources := make([]discoveredResource, 0, 128)
-	seen := make(map[string]struct{}, 128)
+func (t discoveryContextTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request == nil {
+		panic("cluster.discoveryContextTransport.RoundTrip: nil request")
+	}
+	if t.context == nil {
+		panic("cluster.discoveryContextTransport.RoundTrip: nil context")
+	}
+	if t.transport == nil {
+		panic("cluster.discoveryContextTransport.RoundTrip: nil transport")
+	}
+	return t.transport.RoundTrip(request.Clone(t.context))
+}
+
+func (m *Manager) discoverResources(ctx context.Context, conn *ClusterConn) {
+	if ctx == nil {
+		panic("cluster.Manager.discoverResources: nil context")
+	}
+	if conn == nil {
+		panic("cluster.Manager.discoverResources: nil connection")
+	}
+	discoveryClient := conn.Discovery
+	if discoveryClient == nil {
+		discoveryClient = conn.Clientset.Discovery()
+	}
+	overallCtx := conn.discoveryContext
+	cancelOverall := conn.discoveryCancel
+	if overallCtx == nil {
+		timeout := m.discoveryOverallTimeout
+		if timeout <= 0 {
+			timeout = discoveryOverallTimeout
+		}
+		overallCtx, cancelOverall = context.WithTimeout(ctx, timeout)
+	}
+	if cancelOverall == nil {
+		panic("cluster.Manager.discoverResources: nil discovery cancel")
+	}
+	defer cancelOverall()
+
+	backoffs := m.discoveryRetryBackoffs
+	if len(backoffs) > maxDiscoveryAttempts-1 {
+		backoffs = backoffs[:maxDiscoveryAttempts-1]
+	}
+	attemptLimit := len(backoffs) + 1
+	accumulated := make([]discoveredResource, 0, 128)
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
+
+	for attempt := 0; attempt < attemptLimit; attempt++ {
+		if ctx.Err() != nil {
+			return
+		}
+		resourceLists, err := discoveryClient.ServerPreferredResources()
+		if ctx.Err() != nil {
+			return
+		}
+		var printerColumnsByVersionKey map[string][]PrinterColumn
+		if len(resourceLists) != 0 {
+			printerColumnsByVersionKey = fetchCustomResourcePrinterColumns(overallCtx, conn.Dynamic)
+			if ctx.Err() != nil {
+				return
+			}
+		}
+		resources := normalizeDiscoveredResources(resourceLists, printerColumnsByVersionKey)
+
+		if err == nil {
+			m.publishDiscoveryUpdate(conn, resources, "")
+			return
+		}
+
+		status, retryable := classifyDiscoveryError(err)
+		accumulated = unionDiscoveredResources(accumulated, resources)
+		m.publishDiscoveryUpdate(conn, accumulated, status)
+		if !retryable || attempt+1 >= attemptLimit {
+			return
+		}
+
+		backoff := backoffs[attempt]
+		if backoff < 0 {
+			panic("cluster.Manager.discoverResources: negative discovery backoff")
+		}
+		timer.Reset(backoff)
+		select {
+		case <-ctx.Done():
+			return
+		case <-overallCtx.Done():
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func normalizeDiscoveredResources(resourceLists []*metav1.APIResourceList, printerColumnsByVersionKey map[string][]PrinterColumn) []discoveredResource {
+	byKey := make(map[string]discoveredResource, len(resourceLists))
 	for _, list := range resourceLists {
 		if list == nil {
 			continue
@@ -698,33 +832,112 @@ func (m *Manager) discoverResources(ctx context.Context, conn *ClusterConn) {
 		if err != nil {
 			continue
 		}
-
 		for _, resource := range list.APIResources {
 			if resource.Name == "" || strings.Contains(resource.Name, "/") {
 				continue
 			}
 			key := resourceKey(gv.Group, resource.Name)
-			if _, ok := seen[key]; ok {
+			if _, exists := byKey[key]; exists {
 				continue
 			}
-			seen[key] = struct{}{}
-			resources = append(resources, discoveredResource{
+			byKey[key] = discoveredResource{
 				APIGroup:       gv.Group,
 				Version:        gv.Version,
 				Resource:       resource.Name,
 				Kind:           resource.Kind,
 				Namespaced:     resource.Namespaced,
 				PrinterColumns: append([]PrinterColumn(nil), printerColumnsByVersionKey[printerColumnsKey(gv.Group, gv.Version, resource.Name)]...),
-			})
+			}
 		}
 	}
-
-	m.mu.Lock()
-	if !m.closed {
-		m.resources[conn.Name] = resources
-		m.version.Add(1)
+	resources := make([]discoveredResource, 0, len(byKey))
+	for _, resource := range byKey {
+		resources = append(resources, resource)
 	}
-	m.mu.Unlock()
+	sort.Slice(resources, func(i int, j int) bool {
+		return resourceKey(resources[i].APIGroup, resources[i].Resource) < resourceKey(resources[j].APIGroup, resources[j].Resource)
+	})
+	return resources
+}
+
+func unionDiscoveredResources(current []discoveredResource, incoming []discoveredResource) []discoveredResource {
+	byKey := make(map[string]discoveredResource, len(current)+len(incoming))
+	for _, resource := range current {
+		byKey[resourceKey(resource.APIGroup, resource.Resource)] = resource
+	}
+	for _, resource := range incoming {
+		key := resourceKey(resource.APIGroup, resource.Resource)
+		if _, exists := byKey[key]; !exists {
+			byKey[key] = resource
+		}
+	}
+	result := make([]discoveredResource, 0, len(byKey))
+	for _, resource := range byKey {
+		result = append(result, resource)
+	}
+	sort.Slice(result, func(i int, j int) bool {
+		return resourceKey(result[i].APIGroup, result[i].Resource) < resourceKey(result[j].APIGroup, result[j].Resource)
+	})
+	return result
+}
+
+func (m *Manager) publishDiscoveryUpdate(conn *ClusterConn, resources []discoveredResource, warning string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || conn.Context.Err() != nil {
+		return
+	}
+	currentWarning, _ := conn.warning.Load().(string)
+	if reflect.DeepEqual(m.resources[conn.Name], resources) && currentWarning == warning {
+		return
+	}
+	m.resources[conn.Name] = append([]discoveredResource(nil), resources...)
+	conn.warning.Store(warning)
+	m.version.Add(1)
+}
+
+func classifyDiscoveryError(err error) (string, bool) {
+	if err == nil {
+		panic("cluster.classifyDiscoveryError: nil error")
+	}
+	if groups, partial := discovery.GroupDiscoveryFailedErrorGroups(err); partial {
+		retryable := true
+		for _, groupErr := range groups {
+			if isPermanentDiscoveryError(groupErr) {
+				retryable = false
+				break
+			}
+		}
+		return "discovery-partial", retryable
+	}
+	if apierrors.IsNotFound(err) {
+		return "discovery-not-found", true
+	}
+	if isRetryableDiscoveryError(err) {
+		return "discovery-error", true
+	}
+	return "discovery-error", false
+}
+
+func isRetryableDiscoveryError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return true
+	}
+	var apiStatus apierrors.APIStatus
+	if errors.As(err, &apiStatus) {
+		code := apiStatus.Status().Code
+		return code == http.StatusTooManyRequests || code >= http.StatusInternalServerError
+	}
+	return false
+}
+
+func isPermanentDiscoveryError(err error) bool {
+	var syntaxError *json.SyntaxError
+	return apierrors.IsUnauthorized(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) || apierrors.IsInvalid(err) || errors.As(err, &syntaxError)
 }
 
 func (m *Manager) ensureGenericResourceWatch(conn *ClusterConn, resource ResourceKind) *genericResourceWatch {
@@ -859,15 +1072,4 @@ func loadContexts(cfg Config) (clientcmdapi.Config, []ContextInfo, error) {
 		return clientcmdapi.Config{}, nil, fmt.Errorf("kubeconfig has no contexts")
 	}
 	return *rawConfig, contexts, nil
-}
-
-func isPartialDiscoveryError(err error) bool {
-	if err == nil {
-		return false
-	}
-	_, ok := err.(*apierrors.StatusError)
-	if ok {
-		return false
-	}
-	return strings.Contains(err.Error(), "unable to retrieve the complete list of server APIs")
 }

@@ -40,7 +40,6 @@ func Execute() error {
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 
 	store := state.NewStore()
 	manager, err := cluster.NewManager(store, cluster.Config{
@@ -48,12 +47,22 @@ func Execute() error {
 		Context:        *contextName,
 	})
 	if err != nil {
+		cancel()
 		return err
 	}
-	defer closeManagerWithTimeout(manager, 5*time.Second)
+	// Cancel in-flight app/cluster work before Close so streams are torn down first.
+	defer func() {
+		cancel()
+		closeManagerWithTimeout(manager, 5*time.Second)
+	}()
 
 	program := tea.NewProgram(
-		app.New(store, manager, app.Config{InitialNamespace: *namespace, KubeconfigPath: *kubeconfig, Resume: resume}),
+		app.New(store, manager, app.Config{
+			InitialNamespace: *namespace,
+			KubeconfigPath:   *kubeconfig,
+			Resume:           resume,
+			Context:          ctx,
+		}),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 		tea.WithContext(ctx),

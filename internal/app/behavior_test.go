@@ -23,6 +23,30 @@ import (
 	"github.com/elijahrou/surfsk8s/internal/ui/components"
 )
 
+func drainCmd(t *testing.T, app *App, cmd tea.Cmd) {
+	t.Helper()
+	const maxSteps = 64
+	for step := 0; cmd != nil && step < maxSteps; step++ {
+		msg := cmd()
+		if msg == nil {
+			return
+		}
+		if batch, ok := msg.(tea.BatchMsg); ok {
+			for _, nested := range batch {
+				drainCmd(t, app, nested)
+			}
+			return
+		}
+		model, next := app.Update(msg)
+		updated, ok := model.(*App)
+		if !ok || updated == nil {
+			t.Fatalf("Update returned %T", model)
+		}
+		*app = *updated
+		cmd = next
+	}
+}
+
 func TestMatchesSearchSupportsWildcardAndExact(t *testing.T) {
 	candidate := "services serving.knative.dev namespaced"
 	if !matchesSearch(candidate, "*serv*knative*") {
@@ -866,6 +890,28 @@ func TestRenderDeploymentDetailsUseResponsiveGrid(t *testing.T) {
 	}
 }
 
+func TestDeploymentDetailScaleHintIsVisibleAt160Columns(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	app.width = 160
+	app.height = 44
+	app.screen = screenResourceDetails
+	app.activeResource = cluster.ResourceKind{Display: "Deployments", Resource: "deployments", APIGroup: "apps", Namespaced: true}
+
+	rendered := stripUsageANSI(app.View())
+	for _, line := range strings.Split(rendered, "\n") {
+		index := strings.Index(line, "s scale")
+		if index < 0 {
+			continue
+		}
+		if lipgloss.Width(line[:index+len("s scale")]) > app.width {
+			t.Fatalf("scale hint ends outside 160-column viewport: %q", line)
+		}
+		return
+	}
+	t.Fatalf("deployment detail view has no visible scale hint at width 160:\n%s", rendered)
+}
+
 func TestRenderDeploymentDetailsFitAvailableWidth(t *testing.T) {
 	manager := newTestManager(t)
 	store := state.NewStore()
@@ -1130,7 +1176,7 @@ func TestResourceDetailPaneSwitchIsExplicit(t *testing.T) {
 	app.screen = screenResourceDetails
 	_ = app.View()
 
-	app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	drainCmd(t, app, app.updateResourceDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}))
 	if got, want := app.screen, screenActionPicker; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
 	}
@@ -1180,7 +1226,7 @@ func TestPodDetailJumpToOwnerOffersOwnerChain(t *testing.T) {
 	app.activePod = details
 	app.screen = screenPodDetails
 
-	app.updatePodDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	drainCmd(t, app, app.updatePodDetailKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}}))
 	if got, want := app.screen, screenActionPicker; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
 	}
@@ -1226,7 +1272,7 @@ func TestDeploymentListJumpToDependentsOpensSelectedPod(t *testing.T) {
 	app.screen = screenResourceList
 	app.refreshResourceList(time.Now())
 
-	app.updateResourceListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	drainCmd(t, app, app.updateResourceListKeys(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}))
 	if got, want := app.screen, screenActionPicker; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
 	}
@@ -1760,6 +1806,85 @@ func TestFuzzyResourcesSortsStrongestResourceMatchFirst(t *testing.T) {
 	}
 }
 
+func TestResourceFinderRefreshesAfterDiscoveryAndPreservesSelection(t *testing.T) {
+	manager := newTestManager(t)
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenResourceFinder
+	app.resourceFinderQuery = "example"
+	app.refreshResourceFinder()
+	for index, item := range app.visibleResourceItems {
+		if item.resource.ID == "example.dev/zetas" {
+			app.navTable.SetCursor(index)
+		}
+	}
+
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "widgets", Kind: "Widget"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	if !app.shouldRefresh(time.Now()) {
+		t.Fatal("resource finder did not observe Manager.Version")
+	}
+	app.refreshCurrentScreen(time.Now())
+	if got := app.resourceFinderQuery; got != "example" {
+		t.Fatalf("query = %q", got)
+	}
+	selected, ok := app.selectedResourceFinderResource()
+	if !ok || selected.ID != "example.dev/zetas" {
+		t.Fatalf("selected resource = %#v, ok=%t, visible=%#v, items=%d", selected, ok, app.visibleResourceItems, len(app.resourceFinderItems))
+	}
+	foundWidget := false
+	for _, item := range app.visibleResourceItems {
+		foundWidget = foundWidget || item.resource.ID == "example.dev/widgets"
+	}
+	if !foundWidget {
+		t.Fatal("newly discovered Widget missing from finder")
+	}
+}
+
+func TestGroupedCRDsRefreshAfterDiscoveryAndPreserveSelection(t *testing.T) {
+	manager := newTestManager(t)
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	app := New(state.NewStore(), manager, Config{})
+	app.screen = screenGroupResources
+	app.activeGroup, _ = app.catalogGroupByName("CRDs")
+	app.resourceQuery = "example"
+	app.refreshGroupResources()
+	for index, resource := range app.visibleResources {
+		if resource.ID == "example.dev/zetas" {
+			app.navTable.SetCursor(index)
+		}
+	}
+
+	manager.SetDiscoveredResourcesForTest("dev", []cluster.ResourceKind{
+		{APIGroup: "example.dev", Version: "v1", Resource: "alphas", Kind: "Alpha"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "widgets", Kind: "Widget"},
+		{APIGroup: "example.dev", Version: "v1", Resource: "zetas", Kind: "Zeta"},
+	})
+	if !app.shouldRefresh(time.Now()) {
+		t.Fatal("group resource screen did not observe Manager.Version")
+	}
+	app.refreshCurrentScreen(time.Now())
+	if got := app.resourceQuery; got != "example" {
+		t.Fatalf("query = %q", got)
+	}
+	selected, ok := app.selectedGroupResource()
+	if !ok || selected.ID != "example.dev/zetas" {
+		t.Fatalf("selected resource = %#v, ok=%t, visible=%#v, active=%#v", selected, ok, app.visibleResources, app.activeGroup)
+	}
+	if got := len(app.activeGroup.Resources); got != 3 {
+		t.Fatalf("active CRD group resources = %d, want 3", got)
+	}
+}
+
 func TestResourceFinderSortsStrongestResourceMatchFirst(t *testing.T) {
 	items := []resourceFinderItem{
 		{resource: cluster.ResourceKind{ID: "example.dev/services", Display: "Backends", Kind: "Backend", Resource: "backends", APIGroup: "services.example.dev"}, group: "Custom"},
@@ -1804,8 +1929,11 @@ func TestOpenSelectedResourceFinderItemOpensResource(t *testing.T) {
 	app.filter.Activate()
 
 	cmd := app.openSelectedResourceFinderItem()
-	if cmd != nil {
-		t.Fatalf("expected open resource command nil")
+	if cmd == nil {
+		t.Fatal("expected generic resource list fetch command")
+	}
+	if !app.genericListLoading {
+		t.Fatal("expected generic resource list loading state")
 	}
 	if got, want := app.screen, screenResourceList; got != want {
 		t.Fatalf("screen = %d, want %d", got, want)
@@ -2267,8 +2395,17 @@ func TestSaveLogsToPathWritesRenderedLogs(t *testing.T) {
 	app.width = 120
 	app.logEntries = []logEntry{{UniqueKey: "1", Message: "saved line"}}
 	path := t.TempDir() + "/logs.txt"
-	if cmd := app.saveLogsToPath(path); cmd != nil {
-		t.Fatalf("expected nil cmd")
+	cmd := app.saveLogsToPath(path)
+	if cmd == nil {
+		t.Fatalf("expected async save command")
+	}
+	msg := cmd()
+	res, ok := msg.(actionResultMsg)
+	if !ok {
+		t.Fatalf("msg type %T", msg)
+	}
+	if res.err != nil {
+		t.Fatalf("save error: %v", res.err)
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
@@ -2344,6 +2481,36 @@ func TestGenericResourceListIgnoresUnrelatedManagerChurn(t *testing.T) {
 	manager.BumpVersionForTest()
 	if app.shouldRefresh(time.Now()) {
 		t.Fatalf("generic list should ignore unrelated manager churn")
+	}
+}
+
+func TestGenericResourceListAppliesChurnWhenCatalogAndGenericVersionsCoincide(t *testing.T) {
+	manager := newTestManager(t)
+	app := New(state.NewStore(), manager, Config{})
+	resource := cluster.ResourceKind{ID: "surfsk8s.dev/widgets", Display: "Widgets", Resource: "widgets", APIGroup: "surfsk8s.dev", Version: "v1alpha1", Kind: "Widget", Namespaced: true, Custom: true}
+	app.activeResource = resource
+	app.screen = screenResourceList
+	now := time.Now()
+	alpha := cluster.GenericResourceRow{Key: cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "alpha"}, Cluster: "dev", Namespace: "default", Name: "alpha"}
+	app.applyGenericListRows([]cluster.GenericResourceRow{alpha}, now, resource.ID)
+	app.lastManagerVersion = 0
+
+	beta := &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "surfsk8s.dev/v1alpha1",
+		"kind":       "Widget",
+		"metadata": map[string]interface{}{
+			"name": "beta", "namespace": "default", "resourceVersion": "2",
+		},
+	}}
+	manager.SetGenericResourceFixtureForTest(resource.ID, "dev", beta)
+	manager.BumpVersionForTest()
+	if got, want := manager.Version(), manager.GenericResourceVersion(resource.ID); got != want {
+		t.Fatalf("test requires coincident versions: catalog=%d generic=%d", got, want)
+	}
+
+	app.refreshResourceList(now.Add(time.Second))
+	if _, ok := app.genericRowsByKey[(cluster.GenericResourceKey{Cluster: "dev", Namespace: "default", Name: "beta"}).String()]; !ok {
+		t.Fatal("matching generic churn was skipped when catalog and generic versions coincided")
 	}
 }
 

@@ -1,0 +1,142 @@
+name: live-k3d-e2e
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-k3d-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deterministic-tests:
+    name: deterministic-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: 1.26.2
+          cache: true
+      - name: Run deterministic Go, Python, and shell tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v flock
+          timeout 150s go test ./... -count=1 -shuffle=on -timeout=120s
+          python3 -m unittest discover -s scripts/e2e -p 'test_*.py'
+          bash -n scripts/e2e/run.sh scripts/e2e/agentic.sh
+
+  scripted-live:
+    name: scripted-live
+    needs: deterministic-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: 1.26.2
+          cache: true
+      - name: Install pinned kubectl
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="${RUNNER_TEMP}/kubectl-bin"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 120 --output "$install_dir/kubectl" \
+            https://dl.k8s.io/release/v1.35.1/bin/linux/amd64/kubectl
+          echo '36e2f4ac66259232341dd7866952d64a958846470f6a9a6a813b9117bd965207  '"$install_dir/kubectl" | sha256sum --check
+          chmod 700 "$install_dir/kubectl"
+          echo "$install_dir" >>"$GITHUB_PATH"
+      - name: Run fixed live k3d and real-PTY scenario
+        env:
+          SURFSK8S_E2E_CACHE: ${{ runner.temp }}/surfsk8s-scripted-cache
+          SURFSK8S_E2E_ARTIFACTS: ${{ runner.temp }}/surfsk8s-scripted-artifacts
+          SURFSK8S_E2E_KEEP_CLUSTER: "0"
+        run: timeout --signal=TERM --kill-after=3m 14m ./scripts/e2e/run.sh
+      - name: Upload scripted failure diagnostics
+        if: ${{ always() && (failure() || cancelled()) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: scripted-live-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/surfsk8s-scripted-artifacts/**
+            !${{ runner.temp }}/surfsk8s-scripted-artifacts/**/kubeconfig*
+            !${{ runner.temp }}/surfsk8s-scripted-artifacts/**/xdg-config/**
+            !${{ runner.temp }}/surfsk8s-scripted-artifacts/**/*[Ss]ecret*
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 7
+
+  semantic-live:
+    name: semantic-live
+    needs: deterministic-tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version: 1.26.2
+          cache: true
+      - name: Install pinned kubectl
+        shell: bash
+        run: |
+          set -euo pipefail
+          install_dir="${RUNNER_TEMP}/kubectl-bin"
+          mkdir -p "$install_dir"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+            --connect-timeout 10 --max-time 120 --output "$install_dir/kubectl" \
+            https://dl.k8s.io/release/v1.35.1/bin/linux/amd64/kubectl
+          echo '36e2f4ac66259232341dd7866952d64a958846470f6a9a6a813b9117bd965207  '"$install_dir/kubectl" | sha256sum --check
+          chmod 700 "$install_dir/kubectl"
+          echo "$install_dir" >>"$GITHUB_PATH"
+      - name: Run seeded semantic observation-action walkthrough
+        env:
+          SURFSK8S_E2E_CACHE: ${{ runner.temp }}/surfsk8s-semantic-cache
+          SURFSK8S_E2E_ARTIFACTS: ${{ runner.temp }}/surfsk8s-semantic-artifacts
+          SURFSK8S_E2E_KEEP_CLUSTER: "0"
+        run: timeout --signal=TERM --kill-after=3m 14m ./scripts/e2e/run.sh --semantic --seed 743389
+      - name: Upload semantic success evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semantic-live-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/semantic-decisions.jsonl
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/semantic-goals.json
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/*.screen.txt
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/semantic-raw-terminal.log
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/semantic-raw-terminal.log.truncated
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/kubectl-assertions.log
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/environment.txt
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/host-restoration.txt
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/cleanup.log
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 7
+      - name: Upload semantic failure diagnostics
+        if: ${{ always() && (failure() || cancelled()) }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: semantic-live-failure-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/surfsk8s-semantic-artifacts/**
+            !${{ runner.temp }}/surfsk8s-semantic-artifacts/**/kubeconfig*
+            !${{ runner.temp }}/surfsk8s-semantic-artifacts/**/xdg-config/**
+            !${{ runner.temp }}/surfsk8s-semantic-artifacts/**/*[Ss]ecret*
+          if-no-files-found: warn
+          include-hidden-files: false
+          retention-days: 7

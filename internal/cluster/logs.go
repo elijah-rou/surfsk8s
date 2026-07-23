@@ -35,7 +35,6 @@ type PodLogsOptions struct {
 type NodeLogOptions struct {
 	Path      string
 	TailBytes int64
-	All       bool
 }
 
 func (m *Manager) PodLogs(ctx context.Context, details state.PodDetails, container string, tailLines int64, timestamps bool) (string, error) {
@@ -89,11 +88,33 @@ func (m *Manager) PodLogsWithOptions(ctx context.Context, details state.PodDetai
 	}
 	defer stream.Close()
 
-	content, err := io.ReadAll(stream)
+	return readLogStream(stream, options.LimitBytes)
+}
+
+// readLogStream consumes a log body with an optional hard client-side byte cap.
+// When limitBytes is set, the reader is capped at limit+1 and oversized bodies are rejected
+// even if the server ignored LimitBytes.
+func readLogStream(stream io.Reader, limitBytes *int64) (string, error) {
+	if stream == nil {
+		panic("cluster.readLogStream: nil stream")
+	}
+	reader := stream
+	limit := int64(-1)
+	if limitBytes != nil {
+		if *limitBytes <= 0 {
+			panic("cluster.readLogStream: non-positive limitBytes")
+		}
+		limit = *limitBytes
+		reader = io.LimitReader(stream, limit+1)
+	}
+	data, err := io.ReadAll(reader)
 	if err != nil {
 		return "", err
 	}
-	return string(content), nil
+	if limit >= 0 && int64(len(data)) > limit {
+		return "", fmt.Errorf("pod log exceeded %d byte limit", limit)
+	}
+	return string(data), nil
 }
 
 func (m *Manager) DeploymentPodDetails(details state.DeploymentDetails, now time.Time) ([]state.PodDetails, error) {
@@ -233,7 +254,7 @@ func (m *Manager) NodeLogWithOptions(ctx context.Context, details state.NodeDeta
 	if err != nil {
 		return "", err
 	}
-	if !options.All && options.TailBytes <= 0 {
+	if options.TailBytes <= 0 {
 		return "", fmt.Errorf("tail bytes must be > 0")
 	}
 
@@ -242,12 +263,20 @@ func (m *Manager) NodeLogWithOptions(ctx context.Context, details state.NodeDeta
 		return "", err
 	}
 	request := conn.REST.Get().AbsPath(buildNodeLogProxyPath(details.Row.Name, cleanPath))
-	if !options.All {
-		request = request.SetHeader("Range", fmt.Sprintf("bytes=-%d", options.TailBytes))
-	}
-	data, err := request.DoRaw(ctx)
+	request = request.SetHeader("Range", fmt.Sprintf("bytes=-%d", options.TailBytes))
+	stream, err := request.Stream(ctx)
 	if err != nil {
 		return "", err
+	}
+	defer stream.Close()
+
+	limited := io.LimitReader(stream, options.TailBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(data)) > options.TailBytes {
+		return "", fmt.Errorf("node log exceeded %d byte limit", options.TailBytes)
 	}
 	return string(data), nil
 }

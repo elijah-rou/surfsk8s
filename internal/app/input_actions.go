@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -298,6 +297,7 @@ func (a *App) runExecPod() tea.Cmd {
 		return nil
 	}
 	if len(containers) == 1 {
+		a.actionReturnScreen = a.screen
 		return a.runExecPodWithContainer(containers[0])
 	}
 	return a.openPodContainerPicker(containers)
@@ -346,6 +346,7 @@ func (a *App) runPortForwardPod() tea.Cmd {
 		return nil
 	}
 	if len(choices) == 1 {
+		a.actionReturnScreen = a.screen
 		return a.openLocalPortPrompt(pendingActionPortForwardPod, choices[0].Port)
 	}
 	return a.openPodPortPicker(choices)
@@ -422,20 +423,10 @@ func (a *App) runEditResource() tea.Cmd {
 			a.statusMessage = err.Error()
 			return nil
 		}
+		resource := a.activeResource
+		key := a.activeGenericDetails.Row.Key
 		return a.openConfirmAction(description, func() tea.Cmd {
-			details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, a.activeGenericDetails.Row.Key, time.Now())
-			if err != nil {
-				a.statusMessage = err.Error()
-				a.refreshCurrentScreen(time.Now())
-				return nil
-			}
-			a.activeGenericDetails = details
-			cmd, description, err := a.executor.EditGenericResource(a.activeResource, details)
-			if err != nil {
-				a.statusMessage = err.Error()
-				return nil
-			}
-			return runProcessCommand(cmd, description)
+			return a.fetchGenericActionRevalidateCmd(resource, key, genericActionEdit, a.actionReturnScreen)
 		})
 	}
 }
@@ -443,22 +434,14 @@ func (a *App) runEditResource() tea.Cmd {
 func (a *App) selectCurrentResourceActionTarget(now time.Time) bool {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
+		details, ok := a.selectedDeploymentDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeDeployment = details
 		return true
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
+		details, ok := a.selectedServiceDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
@@ -480,6 +463,7 @@ func (a *App) runPortForwardResource() tea.Cmd {
 		return nil
 	}
 	if len(choices) == 1 {
+		a.actionReturnScreen = a.screen
 		return a.openLocalPortPrompt(pendingActionPortForwardService, choices[0].Port)
 	}
 	return a.openServicePortPicker(choices)
@@ -536,12 +520,7 @@ func (a *App) runRestartResource() tea.Cmd {
 }
 
 func (a *App) deleteSelectedPod(now time.Time) tea.Cmd {
-	row, ok := a.podRowAt(a.podTable.SelectedIndex(), now)
-	if !ok {
-		a.statusMessage = "pod vanished during refresh"
-		return nil
-	}
-	details, ok := a.store.PodDetailsByKey(row.Key, now)
+	details, ok := a.selectedPodDetails(now)
 	if !ok {
 		a.statusMessage = "pod vanished during refresh"
 		return nil
@@ -563,49 +542,36 @@ func (a *App) deleteSelectedResource(now time.Time) tea.Cmd {
 func (a *App) selectCurrentResourceDeleteTarget(now time.Time) bool {
 	switch {
 	case a.activeResource.Resource == "deployments" && a.activeResource.APIGroup == "apps":
-		row, ok := a.deploymentRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.DeploymentDetailsByKey(row.Key, now)
+		details, ok := a.selectedDeploymentDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeDeployment = details
 		return true
 	case a.activeResource.Resource == "services" && a.activeResource.APIGroup == "":
-		row, ok := a.serviceRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.ServiceDetailsByKey(row.Key, now)
+		details, ok := a.selectedServiceDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeService = details
 		return true
 	case a.activeResource.Resource == "nodes" && a.activeResource.APIGroup == "":
-		row, ok := a.nodeRowAt(a.resourceTable.SelectedIndex(), now)
-		if !ok {
-			return false
-		}
-		details, ok := a.store.NodeDetailsByKey(row.Key, now)
+		details, ok := a.selectedNodeDetails(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
 		a.activeNode = details
 		return true
 	default:
-		row, ok := a.genericResourceRowAt(a.resourceTable.SelectedIndex(), now)
+		key, ok := a.resolveGenericSelectionKey(a.resourceTable.SelectedIndex(), now)
 		if !ok {
 			return false
 		}
-		details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, row.Key, now)
-		if err != nil {
-			a.statusMessage = err.Error()
+		row, ok := a.genericVisibleOrCachedRow(key)
+		if !ok {
 			return false
 		}
-		a.activeGenericDetails = details
+		a.activeGenericDetails = cluster.GenericResourceDetails{Row: row, Object: row.Object}
 		return true
 	}
 }
@@ -748,23 +714,10 @@ func (a *App) runDeleteGenericResource() tea.Cmd {
 	returnScreen := a.screen
 	kind := genericDeleteKind(a.activeResource)
 	confirmation := deleteConfirmationDescription(description, kind, a.activeGenericDetails.Row.Cluster, a.activeGenericDetails.Row.Namespace, a.activeGenericDetails.Row.Name)
+	resource := a.activeResource
+	key := a.activeGenericDetails.Row.Key
 	return a.openConfirmAction(confirmation, func() tea.Cmd {
-		details, err := a.manager.GenericResourceDetails(context.Background(), a.activeResource, a.activeGenericDetails.Row.Key, time.Now())
-		if err != nil {
-			a.statusMessage = err.Error()
-			a.refreshCurrentScreen(time.Now())
-			return nil
-		}
-		a.activeGenericDetails = details
-		cmd, description, err := a.executor.DeleteGenericResource(a.activeResource, details)
-		if err != nil {
-			a.statusMessage = err.Error()
-			return nil
-		}
-		if returnScreen == screenResourceDetails {
-			a.screen = screenResourceList
-		}
-		return runProcessCommand(cmd, description)
+		return a.fetchGenericActionRevalidateCmd(resource, key, genericActionDelete, returnScreen)
 	})
 }
 
