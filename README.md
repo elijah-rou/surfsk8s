@@ -261,4 +261,4 @@ The model suite stays offline and fast. The live suite creates an isolated, uniq
 
 ## License
 
-MIT
+[MIT](LICENSE)
